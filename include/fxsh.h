@@ -134,6 +134,7 @@ typedef enum {
     TOK_DOT,       /* . */
     TOK_DOTDOT,    /* .. */
     TOK_PIPE_SYM,  /* | */
+    TOK_AT,        /* @ */
 
     /* Special */
     TOK_NEWLINE,
@@ -217,6 +218,13 @@ typedef enum {
     AST_TYPE_ARROW,  /* a -> b */
     AST_TYPE_RECORD, /* {x: t} */
 
+    /* Compile-time type operators */
+    AST_CT_TYPE_OF,    /* @typeOf expr */
+    AST_CT_SIZE_OF,    /* @sizeOf type */
+    AST_CT_ALIGN_OF,   /* @alignOf type */
+    AST_CT_FIELDS_OF,  /* @fieldsOf type */
+    AST_CT_HAS_FIELD,  /* @hasField(type, "name") */
+
     /* Declarations */
     AST_DECL_LET,
     AST_DECL_FN,
@@ -229,11 +237,89 @@ typedef enum {
 } fxsh_ast_kind_t;
 
 /*=============================================================================
- * AST Node (forward declaration for recursive types)
+ * Forward Declarations
  *=============================================================================*/
 
 typedef struct fxsh_ast_node fxsh_ast_node_t;
 typedef sp_dyn_array(fxsh_ast_node_t *) fxsh_ast_list_t;
+
+/*=============================================================================
+ * Type System (forward declarations)
+ *=============================================================================*/
+
+typedef struct fxsh_type fxsh_type_t;
+typedef s32 fxsh_type_var_t;
+
+typedef enum {
+    TYPE_VAR,
+    TYPE_CON,
+    TYPE_ARROW,
+    TYPE_TUPLE,
+    TYPE_RECORD,
+    TYPE_APP,
+} fxsh_type_kind_t;
+
+typedef struct {
+    sp_str_t name;
+    fxsh_type_t *type;
+} fxsh_field_t;
+
+typedef struct {
+    sp_dyn_array(fxsh_type_var_t) vars;
+    fxsh_type_t *type;
+} fxsh_scheme_t;
+
+typedef sp_ht(sp_str_t, fxsh_scheme_t) fxsh_type_env_t;
+
+/*=============================================================================
+ * Compile-time Values (defined early for use in AST)
+ *=============================================================================*/
+
+typedef enum {
+    CT_UNIT,
+    CT_BOOL,
+    CT_INT,
+    CT_FLOAT,
+    CT_STRING,
+    CT_TYPE,     /* Compile-time type value */
+    CT_FUNCTION, /* Compile-time function */
+    CT_AST,      /* AST node (for code generation) */
+    CT_LIST,     /* List of compile-time values */
+    CT_STRUCT,   /* Compile-time struct value */
+} fxsh_ct_value_kind_t;
+
+typedef struct fxsh_ct_value fxsh_ct_value_t;
+typedef struct fxsh_ct_field fxsh_ct_field_t;
+
+struct fxsh_ct_field {
+    sp_str_t name;
+    fxsh_ct_value_t *value;
+};
+
+struct fxsh_ct_value {
+    fxsh_ct_value_kind_t kind;
+    union {
+        bool bool_val;
+        s64 int_val;
+        f64 float_val;
+        sp_str_t string_val;
+        fxsh_type_t *type_val;       /* For CT_TYPE */
+        fxsh_ast_node_t *ast_val;    /* For CT_AST */
+        struct {
+            fxsh_ct_value_t **params;
+            fxsh_ast_node_t *body;
+            fxsh_type_env_t *closure;
+        } func_val;
+        struct {
+            fxsh_ct_value_t **items;
+            u32 len;
+        } list_val;
+        struct {
+            fxsh_ct_field_t *fields;
+            u32 num_fields;
+        } struct_val;
+    } data;
+};
 
 /*=============================================================================
  * AST Node Structure
@@ -341,6 +427,20 @@ struct fxsh_ast_node {
             fxsh_ast_node_t *ret;
         } type_arrow;
 
+        /* Compile-time type operators */
+        struct {
+            fxsh_ast_node_t *operand; /* For @typeOf */
+        } ct_type_of;
+
+        struct {
+            fxsh_ct_value_t *type_val; /* For @sizeOf, @alignOf, @fieldsOf */
+        } ct_type_op;
+
+        struct {
+            fxsh_ct_value_t *type_val;
+            sp_str_t field_name;
+        } ct_has_field;
+
         /* Declaration */
         struct {
             sp_str_t name;
@@ -356,26 +456,8 @@ struct fxsh_ast_node {
 };
 
 /*=============================================================================
- * Type System
+ * Type System (complete definition)
  *=============================================================================*/
-
-typedef enum {
-    TYPE_VAR,
-    TYPE_CON,
-    TYPE_ARROW,
-    TYPE_TUPLE,
-    TYPE_RECORD,
-    TYPE_APP,
-} fxsh_type_kind_t;
-
-typedef struct fxsh_type fxsh_type_t;
-
-typedef s32 fxsh_type_var_t;
-
-typedef struct {
-    sp_str_t name;
-    fxsh_type_t *type;
-} fxsh_field_t;
 
 struct fxsh_type {
     fxsh_type_kind_t kind;
@@ -407,21 +489,6 @@ struct fxsh_type {
 #define TYPE_LIST   ((sp_str_t){.data = "list", .len = 4})
 #define TYPE_OPTION ((sp_str_t){.data = "option", .len = 6})
 #define TYPE_RESULT ((sp_str_t){.data = "result", .len = 6})
-
-/*=============================================================================
- * Type Scheme (for polymorphism)
- *=============================================================================*/
-
-typedef struct {
-    sp_dyn_array(fxsh_type_var_t) vars;
-    fxsh_type_t *type;
-} fxsh_scheme_t;
-
-/*=============================================================================
- * Type Environment
- *=============================================================================*/
-
-typedef sp_ht(sp_str_t, fxsh_scheme_t) fxsh_type_env_t;
 
 /*=============================================================================
  * Substitution (for unification)
@@ -497,60 +564,17 @@ void fxsh_type_apply_subst(fxsh_subst_t subst, fxsh_type_t **type);
 const c8 *fxsh_type_to_string(fxsh_type_t *type);
 
 /*=============================================================================
- * Comptime - Compile-time Values
+ * Compile-time Types (must be defined before use)
  *=============================================================================*/
 
-typedef enum {
-    CT_UNIT,
-    CT_BOOL,
-    CT_INT,
-    CT_FLOAT,
-    CT_STRING,
-    CT_TYPE,     /* Compile-time type value */
-    CT_FUNCTION, /* Compile-time function */
-    CT_AST,      /* AST node (for code generation) */
-    CT_LIST,     /* List of compile-time values */
-    CT_STRUCT,   /* Compile-time struct value */
-} fxsh_ct_value_kind_t;
-
-/* Forward declarations for comptime */
-typedef struct fxsh_ct_value fxsh_ct_value_t;
-typedef struct fxsh_ct_field fxsh_ct_field_t;
-typedef struct fxsh_type_info fxsh_type_info_t;
-
-struct fxsh_ct_field {
-    sp_str_t name;
+/* Compile-time evaluation result */
+typedef struct {
+    fxsh_error_t error;
     fxsh_ct_value_t *value;
-};
-
-/* Compile-time value structure */
-struct fxsh_ct_value {
-    fxsh_ct_value_kind_t kind;
-    union {
-        bool bool_val;
-        s64 int_val;
-        f64 float_val;
-        sp_str_t string_val;
-        fxsh_type_t *type_val;    /* For CT_TYPE */
-        fxsh_ast_node_t *ast_val; /* For CT_AST */
-        struct {
-            fxsh_ct_value_t **params;
-            fxsh_ast_node_t *body;
-            fxsh_type_env_t *closure;
-        } func_val;
-        struct {
-            fxsh_ct_value_t **items;
-            u32 len;
-        } list_val;
-        struct {
-            fxsh_ct_field_t *fields;
-            u32 num_fields;
-        } struct_val;
-    } data;
-};
+} fxsh_ct_result_t;
 
 /* Type info for reflection */
-struct fxsh_type_info {
+typedef struct {
     sp_str_t name;
     fxsh_type_kind_t kind;
     union {
@@ -563,16 +587,10 @@ struct fxsh_type_info {
             fxsh_type_t *ret;
         } arrow;
     } data;
-};
-
-/* Comptime evaluation result */
-typedef struct {
-    fxsh_error_t error;
-    fxsh_ct_value_t *value;
-} fxsh_ct_result_t;
+} fxsh_type_info_t;
 
 /*=============================================================================
- * Comptime Environment
+ * Comptime Environment (forward declaration)
  *=============================================================================*/
 
 typedef sp_ht(sp_str_t, fxsh_ct_value_t) fxsh_ct_env_t;
@@ -627,6 +645,42 @@ fxsh_ast_node_t *fxsh_ct_derive_eq(fxsh_type_t *type);
 
 /* Value to string */
 const c8 *fxsh_ct_value_to_string(fxsh_ct_value_t *val);
+
+/* Compile-time record type (for type-level programming) */
+typedef struct {
+    sp_str_t name;
+    fxsh_ct_value_t *type_val;
+    fxsh_ct_value_t *default_val;
+} fxsh_ct_record_field_t;
+
+/* Type constructor for compile-time type programming */
+typedef struct {
+    sp_str_t name;
+    fxsh_type_kind_t kind;
+    sp_dyn_array(fxsh_ct_record_field_t) fields;
+    fxsh_type_t *target_type;
+} fxsh_type_constructor_t;
+
+/* Type constructor functions */
+fxsh_ct_value_t *fxsh_ct_make_record_type(sp_str_t name);
+fxsh_ct_value_t *fxsh_ct_record_add_field(fxsh_ct_value_t *record, sp_str_t field_name,
+                                           fxsh_ct_value_t *field_type);
+fxsh_ct_value_t *fxsh_ct_record_get_field(fxsh_ct_value_t *record, sp_str_t field_name);
+
+/* Compile-time type operators (syntax: @operator) */
+fxsh_ct_value_t *fxsh_ct_op_type_of(fxsh_ast_node_t *expr, fxsh_comptime_ctx_t *ctx);
+fxsh_ct_value_t *fxsh_ct_op_size_of(fxsh_ct_value_t *type_val);
+fxsh_ct_value_t *fxsh_ct_op_align_of(fxsh_ct_value_t *type_val);
+fxsh_ct_value_t *fxsh_ct_op_fields_of(fxsh_ct_value_t *type_val);
+fxsh_ct_value_t *fxsh_ct_op_has_field(fxsh_ct_value_t *type_val, sp_str_t field_name);
+
+/* Generic type instantiation */
+fxsh_type_t *fxsh_ct_instantiate_generic(fxsh_type_constructor_t *ctor,
+                                          sp_dyn_array(fxsh_type_t *) type_args);
+
+/* Make vector type constructor (like Zig's ArrayList) */
+fxsh_type_constructor_t *fxsh_ct_make_vector_ctor(void);
+fxsh_ct_value_t *fxsh_ct_make_vector(fxsh_ct_value_t *elem_type);
 
 /*=============================================================================
  * Forward Declarations - Utilities

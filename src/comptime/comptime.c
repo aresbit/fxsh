@@ -327,6 +327,22 @@ static fxsh_ct_value_t *eval_expr(fxsh_ast_node_t *ast, fxsh_comptime_ctx_t *ctx
             sp_dyn_array_free(pipe_call.data.call.args);
             return result;
         }
+        case AST_CT_TYPE_OF: {
+            return fxsh_ct_op_type_of(ast->data.ct_type_of.operand, ctx);
+        }
+        case AST_CT_SIZE_OF: {
+            /* Evaluate operand to get type */
+            fxsh_ct_value_t *type_val = eval_expr(ast->data.ct_type_op.type_val, ctx);
+            if (!type_val) {
+                /* Try to get type from expression */
+                type_val = fxsh_ct_op_type_of(ast, ctx);
+            }
+            return fxsh_ct_op_size_of(type_val);
+        }
+        case AST_CT_ALIGN_OF: {
+            fxsh_ct_value_t *type_val = eval_expr(ast->data.ct_type_op.type_val, ctx);
+            return fxsh_ct_op_align_of(type_val);
+        }
         default:
             return NULL;
     }
@@ -564,8 +580,195 @@ const c8 *fxsh_ct_value_to_string(fxsh_ct_value_t *val) {
         case CT_LIST:
             return "<list>";
         case CT_STRUCT:
-            return "<struct>";
+            return "<struct type>";
         default:
             return "<unknown>";
     }
+}
+
+/*=============================================================================
+ * Compile-time Type Programming
+ *=============================================================================*/
+
+fxsh_ct_value_t *fxsh_ct_make_record_type(sp_str_t name) {
+    fxsh_ct_value_t *val = sp_alloc(sizeof(fxsh_ct_value_t));
+    val->kind = CT_STRUCT;
+    val->data.struct_val.fields = SP_NULLPTR;
+    val->data.struct_val.num_fields = 0;
+    return val;
+}
+
+fxsh_ct_value_t *fxsh_ct_record_add_field(fxsh_ct_value_t *record, sp_str_t field_name,
+                                           fxsh_ct_value_t *field_type) {
+    if (!record || record->kind != CT_STRUCT) return NULL;
+
+    fxsh_ct_field_t field = {
+        .name = field_name,
+        .value = field_type
+    };
+
+    /* Extend fields array */
+    u32 new_count = record->data.struct_val.num_fields + 1;
+    fxsh_ct_field_t *new_fields = sp_alloc(sizeof(fxsh_ct_field_t) * new_count);
+
+    /* Copy old fields */
+    for (u32 i = 0; i < record->data.struct_val.num_fields; i++) {
+        new_fields[i] = record->data.struct_val.fields[i];
+    }
+
+    /* Add new field */
+    new_fields[record->data.struct_val.num_fields] = field;
+
+    /* Free old array and update */
+    if (record->data.struct_val.fields) {
+        sp_free(record->data.struct_val.fields);
+    }
+    record->data.struct_val.fields = new_fields;
+    record->data.struct_val.num_fields = new_count;
+
+    return record;
+}
+
+fxsh_ct_value_t *fxsh_ct_record_get_field(fxsh_ct_value_t *record, sp_str_t field_name) {
+    if (!record || record->kind != CT_STRUCT) return NULL;
+
+    for (u32 i = 0; i < record->data.struct_val.num_fields; i++) {
+        if (sp_str_equal(record->data.struct_val.fields[i].name, field_name)) {
+            return record->data.struct_val.fields[i].value;
+        }
+    }
+    return NULL;
+}
+
+/*=============================================================================
+ * Compile-time Type Operators (@typeOf, @sizeOf, etc.)
+ *=============================================================================*/
+
+fxsh_ct_value_t *fxsh_ct_op_type_of(fxsh_ast_node_t *expr, fxsh_comptime_ctx_t *ctx) {
+    /* Get the type of an expression at compile time */
+    if (!expr) return NULL;
+
+    /* For now, return the type based on expression kind */
+    fxsh_type_t *type = NULL;
+
+    switch (expr->kind) {
+    case AST_LIT_INT:
+        type = fxsh_type_con(TYPE_INT);
+        break;
+    case AST_LIT_FLOAT:
+        type = fxsh_type_con(TYPE_FLOAT);
+        break;
+    case AST_LIT_STRING:
+        type = fxsh_type_con(TYPE_STRING);
+        break;
+    case AST_LIT_BOOL:
+        type = fxsh_type_con(TYPE_BOOL);
+        break;
+    case AST_IDENT: {
+        /* Look up variable type */
+        fxsh_ct_value_t *val = lookup_var(ctx, expr->data.ident);
+        if (val && val->kind == CT_TYPE) {
+            type = val->data.type_val;
+        }
+        break;
+    }
+    default:
+        break;
+    }
+
+    if (type) {
+        return fxsh_ct_type(type);
+    }
+    return NULL;
+}
+
+fxsh_ct_value_t *fxsh_ct_op_size_of(fxsh_ct_value_t *type_val) {
+    return fxsh_ct_size_of(type_val);
+}
+
+fxsh_ct_value_t *fxsh_ct_op_align_of(fxsh_ct_value_t *type_val) {
+    if (!type_val || type_val->kind != CT_TYPE) return NULL;
+
+    /* Simplified - alignment is usually same as size for primitives */
+    fxsh_type_t *type = type_val->data.type_val;
+    s64 align = 8;
+
+    if (type->kind == TYPE_CON) {
+        if (sp_str_equal(type->data.con, TYPE_INT)) {
+            align = 8;
+        } else if (sp_str_equal(type->data.con, TYPE_BOOL)) {
+            align = 1;
+        } else if (sp_str_equal(type->data.con, TYPE_FLOAT)) {
+            align = 8;
+        }
+    }
+
+    return fxsh_ct_int(align);
+}
+
+fxsh_ct_value_t *fxsh_ct_op_fields_of(fxsh_ct_value_t *type_val) {
+    if (!type_val || type_val->kind != CT_TYPE) return NULL;
+
+    /* Return list of field names for record types */
+    /* For now, return empty list for primitive types */
+    fxsh_ct_value_t **items = SP_NULLPTR;
+    return fxsh_ct_list(items, 0);
+}
+
+fxsh_ct_value_t *fxsh_ct_op_has_field(fxsh_ct_value_t *type_val, sp_str_t field_name) {
+    if (!type_val || type_val->kind != CT_TYPE) return fxsh_ct_bool(false);
+
+    fxsh_type_t *type = type_val->data.type_val;
+    if (type->kind == TYPE_RECORD) {
+        for (u32 i = 0; i < sp_dyn_array_size(type->data.record.fields); i++) {
+            if (sp_str_equal(type->data.record.fields[i].name, field_name)) {
+                return fxsh_ct_bool(true);
+            }
+        }
+    }
+    return fxsh_ct_bool(false);
+}
+
+/*=============================================================================
+ * Generic Type Instantiation
+ *=============================================================================*/
+
+fxsh_type_t *fxsh_ct_instantiate_generic(fxsh_type_constructor_t *ctor,
+                                          sp_dyn_array(fxsh_type_t *) type_args) {
+    if (!ctor) return NULL;
+
+    /* Create a new concrete type from the constructor */
+    fxsh_type_t *instance = sp_alloc(sizeof(fxsh_type_t));
+    instance->kind = ctor->kind;
+
+    /* TODO: Substitute type parameters with arguments */
+
+    return instance;
+}
+
+/*=============================================================================
+ * Vector Type Constructor
+ *=============================================================================*/
+
+fxsh_type_constructor_t *fxsh_ct_make_vector_ctor(void) {
+    fxsh_type_constructor_t *ctor = sp_alloc(sizeof(fxsh_type_constructor_t));
+    ctor->name = (sp_str_t){.data = "Vector", .len = 6};
+    ctor->kind = TYPE_RECORD;
+    ctor->fields = SP_NULLPTR;
+    ctor->target_type = NULL;
+    return ctor;
+}
+
+fxsh_ct_value_t *fxsh_ct_make_vector(fxsh_ct_value_t *elem_type) {
+    if (!elem_type || elem_type->kind != CT_TYPE) return NULL;
+
+    /* Create a Vector(T) type at compile time */
+    fxsh_ct_value_t *vec_type = fxsh_ct_make_record_type((sp_str_t){.data = "Vector", .len = 6});
+
+    /* Add fields: data, len, cap */
+    fxsh_ct_record_add_field(vec_type, (sp_str_t){.data = "data", .len = 4}, elem_type);
+    fxsh_ct_record_add_field(vec_type, (sp_str_t){.data = "len", .len = 3}, fxsh_ct_type(fxsh_type_con(TYPE_INT)));
+    fxsh_ct_record_add_field(vec_type, (sp_str_t){.data = "cap", .len = 3}, fxsh_ct_type(fxsh_type_con(TYPE_INT)));
+
+    return vec_type;
 }

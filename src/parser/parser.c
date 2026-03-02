@@ -288,6 +288,48 @@ static fxsh_ast_node_t *parse_primary(fxsh_parser_t *parser) {
             advance(parser);
             return fxsh_ast_ident(tok->data.ident, tok->loc);
         }
+        case TOK_AT: {
+            advance(parser); /* consume @ */
+            fxsh_token_t *op_tok = consume(parser, TOK_IDENT, "compile-time operator name");
+            if (!op_tok) return NULL;
+
+            /* Parse compile-time operator: @typeOf, @sizeOf, etc. */
+            sp_str_t op_name = op_tok->data.ident;
+
+            if (sp_str_equal(op_name, (sp_str_t){.data = "typeOf", .len = 6})) {
+                consume(parser, TOK_LPAREN, "'('");
+                fxsh_ast_node_t *expr = parse_expr(parser);
+                consume(parser, TOK_RPAREN, "')'");
+
+                fxsh_ast_node_t *node = alloc_node(AST_CT_TYPE_OF, tok->loc);
+                node->data.ct_type_of.operand = expr;
+                return node;
+            }
+            else if (sp_str_equal(op_name, (sp_str_t){.data = "sizeOf", .len = 6})) {
+                consume(parser, TOK_LPAREN, "'('");
+                /* For now, parse as expression and convert to type */
+                fxsh_ast_node_t *type_expr = parse_expr(parser);
+                consume(parser, TOK_RPAREN, "')'");
+
+                fxsh_ast_node_t *node = alloc_node(AST_CT_SIZE_OF, tok->loc);
+                node->data.ct_type_op.type_val = NULL; /* Will be filled during type checking */
+                return node;
+            }
+            else if (sp_str_equal(op_name, (sp_str_t){.data = "alignOf", .len = 7})) {
+                consume(parser, TOK_LPAREN, "'('");
+                fxsh_ast_node_t *type_expr = parse_expr(parser);
+                consume(parser, TOK_RPAREN, "')'");
+
+                fxsh_ast_node_t *node = alloc_node(AST_CT_ALIGN_OF, tok->loc);
+                node->data.ct_type_op.type_val = NULL;
+                return node;
+            }
+            else {
+                fprintf(stderr, "Unknown compile-time operator: %.*s\n",
+                        op_name.len, op_name.data);
+                return NULL;
+            }
+        }
         case TOK_LPAREN: {
             advance(parser); /* consume ( */
             skip_newlines(parser);

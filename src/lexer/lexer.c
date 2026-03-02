@@ -175,6 +175,8 @@ const c8 *fxsh_token_kind_name(fxsh_token_kind_t kind) {
             return "DOTDOT";
         case TOK_PIPE_SYM:
             return "PIPE_SYM";
+        case TOK_AT:
+            return "AT";
         case TOK_NEWLINE:
             return "NEWLINE";
         case TOK_COMMENT:
@@ -576,6 +578,12 @@ fxsh_error_t fxsh_lexer_next(fxsh_lexer_t *lexer, fxsh_token_t *out_token) {
             } else {
                 out_token->kind = TOK_DOT;
             }
+            out_token->loc = loc;
+            return ERR_OK;
+
+        case '@':
+            advance(lexer);
+            out_token->kind = TOK_AT;
             out_token->loc = loc;
             return ERR_OK;
     }
