@@ -1,0 +1,19 @@
+---
+Language: C
+BasedOnStyle: LLVM
+IndentWidth: 4
+TabWidth: 4
+UseTab: Never
+ColumnLimit: 100
+AllowShortFunctionsOnASingleLine: Empty
+BreakBeforeBraces: Attach
+SpaceAfterCStyleCast: false
+SpacesInParentheses: false
+SpacesInCStyleCastParentheses: false
+SortIncludes: true
+IndentCaseLabels: true
+AlignConsecutiveMacros: true
+AlignConsecutiveAssignments: false
+AlignConsecutiveDeclarations: false
+PointerAlignment: Right
+ReflowComments: true

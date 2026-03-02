@@ -1,0 +1,7 @@
+# Pipeline example in fxsh
+
+let double = fn x -> x * 2
+let add_one = fn x -> x + 1
+
+# Pipeline: 5 |> double |> add_one
+5 |> double |> add_one

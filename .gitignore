@@ -1,0 +1,21 @@
+# Build artifacts
+build/
+bin/
+*.o
+*.a
+*.so
+
+# Editor
+*.swp
+*.swo
+*~
+.vscode/
+.idea/
+
+# Generated
+compile_commands.json
+.cache/
+
+# OS
+.DS_Store
+Thumbs.db

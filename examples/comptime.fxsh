@@ -1,0 +1,29 @@
+# Comptime examples - Compile-time evaluation in fxsh
+
+# 1. Compile-time constants
+let comptime BUFFER_SIZE = 1024 * 64
+let comptime DEBUG = true
+
+# 2. Compile-time type computation
+let comptime make_vector = fn T ->
+  {
+    data = T,
+    size = 0,
+    capacity = 0
+  }
+
+# 3. Type-level programming
+let comptime int_vector = make_vector int
+
+# 4. Derived macros example
+let comptime derive_show = fn t ->
+  fn x -> "show: " ++ type_name t
+
+# 5. Compile-time configuration
+let comptime max = fn a b -> if a > b then a else b
+let comptime MAX_RETRIES = max 3 5
+
+# 6. Compile-time math
+let comptime TABLE_SIZE = 2 * 2 * 2 * 2 * 2  # 32
+
+42  # Return value
