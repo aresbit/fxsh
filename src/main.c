@@ -15,6 +15,7 @@ static void print_usage(const char *program) {
     printf("  %s [options] -e <expression>\n\n", program);
     printf("Options:\n");
     printf("  -e, --eval <expr>    Evaluate expression\n");
+    printf("  -c, --codegen        Generate C code\n");
     printf("  -t, --tokens         Print tokens (debug)\n");
     printf("  -a, --ast            Print AST (debug)\n");
     printf("  -h, --help           Show this help\n");
@@ -48,6 +49,7 @@ typedef enum {
     MODE_EVAL,
     MODE_TOKENS,
     MODE_AST,
+    MODE_CODEGEN,
 } run_mode_t;
 
 int main(int argc, char **argv) {
@@ -81,6 +83,10 @@ int main(int argc, char **argv) {
             if (i + 1 < argc) {
                 input = argv[++i];
             }
+            continue;
+        }
+        if (strcmp(argv[i], "-c") == 0 || strcmp(argv[i], "--codegen") == 0) {
+            mode = MODE_CODEGEN;
             continue;
         }
         if (argv[i][0] != '-') {
@@ -198,6 +204,16 @@ int main(int argc, char **argv) {
                     printf("  => %s\n", fxsh_ct_value_to_string(ct_result.value));
                 }
             }
+        }
+    }
+
+    /* Code generation */
+    if (mode == MODE_CODEGEN) {
+        printf("\n/* Generated C code */\n\n");
+        char *code = fxsh_codegen(ast);
+        if (code) {
+            printf("%s\n", code);
+            sp_free(code);
         }
     }
 

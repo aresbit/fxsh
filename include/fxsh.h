@@ -219,11 +219,11 @@ typedef enum {
     AST_TYPE_RECORD, /* {x: t} */
 
     /* Compile-time type operators */
-    AST_CT_TYPE_OF,    /* @typeOf expr */
-    AST_CT_SIZE_OF,    /* @sizeOf type */
-    AST_CT_ALIGN_OF,   /* @alignOf type */
-    AST_CT_FIELDS_OF,  /* @fieldsOf type */
-    AST_CT_HAS_FIELD,  /* @hasField(type, "name") */
+    AST_CT_TYPE_OF,   /* @typeOf expr */
+    AST_CT_SIZE_OF,   /* @sizeOf type */
+    AST_CT_ALIGN_OF,  /* @alignOf type */
+    AST_CT_FIELDS_OF, /* @fieldsOf type */
+    AST_CT_HAS_FIELD, /* @hasField(type, "name") */
 
     /* Declarations */
     AST_DECL_LET,
@@ -303,8 +303,8 @@ struct fxsh_ct_value {
         s64 int_val;
         f64 float_val;
         sp_str_t string_val;
-        fxsh_type_t *type_val;       /* For CT_TYPE */
-        fxsh_ast_node_t *ast_val;    /* For CT_AST */
+        fxsh_type_t *type_val;    /* For CT_TYPE */
+        fxsh_ast_node_t *ast_val; /* For CT_AST */
         struct {
             fxsh_ct_value_t **params;
             fxsh_ast_node_t *body;
@@ -664,7 +664,7 @@ typedef struct {
 /* Type constructor functions */
 fxsh_ct_value_t *fxsh_ct_make_record_type(sp_str_t name);
 fxsh_ct_value_t *fxsh_ct_record_add_field(fxsh_ct_value_t *record, sp_str_t field_name,
-                                           fxsh_ct_value_t *field_type);
+                                          fxsh_ct_value_t *field_type);
 fxsh_ct_value_t *fxsh_ct_record_get_field(fxsh_ct_value_t *record, sp_str_t field_name);
 
 /* Compile-time type operators (syntax: @operator) */
@@ -676,11 +676,18 @@ fxsh_ct_value_t *fxsh_ct_op_has_field(fxsh_ct_value_t *type_val, sp_str_t field_
 
 /* Generic type instantiation */
 fxsh_type_t *fxsh_ct_instantiate_generic(fxsh_type_constructor_t *ctor,
-                                          sp_dyn_array(fxsh_type_t *) type_args);
+                                         sp_dyn_array(fxsh_type_t *) type_args);
 
 /* Make vector type constructor (like Zig's ArrayList) */
 fxsh_type_constructor_t *fxsh_ct_make_vector_ctor(void);
 fxsh_ct_value_t *fxsh_ct_make_vector(fxsh_ct_value_t *elem_type);
+
+/*=============================================================================
+ * Forward Declarations - Code Generation
+ *=============================================================================*/
+
+char *fxsh_codegen(fxsh_ast_node_t *ast);
+fxsh_error_t fxsh_codegen_to_file(fxsh_ast_node_t *ast, sp_str_t path);
 
 /*=============================================================================
  * Forward Declarations - Utilities

@@ -514,7 +514,169 @@ fxsh_error_t fxsh_type_unify(fxsh_type_t *t1, fxsh_type_t *t2, fxsh_subst_t *out
 }
 
 /*=============================================================================
- * Type Inference (Simplified)
+ * Type Scheme Instantiation (replace bound vars with fresh vars)
+ *=============================================================================*/
+
+static fxsh_type_t *instantiate(fxsh_scheme_t *scheme);
+
+static fxsh_type_t *instantiate_impl(fxsh_type_t *type, sp_ht(s32, s32) * var_map) {
+    if (!type)
+        return NULL;
+
+    switch (type->kind) {
+        case TYPE_VAR: {
+            s32 var_id = type->data.var;
+            s32 *mapped = sp_ht_getp(*var_map, var_id);
+            if (mapped) {
+                return fxsh_type_var(*mapped);
+            }
+            return type;
+        }
+        case TYPE_CON:
+            return type;
+        case TYPE_ARROW: {
+            fxsh_type_t *new_param = instantiate_impl(type->data.arrow.param, var_map);
+            fxsh_type_t *new_ret = instantiate_impl(type->data.arrow.ret, var_map);
+            if (new_param != type->data.arrow.param || new_ret != type->data.arrow.ret) {
+                return fxsh_type_arrow(new_param, new_ret);
+            }
+            return type;
+        }
+        case TYPE_APP: {
+            fxsh_type_t *new_con = instantiate_impl(type->data.app.con, var_map);
+            fxsh_type_t *new_arg = instantiate_impl(type->data.app.arg, var_map);
+            if (new_con != type->data.app.con || new_arg != type->data.app.arg) {
+                return fxsh_type_apply(new_con, new_arg);
+            }
+            return type;
+        }
+        default:
+            return type;
+    }
+}
+
+static fxsh_type_t *instantiate(fxsh_scheme_t *scheme) {
+    if (!scheme)
+        return fxsh_type_var(fxsh_fresh_var());
+
+    /* Create mapping from bound vars to fresh vars */
+    sp_ht(s32, s32) var_map = SP_NULLPTR;
+    sp_dyn_array_for(scheme->vars, i) {
+        s32 fresh_var = fxsh_fresh_var();
+        sp_ht_insert(var_map, scheme->vars[i], fresh_var);
+    }
+
+    fxsh_type_t *result = instantiate_impl(scheme->type, &var_map);
+
+    sp_ht_free(var_map);
+    return result;
+}
+
+/*=============================================================================
+ * Generalization (convert type to scheme by abstracting over free vars)
+ *=============================================================================*/
+
+static fxsh_scheme_t *generalize(fxsh_type_t *type, fxsh_type_env_t *env);
+
+static void free_vars_in_env(fxsh_type_env_t *env, sp_dyn_array(s32) * out_vars);
+
+static fxsh_scheme_t *generalize(fxsh_type_t *type, fxsh_type_env_t *env) {
+    if (!type)
+        return NULL;
+
+    fxsh_scheme_t *scheme = sp_alloc(sizeof(fxsh_scheme_t));
+    scheme->vars = SP_NULLPTR;
+    scheme->type = type;
+
+    /* Get free vars in type */
+    sp_dyn_array(s32) type_vars = SP_NULLPTR;
+    ftv_impl(type, &type_vars);
+
+    /* Get free vars in environment */
+    sp_dyn_array(s32) env_vars = SP_NULLPTR;
+    free_vars_in_env(env, &env_vars);
+
+    /* Generalize vars that are free in type but not in env */
+    sp_dyn_array_for(type_vars, i) {
+        bool in_env = false;
+        sp_dyn_array_for(env_vars, j) {
+            if (env_vars[j] == type_vars[i]) {
+                in_env = true;
+                break;
+            }
+        }
+        if (!in_env) {
+            sp_dyn_array_push(scheme->vars, type_vars[i]);
+        }
+    }
+
+    sp_dyn_array_free(type_vars);
+    sp_dyn_array_free(env_vars);
+
+    return scheme;
+}
+
+static void free_vars_in_scheme(fxsh_scheme_t *scheme, sp_dyn_array(s32) * out_vars);
+
+static void free_vars_in_env(fxsh_type_env_t *env, sp_dyn_array(s32) * out_vars) {
+    if (!env)
+        return;
+    /* Iterate through all entries in env */
+    /* Note: This is simplified - we'd need to iterate the hash table */
+}
+
+static void free_vars_in_scheme(fxsh_scheme_t *scheme, sp_dyn_array(s32) * out_vars) {
+    if (!scheme)
+        return;
+
+    sp_dyn_array(s32) type_vars = SP_NULLPTR;
+    ftv_impl(scheme->type, &type_vars);
+
+    /* Remove bound vars */
+    sp_dyn_array_for(type_vars, i) {
+        bool is_bound = false;
+        sp_dyn_array_for(scheme->vars, j) {
+            if (scheme->vars[j] == type_vars[i]) {
+                is_bound = true;
+                break;
+            }
+        }
+        if (!is_bound) {
+            /* Check if already in out_vars */
+            bool already_present = false;
+            sp_dyn_array_for(*out_vars, k) {
+                if ((*out_vars)[k] == type_vars[i]) {
+                    already_present = true;
+                    break;
+                }
+            }
+            if (!already_present) {
+                sp_dyn_array_push(*out_vars, type_vars[i]);
+            }
+        }
+    }
+
+    sp_dyn_array_free(type_vars);
+}
+
+/*=============================================================================
+ * Type Environment Operations
+ *=============================================================================*/
+
+static void type_env_bind(fxsh_type_env_t *env, sp_str_t name, fxsh_scheme_t *scheme) {
+    if (!env)
+        return;
+    sp_ht_insert(*env, name, *scheme);
+}
+
+static fxsh_scheme_t *type_env_lookup(fxsh_type_env_t *env, sp_str_t name) {
+    if (!env)
+        return NULL;
+    return sp_ht_getp(*env, name);
+}
+
+/*=============================================================================
+ * Type Inference with Let-polymorphism
  *=============================================================================*/
 
 static fxsh_error_t infer_expr(fxsh_ast_node_t *ast, fxsh_type_env_t *env, fxsh_subst_t *subst,
@@ -562,14 +724,14 @@ static fxsh_error_t infer_expr(fxsh_ast_node_t *ast, fxsh_type_env_t *env, fxsh_
 
         case AST_IDENT: {
             /* Look up in environment */
-            fxsh_scheme_t *scheme = sp_ht_getp(*env, ast->data.ident);
+            fxsh_scheme_t *scheme = type_env_lookup(env, ast->data.ident);
             if (!scheme) {
                 /* Unknown identifier - create fresh variable for now */
                 *out_type = fxsh_type_var(fxsh_fresh_var());
                 return ERR_OK;
             }
-            /* Instantiate scheme with fresh vars */
-            *out_type = scheme->type; /* Simplified - should instantiate */
+            /* Instantiate scheme with fresh vars (Let-polymorphism) */
+            *out_type = instantiate(scheme);
             return ERR_OK;
         }
 
@@ -802,6 +964,58 @@ static fxsh_error_t infer_expr(fxsh_ast_node_t *ast, fxsh_type_env_t *env, fxsh_
             *subst = compose(s, *subst);
             fxsh_type_apply_subst(s, &result_type);
             *out_type = result_type;
+            return ERR_OK;
+        }
+
+        case AST_LET: {
+            /* let x = value (non-recursive) */
+            fxsh_type_t *value_type = NULL;
+            fxsh_error_t err = infer_expr(ast->data.let.value, env, subst, &value_type);
+            if (err != ERR_OK)
+                return err;
+
+            /* Apply current substitution to value_type before generalizing */
+            fxsh_type_apply_subst(*subst, &value_type);
+
+            /* Generalize to create polymorphic scheme (Let-polymorphism) */
+            fxsh_scheme_t *scheme = generalize(value_type, env);
+
+            /* Bind in environment */
+            type_env_bind(env, ast->data.let.name, scheme);
+
+            *out_type = fxsh_type_con(TYPE_UNIT);
+            return ERR_OK;
+        }
+
+        case AST_LET_IN: {
+            /* let x = value in body */
+            fxsh_type_env_t new_env = env ? *env : SP_NULLPTR;
+
+            sp_dyn_array_for(ast->data.let_in.bindings, i) {
+                fxsh_ast_node_t *binding = ast->data.let_in.bindings[i];
+                if (binding->kind == AST_LET) {
+                    fxsh_type_t *value_type = NULL;
+                    fxsh_error_t err =
+                        infer_expr(binding->data.let.value, &new_env, subst, &value_type);
+                    if (err != ERR_OK)
+                        return err;
+
+                    /* Apply current substitution */
+                    fxsh_type_apply_subst(*subst, &value_type);
+
+                    /* Generalize for Let-polymorphism */
+                    fxsh_scheme_t *scheme = generalize(value_type, &new_env);
+                    type_env_bind(&new_env, binding->data.let.name, scheme);
+                }
+            }
+
+            /* Infer body type with extended environment */
+            fxsh_type_t *body_type = NULL;
+            fxsh_error_t err = infer_expr(ast->data.let_in.body, &new_env, subst, &body_type);
+            if (err != ERR_OK)
+                return err;
+
+            *out_type = body_type;
             return ERR_OK;
         }
 

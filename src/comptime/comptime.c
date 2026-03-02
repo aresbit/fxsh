@@ -599,13 +599,11 @@ fxsh_ct_value_t *fxsh_ct_make_record_type(sp_str_t name) {
 }
 
 fxsh_ct_value_t *fxsh_ct_record_add_field(fxsh_ct_value_t *record, sp_str_t field_name,
-                                           fxsh_ct_value_t *field_type) {
-    if (!record || record->kind != CT_STRUCT) return NULL;
+                                          fxsh_ct_value_t *field_type) {
+    if (!record || record->kind != CT_STRUCT)
+        return NULL;
 
-    fxsh_ct_field_t field = {
-        .name = field_name,
-        .value = field_type
-    };
+    fxsh_ct_field_t field = {.name = field_name, .value = field_type};
 
     /* Extend fields array */
     u32 new_count = record->data.struct_val.num_fields + 1;
@@ -630,7 +628,8 @@ fxsh_ct_value_t *fxsh_ct_record_add_field(fxsh_ct_value_t *record, sp_str_t fiel
 }
 
 fxsh_ct_value_t *fxsh_ct_record_get_field(fxsh_ct_value_t *record, sp_str_t field_name) {
-    if (!record || record->kind != CT_STRUCT) return NULL;
+    if (!record || record->kind != CT_STRUCT)
+        return NULL;
 
     for (u32 i = 0; i < record->data.struct_val.num_fields; i++) {
         if (sp_str_equal(record->data.struct_val.fields[i].name, field_name)) {
@@ -646,34 +645,35 @@ fxsh_ct_value_t *fxsh_ct_record_get_field(fxsh_ct_value_t *record, sp_str_t fiel
 
 fxsh_ct_value_t *fxsh_ct_op_type_of(fxsh_ast_node_t *expr, fxsh_comptime_ctx_t *ctx) {
     /* Get the type of an expression at compile time */
-    if (!expr) return NULL;
+    if (!expr)
+        return NULL;
 
     /* For now, return the type based on expression kind */
     fxsh_type_t *type = NULL;
 
     switch (expr->kind) {
-    case AST_LIT_INT:
-        type = fxsh_type_con(TYPE_INT);
-        break;
-    case AST_LIT_FLOAT:
-        type = fxsh_type_con(TYPE_FLOAT);
-        break;
-    case AST_LIT_STRING:
-        type = fxsh_type_con(TYPE_STRING);
-        break;
-    case AST_LIT_BOOL:
-        type = fxsh_type_con(TYPE_BOOL);
-        break;
-    case AST_IDENT: {
-        /* Look up variable type */
-        fxsh_ct_value_t *val = lookup_var(ctx, expr->data.ident);
-        if (val && val->kind == CT_TYPE) {
-            type = val->data.type_val;
+        case AST_LIT_INT:
+            type = fxsh_type_con(TYPE_INT);
+            break;
+        case AST_LIT_FLOAT:
+            type = fxsh_type_con(TYPE_FLOAT);
+            break;
+        case AST_LIT_STRING:
+            type = fxsh_type_con(TYPE_STRING);
+            break;
+        case AST_LIT_BOOL:
+            type = fxsh_type_con(TYPE_BOOL);
+            break;
+        case AST_IDENT: {
+            /* Look up variable type */
+            fxsh_ct_value_t *val = lookup_var(ctx, expr->data.ident);
+            if (val && val->kind == CT_TYPE) {
+                type = val->data.type_val;
+            }
+            break;
         }
-        break;
-    }
-    default:
-        break;
+        default:
+            break;
     }
 
     if (type) {
@@ -687,7 +687,8 @@ fxsh_ct_value_t *fxsh_ct_op_size_of(fxsh_ct_value_t *type_val) {
 }
 
 fxsh_ct_value_t *fxsh_ct_op_align_of(fxsh_ct_value_t *type_val) {
-    if (!type_val || type_val->kind != CT_TYPE) return NULL;
+    if (!type_val || type_val->kind != CT_TYPE)
+        return NULL;
 
     /* Simplified - alignment is usually same as size for primitives */
     fxsh_type_t *type = type_val->data.type_val;
@@ -707,7 +708,8 @@ fxsh_ct_value_t *fxsh_ct_op_align_of(fxsh_ct_value_t *type_val) {
 }
 
 fxsh_ct_value_t *fxsh_ct_op_fields_of(fxsh_ct_value_t *type_val) {
-    if (!type_val || type_val->kind != CT_TYPE) return NULL;
+    if (!type_val || type_val->kind != CT_TYPE)
+        return NULL;
 
     /* Return list of field names for record types */
     /* For now, return empty list for primitive types */
@@ -716,7 +718,8 @@ fxsh_ct_value_t *fxsh_ct_op_fields_of(fxsh_ct_value_t *type_val) {
 }
 
 fxsh_ct_value_t *fxsh_ct_op_has_field(fxsh_ct_value_t *type_val, sp_str_t field_name) {
-    if (!type_val || type_val->kind != CT_TYPE) return fxsh_ct_bool(false);
+    if (!type_val || type_val->kind != CT_TYPE)
+        return fxsh_ct_bool(false);
 
     fxsh_type_t *type = type_val->data.type_val;
     if (type->kind == TYPE_RECORD) {
@@ -734,8 +737,9 @@ fxsh_ct_value_t *fxsh_ct_op_has_field(fxsh_ct_value_t *type_val, sp_str_t field_
  *=============================================================================*/
 
 fxsh_type_t *fxsh_ct_instantiate_generic(fxsh_type_constructor_t *ctor,
-                                          sp_dyn_array(fxsh_type_t *) type_args) {
-    if (!ctor) return NULL;
+                                         sp_dyn_array(fxsh_type_t *) type_args) {
+    if (!ctor)
+        return NULL;
 
     /* Create a new concrete type from the constructor */
     fxsh_type_t *instance = sp_alloc(sizeof(fxsh_type_t));
@@ -760,15 +764,18 @@ fxsh_type_constructor_t *fxsh_ct_make_vector_ctor(void) {
 }
 
 fxsh_ct_value_t *fxsh_ct_make_vector(fxsh_ct_value_t *elem_type) {
-    if (!elem_type || elem_type->kind != CT_TYPE) return NULL;
+    if (!elem_type || elem_type->kind != CT_TYPE)
+        return NULL;
 
     /* Create a Vector(T) type at compile time */
     fxsh_ct_value_t *vec_type = fxsh_ct_make_record_type((sp_str_t){.data = "Vector", .len = 6});
 
     /* Add fields: data, len, cap */
     fxsh_ct_record_add_field(vec_type, (sp_str_t){.data = "data", .len = 4}, elem_type);
-    fxsh_ct_record_add_field(vec_type, (sp_str_t){.data = "len", .len = 3}, fxsh_ct_type(fxsh_type_con(TYPE_INT)));
-    fxsh_ct_record_add_field(vec_type, (sp_str_t){.data = "cap", .len = 3}, fxsh_ct_type(fxsh_type_con(TYPE_INT)));
+    fxsh_ct_record_add_field(vec_type, (sp_str_t){.data = "len", .len = 3},
+                             fxsh_ct_type(fxsh_type_con(TYPE_INT)));
+    fxsh_ct_record_add_field(vec_type, (sp_str_t){.data = "cap", .len = 3},
+                             fxsh_ct_type(fxsh_type_con(TYPE_INT)));
 
     return vec_type;
 }
