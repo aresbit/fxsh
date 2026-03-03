@@ -1,0 +1,74 @@
+# ADT (Algebraic Data Types) examples for fxsh
+
+# Sum Type - Option
+type 'a option = None | Some of 'a
+
+let map_option = fn f opt ->
+  match opt with
+  | None -> None
+  | Some x -> Some (f x)
+  end
+
+let unwrap_or = fn opt default ->
+  match opt with
+  | Some x -> x
+  | None -> default
+  end
+
+# Sum Type - Result
+type ('a, 'b) result = Ok of 'a | Err of 'b
+
+let map_result = fn f res ->
+  match res with
+  | Ok x -> Ok (f x)
+  | Err e -> Err e
+  end
+
+# Sum Type - List
+type 'a list = Nil | Cons of 'a * 'a list
+
+let rec map = fn f xs ->
+  match xs with
+  | Nil -> Nil
+  | Cons(x, xs') -> Cons(f x, map f xs')
+  end
+
+let rec fold = fn f acc xs ->
+  match xs with
+  | Nil -> acc
+  | Cons(x, xs') -> fold f (f acc x) xs'
+  end
+
+# Product Type - Point
+type point = { x: int, y: int }
+
+let origin = { x = 0, y = 0 }
+let p = { x = 10, y = 20 }
+
+let move = fn p dx dy ->
+  { x = p.x + dx, y = p.y + dy }
+
+let get_x = fn p -> p.x
+let get_y = fn p -> p.y
+
+# Product Type with polymorphism
+type 'a pair = { fst: 'a, snd: 'a }
+
+let swap = fn p -> { fst = p.snd, snd = p.fst }
+
+# Combined: Tree
+type 'a tree =
+  | Leaf
+  | Node of 'a * 'a tree * 'a tree
+
+let rec sum_tree = fn t ->
+  match t with
+  | Leaf -> 0
+  | Node(x, left, right) -> x + sum_tree left + sum_tree right
+  end
+
+# Test values
+let some_five = Some 5
+let none_int = None
+
+42

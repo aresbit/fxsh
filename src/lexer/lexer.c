@@ -472,8 +472,8 @@ fxsh_error_t fxsh_lexer_next(fxsh_lexer_t *lexer, fxsh_token_t *out_token) {
 
     /* Type variable (starts with ') */
     if (c == '\'') {
-        advance(lexer);
         const c8 *start = lexer->cursor;
+        advance(lexer);
         while (isalpha(peek(lexer))) {
             advance(lexer);
         }

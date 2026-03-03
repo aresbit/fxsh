@@ -167,8 +167,9 @@ int main(int argc, char **argv) {
 
     /* Type check */
     fxsh_type_env_t type_env = SP_NULLPTR;
+    fxsh_constr_env_t constr_env = SP_NULLPTR;
     fxsh_type_t *type = NULL;
-    err = fxsh_type_infer(ast, &type_env, &type);
+    err = fxsh_type_infer(ast, &type_env, &constr_env, &type);
     if (err != ERR_OK) {
         fprintf(stderr, "Type error\n");
         fxsh_ast_free(ast);

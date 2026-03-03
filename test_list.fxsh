@@ -1,0 +1,5 @@
+# Test list ADT
+type list = Nil | Cons of int * list
+
+let x = Cons(42, Nil)
+42

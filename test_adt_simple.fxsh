@@ -1,0 +1,5 @@
+# Simple ADT test
+type 'a option = None | Some of 'a
+
+let x = 42
+x

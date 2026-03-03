@@ -1,0 +1,5 @@
+# Simple ADT test without type variables
+type option = None | Some of int
+
+let x = 42
+x

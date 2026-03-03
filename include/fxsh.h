@@ -211,6 +211,7 @@ typedef enum {
     AST_PAT_TUPLE,  /* (p1, p2) */
     AST_PAT_CONS,   /* p1 :: p2 */
     AST_PAT_RECORD, /* {x, y} */
+    AST_PAT_CONSTR, /* Some x, None */
 
     /* Types */
     AST_TYPE_VAR,    /* 'a */
@@ -225,6 +226,11 @@ typedef enum {
     AST_CT_ALIGN_OF,  /* @alignOf type */
     AST_CT_FIELDS_OF, /* @fieldsOf type */
     AST_CT_HAS_FIELD, /* @hasField(type, "name") */
+
+    /* Type Definition (ADT) */
+    AST_TYPE_DEF,    /* type 'a option = None | Some of 'a */
+    AST_DATA_CONSTR, /* None | Some of 'a */
+    AST_CONSTR_APPL, /* Some 5, Cons(x, xs) */
 
     /* Declarations */
     AST_DECL_LET,
@@ -271,6 +277,19 @@ typedef struct {
 } fxsh_scheme_t;
 
 typedef sp_ht(sp_str_t, fxsh_scheme_t) fxsh_type_env_t;
+
+/*=============================================================================
+ * Constructor Environment (for ADT)
+ *=============================================================================*/
+
+typedef struct {
+    sp_str_t constr_name;
+    sp_str_t type_name;
+    fxsh_type_t *constr_type; /* e.g., 'a -> 'a option for Some */
+    s32 arity;                /* Number of arguments */
+} fxsh_constr_info_t;
+
+typedef sp_ht(sp_str_t, fxsh_constr_info_t) fxsh_constr_env_t;
 
 /*=============================================================================
  * Compile-time Values (defined early for use in AST)
@@ -442,6 +461,25 @@ struct fxsh_ast_node {
             sp_str_t field_name;
         } ct_has_field;
 
+        /* Type Definition */
+        struct {
+            sp_str_t name;
+            fxsh_ast_list_t type_params;  /* 'a, 'b */
+            fxsh_ast_list_t constructors; /* None, Some of 'a */
+        } type_def;
+
+        /* Data Constructor Definition */
+        struct {
+            sp_str_t name;
+            fxsh_ast_list_t arg_types; /* of 'a * 'b, empty if no args */
+        } data_constr;
+
+        /* Constructor Application */
+        struct {
+            sp_str_t constr_name; /* Some, Cons, etc. */
+            fxsh_ast_list_t args; /* 5, [x; xs] */
+        } constr_appl;
+
         /* Declaration */
         struct {
             sp_str_t name;
@@ -558,7 +596,11 @@ fxsh_type_t *fxsh_type_con(sp_str_t name);
 fxsh_type_t *fxsh_type_arrow(fxsh_type_t *param, fxsh_type_t *ret);
 fxsh_type_t *fxsh_type_apply(fxsh_type_t *con, fxsh_type_t *arg);
 
-fxsh_error_t fxsh_type_infer(fxsh_ast_node_t *ast, fxsh_type_env_t *env, fxsh_type_t **out_type);
+fxsh_error_t fxsh_type_infer(fxsh_ast_node_t *ast, fxsh_type_env_t *env,
+                             fxsh_constr_env_t *constr_env, fxsh_type_t **out_type);
+
+/* Constructor registration for ADT */
+void fxsh_register_type_constrs(fxsh_ast_node_t *type_def, fxsh_constr_env_t *constr_env);
 fxsh_error_t fxsh_type_unify(fxsh_type_t *t1, fxsh_type_t *t2, fxsh_subst_t *out_subst);
 void fxsh_type_apply_subst(fxsh_subst_t subst, fxsh_type_t **type);
 

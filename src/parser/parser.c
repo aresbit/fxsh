@@ -253,7 +253,123 @@ void fxsh_ast_free(fxsh_ast_node_t *node) {
  *=============================================================================*/
 
 static fxsh_ast_node_t *parse_expr(fxsh_parser_t *parser);
+static fxsh_ast_node_t *parse_pattern(fxsh_parser_t *parser);
 static fxsh_ast_node_t *parse_decl(fxsh_parser_t *parser);
+static fxsh_ast_node_t *parse_primary(fxsh_parser_t *parser);
+
+/*=============================================================================
+ * Pattern Parsing
+ *=============================================================================*/
+
+static bool is_pattern_start(fxsh_token_kind_t kind) {
+    return kind == TOK_IDENT || kind == TOK_TYPE_IDENT || kind == TOK_INT || kind == TOK_FLOAT ||
+           kind == TOK_STRING || kind == TOK_TRUE || kind == TOK_FALSE || kind == TOK_LPAREN ||
+           kind == TOK_LBRACKET || kind == TOK_LBRACE;
+}
+
+static fxsh_ast_node_t *parse_pattern(fxsh_parser_t *parser) {
+    fxsh_token_t *tok = current(parser);
+
+    /* Wildcard pattern: _ */
+    if (tok->kind == TOK_IDENT && tok->data.ident.len == 1 && tok->data.ident.data[0] == '_') {
+        advance(parser);
+        fxsh_ast_node_t *node = alloc_node(AST_PAT_WILD, tok->loc);
+        node->data.ident = tok->data.ident; /* empty string? */
+        return node;
+    }
+
+    /* Variable pattern: lowercase identifier */
+    if (tok->kind == TOK_IDENT) {
+        advance(parser);
+        fxsh_ast_node_t *node = alloc_node(AST_PAT_VAR, tok->loc);
+        node->data.ident = tok->data.ident;
+        return node;
+    }
+
+    /* Literal patterns: integers, floats, strings, booleans */
+    if (tok->kind == TOK_INT || tok->kind == TOK_FLOAT || tok->kind == TOK_STRING ||
+        tok->kind == TOK_TRUE || tok->kind == TOK_FALSE) {
+        fxsh_ast_node_t *lit = parse_primary(parser); /* parse_primary handles literals */
+        /* Convert literal expression to pattern node by changing its kind */
+        lit->kind = AST_PAT_LIT;
+        return lit;
+    }
+
+    /* Constructor pattern: uppercase identifier (type ident) */
+    if (tok->kind == TOK_TYPE_IDENT) {
+        advance(parser);
+        sp_str_t constr_name = tok->data.ident;
+
+        /* Parse nested patterns for constructor arguments */
+        fxsh_ast_list_t args = SP_NULLPTR;
+        while (!check(parser, TOK_NEWLINE) && !check(parser, TOK_EOF) &&
+               !check(parser, TOK_PIPE_SYM) && !check(parser, TOK_WITH) &&
+               !check(parser, TOK_END) && !check(parser, TOK_ELSE) && !check(parser, TOK_IN) &&
+               !check(parser, TOK_THEN) && !check(parser, TOK_RPAREN) &&
+               !check(parser, TOK_RBRACKET) && !check(parser, TOK_RBRACE) &&
+               !check(parser, TOK_COMMA) && !check(parser, TOK_ARROW) &&
+               !check(parser, TOK_FAT_ARROW)) {
+            fxsh_ast_node_t *arg = parse_pattern(parser);
+            if (!arg)
+                break;
+            sp_dyn_array_push(args, arg);
+        }
+
+        fxsh_ast_node_t *node = alloc_node(AST_PAT_CONSTR, tok->loc);
+        node->data.constr_appl.constr_name = constr_name;
+        node->data.constr_appl.args = args;
+        return node;
+    }
+
+    /* Tuple pattern: (p1, p2, ...) */
+    if (tok->kind == TOK_LPAREN) {
+        advance(parser); /* consume ( */
+        skip_newlines(parser);
+
+        /* Check for unit () */
+        if (check(parser, TOK_RPAREN)) {
+            advance(parser);
+            fxsh_ast_node_t *node = alloc_node(AST_LIT_UNIT, tok->loc);
+            return node; /* unit is both expression and pattern? */
+        }
+
+        fxsh_ast_list_t elements = SP_NULLPTR;
+        fxsh_ast_node_t *first = parse_pattern(parser);
+        if (!first)
+            return NULL;
+        sp_dyn_array_push(elements, first);
+        skip_newlines(parser);
+
+        if (match(parser, TOK_COMMA)) {
+            /* Tuple with multiple elements */
+            skip_newlines(parser);
+            while (!check(parser, TOK_RPAREN) && !check(parser, TOK_EOF)) {
+                sp_dyn_array_push(elements, parse_pattern(parser));
+                skip_newlines(parser);
+                if (!match(parser, TOK_COMMA))
+                    break;
+                skip_newlines(parser);
+            }
+            consume(parser, TOK_RPAREN, "')'");
+            fxsh_ast_node_t *node = alloc_node(AST_PAT_TUPLE, tok->loc);
+            node->data.elements = elements;
+            return node;
+        } else {
+            /* Single element in parentheses - not a tuple */
+            consume(parser, TOK_RPAREN, "')'");
+            return first;
+        }
+    }
+
+    /* List cons pattern: p1 :: p2 (right-associative) */
+    /* TODO: implement later */
+
+    /* Record pattern: {field1 = p1, field2 = p2} */
+    /* TODO: implement later */
+
+    /* Fallback: parse as expression (for now) */
+    return parse_primary(parser);
+}
 
 /*=============================================================================
  * Primary Expressions
@@ -283,10 +399,44 @@ static fxsh_ast_node_t *parse_primary(fxsh_parser_t *parser) {
             advance(parser);
             return fxsh_ast_lit_bool(false, tok->loc);
         }
-        case TOK_IDENT:
-        case TOK_TYPE_IDENT: {
+        case TOK_IDENT: {
             advance(parser);
             return fxsh_ast_ident(tok->data.ident, tok->loc);
+        }
+        case TOK_TYPE_IDENT: {
+            /* Constructor application: Some 5, Cons(x, xs), Cons(42, Nil) */
+            advance(parser);
+            sp_str_t constr_name = tok->data.ident;
+
+            /* Parse constructor arguments */
+            fxsh_ast_list_t args = SP_NULLPTR;
+            while (!check(parser, TOK_NEWLINE) && !check(parser, TOK_EOF) &&
+                   !check(parser, TOK_PIPE_SYM) && !check(parser, TOK_WITH) &&
+                   !check(parser, TOK_END) && !check(parser, TOK_ELSE) && !check(parser, TOK_IN) &&
+                   !check(parser, TOK_THEN) && !check(parser, TOK_RPAREN) &&
+                   !check(parser, TOK_RBRACKET) && !check(parser, TOK_RBRACE) &&
+                   !check(parser, TOK_COMMA) && !check(parser, TOK_ARROW) &&
+                   !check(parser, TOK_FAT_ARROW)) {
+                fxsh_ast_node_t *arg = parse_primary(parser);
+                if (!arg)
+                    break;
+
+                /* If argument is a tuple, flatten it into multiple args */
+                if (arg->kind == AST_TUPLE) {
+                    sp_dyn_array_for(arg->data.elements, i) {
+                        sp_dyn_array_push(args, arg->data.elements[i]);
+                    }
+                    /* Free the tuple node but not its elements (now in args) */
+                    sp_free(arg);
+                } else {
+                    sp_dyn_array_push(args, arg);
+                }
+            }
+
+            fxsh_ast_node_t *node = alloc_node(AST_CONSTR_APPL, tok->loc);
+            node->data.constr_appl.constr_name = constr_name;
+            node->data.constr_appl.args = args;
+            return node;
         }
         case TOK_AT: {
             advance(parser); /* consume @ */
@@ -427,10 +577,13 @@ static fxsh_ast_node_t *parse_primary(fxsh_parser_t *parser) {
             fxsh_ast_list_t params = SP_NULLPTR;
 
             /* Parse parameter list */
-            while (check(parser, TOK_IDENT)) {
-                fxsh_token_t *param = advance(parser);
-                fxsh_ast_node_t *pat = fxsh_ast_ident(param->data.ident, param->loc);
+            skip_newlines(parser);
+            while (is_pattern_start(current(parser)->kind)) {
+                fxsh_ast_node_t *pat = parse_pattern(parser);
+                if (!pat)
+                    break;
                 sp_dyn_array_push(params, pat);
+                skip_newlines(parser);
             }
 
             consume(parser, TOK_ARROW, "'->'");
@@ -507,14 +660,14 @@ static fxsh_ast_node_t *parse_primary(fxsh_parser_t *parser) {
             while (check(parser, TOK_PIPE_SYM)) {
                 advance(parser); /* consume | */
 
-                fxsh_ast_node_t *pattern = parse_expr(parser); /* Simplified */
+                fxsh_ast_node_t *pattern = parse_pattern(parser);
 
                 fxsh_ast_node_t *guard = NULL;
                 if (match(parser, TOK_IF)) {
                     guard = parse_expr(parser);
                 }
 
-                consume(parser, TOK_FAT_ARROW, "'=>'");
+                consume(parser, TOK_ARROW, "'->'");
 
                 fxsh_ast_node_t *arm_body = parse_expr(parser);
 
@@ -710,8 +863,90 @@ static fxsh_ast_node_t *parse_expr(fxsh_parser_t *parser) {
 }
 
 /*=============================================================================
+ * Type Definition Parsing (ADT)
+ *=============================================================================*/
+
+static fxsh_ast_node_t *parse_type_def(fxsh_parser_t *parser) {
+    fxsh_token_t *tok = advance(parser); /* consume 'type' */
+    skip_newlines(parser);
+
+    /* Parse optional type parameters ('a, 'b) */
+    fxsh_ast_list_t type_params = SP_NULLPTR;
+    while (check(parser, TOK_IDENT) && current(parser)->data.ident.data[0] == '\'') {
+        fxsh_token_t *param = advance(parser);
+        fxsh_ast_node_t *param_node = alloc_node(AST_TYPE_VAR, param->loc);
+        sp_dyn_array_push(type_params, param_node);
+        skip_newlines(parser);
+    }
+
+    /* Parse type name */
+    fxsh_token_t *name_tok = consume(parser, TOK_IDENT, "type name");
+    if (!name_tok)
+        return NULL;
+
+    skip_newlines(parser);
+    consume(parser, TOK_ASSIGN, "'='");
+    skip_newlines(parser);
+
+    /* Parse constructors separated by | */
+    fxsh_ast_list_t constructors = SP_NULLPTR;
+    do {
+        skip_newlines(parser);
+
+        /* Parse constructor name (can be TOK_IDENT or TOK_TYPE_IDENT) */
+        fxsh_token_t *constr_name = NULL;
+        if (check(parser, TOK_IDENT) || check(parser, TOK_TYPE_IDENT)) {
+            constr_name = advance(parser);
+        } else {
+            consume(parser, TOK_IDENT, "constructor name");
+            return NULL;
+        }
+
+        /* Parse optional 'of' and argument types */
+        fxsh_ast_list_t arg_types = SP_NULLPTR;
+        if (match(parser, TOK_OF)) {
+            skip_newlines(parser);
+
+            /* Parse at least one argument type */
+            do {
+                skip_newlines(parser);
+                /* Parse simple type identifiers, not full expressions */
+                /* This handles 'int', 'list', etc. as type names */
+                fxsh_ast_node_t *arg_type = NULL;
+                if (check(parser, TOK_IDENT) || check(parser, TOK_TYPE_IDENT)) {
+                    fxsh_token_t *type_tok = advance(parser);
+                    arg_type = fxsh_ast_ident(type_tok->data.ident, type_tok->loc);
+                } else {
+                    /* Fall back to expression parsing for complex types */
+                    arg_type = parse_expr(parser);
+                }
+                if (arg_type)
+                    sp_dyn_array_push(arg_types, arg_type);
+
+                skip_newlines(parser);
+            } while (match(parser, TOK_STAR) || match(parser, TOK_COMMA));
+        }
+
+        fxsh_ast_node_t *constr = alloc_node(AST_DATA_CONSTR, constr_name->loc);
+        constr->data.data_constr.name = constr_name->data.ident;
+        constr->data.data_constr.arg_types = arg_types;
+        sp_dyn_array_push(constructors, constr);
+
+        skip_newlines(parser);
+    } while (match(parser, TOK_PIPE_SYM));
+
+    fxsh_ast_node_t *node = alloc_node(AST_TYPE_DEF, tok->loc);
+    node->data.type_def.name = name_tok->data.ident;
+    node->data.type_def.type_params = type_params;
+    node->data.type_def.constructors = constructors;
+    return node;
+}
+
+/*=============================================================================
  * Declaration Parsing
  *=============================================================================*/
+
+static fxsh_ast_node_t *parse_let_decl(fxsh_parser_t *parser);
 
 static fxsh_ast_node_t *parse_decl(fxsh_parser_t *parser) {
     skip_newlines(parser);
@@ -720,8 +955,39 @@ static fxsh_ast_node_t *parse_decl(fxsh_parser_t *parser) {
         return NULL;
     }
 
+    /* Type definition */
+    if (check(parser, TOK_TYPE)) {
+        return parse_type_def(parser);
+    }
+
+    /* Let declaration at top level */
+    if (check(parser, TOK_LET)) {
+        return parse_let_decl(parser);
+    }
+
     /* For now, just parse as expression */
     return parse_expr(parser);
+}
+
+/* Parse top-level let declaration (without 'in' part) */
+static fxsh_ast_node_t *parse_let_decl(fxsh_parser_t *parser) {
+    advance(parser); /* consume let */
+    skip_newlines(parser);
+
+    bool is_comptime = match(parser, TOK_COMPTIME);
+    bool is_rec = match(parser, TOK_REC);
+
+    fxsh_token_t *name_tok = consume(parser, TOK_IDENT, "identifier");
+    if (!name_tok)
+        return NULL;
+
+    /* TODO: Parse type annotation if present */
+
+    consume(parser, TOK_ASSIGN, "'='");
+
+    fxsh_ast_node_t *value = parse_expr(parser);
+
+    return fxsh_ast_let(name_tok->data.ident, value, is_comptime, is_rec, name_tok->loc);
 }
 
 /*=============================================================================

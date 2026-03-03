@@ -1,0 +1,4 @@
+let map_option = fn f opt ->
+  opt
+
+42
