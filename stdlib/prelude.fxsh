@@ -1,0 +1,180 @@
+# prelude.fxsh - fxsh standard library prelude
+# This file is automatically imported by all fxsh programs
+
+#==============================================================================
+# Boolean Operations
+#==============================================================================
+
+let not = fn b -> if b then false else true end
+
+let and = fn a b -> if a then b else false end
+
+let or = fn a b -> if a then true else b end
+
+#==============================================================================
+# Comparison Operations
+#==============================================================================
+
+let eq = fn a b -> a == b
+
+let neq = fn a b -> a != b
+
+let lt = fn a b -> a < b
+
+let gt = fn a b -> a > b
+
+let leq = fn a b -> a <= b
+
+let geq = fn a b -> a >= b
+
+#==============================================================================
+# Arithmetic Operations
+#==============================================================================
+
+let add = fn a b -> a + b
+
+let sub = fn a b -> a - b
+
+let mul = fn a b -> a * b
+
+let div = fn a b -> a / b
+
+let mod = fn a b -> a % b
+
+let negate = fn x -> -x
+
+let abs = fn x -> if x < 0 then -x else x end
+
+#==============================================================================
+# Function Composition
+#==============================================================================
+
+let compose = fn f g x -> f (g x)
+
+let pipe = fn x f -> f x
+
+let flip = fn f a b -> f b a
+
+let const = fn x _ -> x
+
+let id = fn x -> x
+
+#==============================================================================
+# Option Type
+#==============================================================================
+
+type 'a option = None | Some of 'a
+
+let is_none = fn opt ->
+  match opt with
+  | None -> true
+  | Some _ -> false
+  end
+
+let is_some = fn opt ->
+  match opt with
+  | None -> false
+  | Some _ -> true
+  end
+
+let unwrap = fn opt ->
+  match opt with
+  | Some x -> x
+  | None -> panic "unwrap called on None"
+  end
+
+let unwrap_or = fn opt default ->
+  match opt with
+  | Some x -> x
+  | None -> default
+  end
+
+let map_option = fn f opt ->
+  match opt with
+  | Some x -> Some (f x)
+  | None -> None
+  end
+
+#==============================================================================
+# Result Type
+#==============================================================================
+
+type ('a, 'b) result = Ok of 'a | Err of 'b
+
+let is_ok = fn res ->
+  match res with
+  | Ok _ -> true
+  | Err _ -> false
+  end
+
+let is_err = fn res ->
+  match res with
+  | Ok _ -> false
+  | Err _ -> true
+  end
+
+let unwrap_ok = fn res ->
+  match res with
+  | Ok x -> x
+  | Err _ -> panic "unwrap_ok called on Err"
+  end
+
+let unwrap_err = fn res ->
+  match res with
+  | Ok _ -> panic "unwrap_err called on Ok"
+  | Err e -> e
+  end
+
+let map_result = fn f res ->
+  match res with
+  | Ok x -> Ok (f x)
+  | Err e -> Err e
+  end
+
+let map_err = fn f res ->
+  match res with
+  | Ok x -> Ok x
+  | Err e -> Err (f e)
+  end
+
+let bind_result = fn res f ->
+  match res with
+  | Ok x -> f x
+  | Err e -> Err e
+  end
+
+#==============================================================================
+# Tuple Operations
+#==============================================================================
+
+let fst = fn p ->
+  match p with
+  | (x, _) -> x
+  end
+
+let snd = fn p ->
+  match p with
+  | (_, y) -> y
+  end
+
+let swap = fn p ->
+  match p with
+  | (x, y) -> (y, x)
+  end
+
+#==============================================================================
+# Higher-Order Functions
+#==============================================================================
+
+let curry = fn f a b -> f (a, b)
+
+let uncurry = fn f p ->
+  match p with
+  | (a, b) -> f a b
+  end
+
+let apply = fn f x -> f x
+
+let fix = fn f ->
+  let rec loop = fn x -> f (loop x) in
+  loop
