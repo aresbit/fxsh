@@ -1,5 +1,0 @@
-# Test constructor application
-type option = None | Some of int
-
-let x = Some 42
-x

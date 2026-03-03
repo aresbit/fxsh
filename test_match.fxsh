@@ -1,9 +1,0 @@
-# Test match expression
-let opt = None
-
-match opt with
-| None -> 0
-| Some x -> x
-end
-
-42

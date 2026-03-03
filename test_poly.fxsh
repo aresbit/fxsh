@@ -1,4 +1,0 @@
-# Polymorphic ADT test
-type 'a option = None | Some of 'a
-
-42
