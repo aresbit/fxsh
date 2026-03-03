@@ -7,6 +7,7 @@
 #define FXSH_H
 
 #include "../lib/sp.h"
+#include "../lib/arena.h"
 
 /*=============================================================================
  * Version
@@ -276,7 +277,14 @@ typedef struct {
     fxsh_type_t *type;
 } fxsh_scheme_t;
 
-typedef sp_ht(sp_str_t, fxsh_scheme_t) fxsh_type_env_t;
+/* Type environment - linked list (functional style, supports shadowing) */
+typedef struct fxsh_tenv_node fxsh_tenv_node_t;
+struct fxsh_tenv_node {
+    sp_str_t            name;
+    fxsh_scheme_t      *scheme;
+    fxsh_tenv_node_t  *next;
+};
+typedef fxsh_tenv_node_t *fxsh_type_env_t;
 
 /*=============================================================================
  * Constructor Environment (for ADT)
@@ -289,7 +297,14 @@ typedef struct {
     s32 arity;                /* Number of arguments */
 } fxsh_constr_info_t;
 
-typedef sp_ht(sp_str_t, fxsh_constr_info_t) fxsh_constr_env_t;
+/* Constructor environment - linked list */
+typedef struct fxsh_cenv_node fxsh_cenv_node_t;
+struct fxsh_cenv_node {
+    sp_str_t           name;
+    fxsh_constr_info_t info;
+    fxsh_cenv_node_t  *next;
+};
+typedef fxsh_cenv_node_t *fxsh_constr_env_t;
 
 /*=============================================================================
  * Compile-time Values (defined early for use in AST)
@@ -595,6 +610,10 @@ fxsh_type_t *fxsh_type_var(fxsh_type_var_t var);
 fxsh_type_t *fxsh_type_con(sp_str_t name);
 fxsh_type_t *fxsh_type_arrow(fxsh_type_t *param, fxsh_type_t *ret);
 fxsh_type_t *fxsh_type_apply(fxsh_type_t *con, fxsh_type_t *arg);
+
+/* Type environment (linked list implementation) */
+fxsh_type_env_t fxsh_type_env_empty(void);
+fxsh_type_env_t fxsh_type_env_extend(fxsh_type_env_t env, sp_str_t name, fxsh_scheme_t *scheme);
 
 fxsh_error_t fxsh_type_infer(fxsh_ast_node_t *ast, fxsh_type_env_t *env,
                              fxsh_constr_env_t *constr_env, fxsh_type_t **out_type);

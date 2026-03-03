@@ -53,6 +53,9 @@ typedef enum {
 } run_mode_t;
 
 int main(int argc, char **argv) {
+    fxsh_arena_t *arena = arena_create(NULL, 64 * 1024);
+    fxsh_current_arena = arena;
+
     if (argc < 2) {
         print_usage(argv[0]);
         return 1;

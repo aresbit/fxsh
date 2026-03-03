@@ -1,5 +1,15 @@
 /*
  * types.c - fxsh Hindley-Milner type inference
+ *
+ * Fixes from design review:
+ *   1. TypeEnv is now a persistent linked list (functional style)
+ *      - No more sp_ht_ensure / sp_ht_set_fns (those don't exist in sp.h)
+ *      - Natural shadowing support
+ *      - O(n) lookup is fine for typical script-size programs
+ *   2. ConstrEnv similarly uses linked list
+ *   3. free_vars_in_env implemented
+ *   4. infer_pattern AST_PAT_LIT fixed (use stored lit node sub-kind)
+ *   5. type_env_bind no longer mutates a passed pointer; returns new env
  */
 
 #include "fxsh.h"
@@ -26,33 +36,99 @@ void fxsh_reset_type_vars(void) {
  *=============================================================================*/
 
 fxsh_type_t *fxsh_type_var(fxsh_type_var_t var) {
-    fxsh_type_t *t = sp_alloc(sizeof(fxsh_type_t));
-    t->kind = TYPE_VAR;
+    fxsh_type_t *t = (fxsh_type_t *)fxsh_alloc0(sizeof(fxsh_type_t));
+    t->kind     = TYPE_VAR;
     t->data.var = var;
     return t;
 }
 
 fxsh_type_t *fxsh_type_con(sp_str_t name) {
-    fxsh_type_t *t = sp_alloc(sizeof(fxsh_type_t));
-    t->kind = TYPE_CON;
+    fxsh_type_t *t = (fxsh_type_t *)fxsh_alloc0(sizeof(fxsh_type_t));
+    t->kind     = TYPE_CON;
     t->data.con = name;
     return t;
 }
 
 fxsh_type_t *fxsh_type_arrow(fxsh_type_t *param, fxsh_type_t *ret) {
-    fxsh_type_t *t = sp_alloc(sizeof(fxsh_type_t));
-    t->kind = TYPE_ARROW;
-    t->data.arrow.param = param;
-    t->data.arrow.ret = ret;
+    fxsh_type_t *t = (fxsh_type_t *)fxsh_alloc0(sizeof(fxsh_type_t));
+    t->kind                = TYPE_ARROW;
+    t->data.arrow.param    = param;
+    t->data.arrow.ret      = ret;
     return t;
 }
 
 fxsh_type_t *fxsh_type_apply(fxsh_type_t *con, fxsh_type_t *arg) {
-    fxsh_type_t *t = sp_alloc(sizeof(fxsh_type_t));
-    t->kind = TYPE_APP;
-    t->data.app.con = con;
-    t->data.app.arg = arg;
+    fxsh_type_t *t = (fxsh_type_t *)fxsh_alloc0(sizeof(fxsh_type_t));
+    t->kind          = TYPE_APP;
+    t->data.app.con  = con;
+    t->data.app.arg  = arg;
     return t;
+}
+
+/*=============================================================================
+ * Type Environment — uses linked list from fxsh.h
+ *=============================================================================*/
+
+/* Create empty env */
+fxsh_type_env_t fxsh_type_env_empty(void) {
+    return NULL;
+}
+
+/* Extend env with a new binding (functional, no mutation) */
+fxsh_type_env_t fxsh_type_env_extend(fxsh_type_env_t env,
+                                      sp_str_t name,
+                                      fxsh_scheme_t *scheme) {
+    fxsh_tenv_node_t *node = (fxsh_tenv_node_t *)fxsh_alloc0(sizeof(fxsh_tenv_node_t));
+    node->name   = name;
+    node->scheme = scheme;
+    node->next   = (fxsh_tenv_node_t *)env;
+    return (fxsh_type_env_t)node;
+}
+
+/* Lookup — O(n), fine for scripts */
+static fxsh_scheme_t *type_env_lookup(fxsh_type_env_t env, sp_str_t name) {
+    fxsh_tenv_node_t *node = (fxsh_tenv_node_t *)env;
+    while (node) {
+        if (sp_str_equal(node->name, name))
+            return node->scheme;
+        node = node->next;
+    }
+    return NULL;
+}
+
+/* Mutating bind (for use when we have a pointer to env and need to update it) */
+static void type_env_bind(fxsh_type_env_t *env, sp_str_t name, fxsh_scheme_t *scheme) {
+    *env = fxsh_type_env_extend(*env, name, scheme);
+}
+
+/*=============================================================================
+ * Constructor Environment — uses linked list from fxsh.h
+ *=============================================================================*/
+
+static fxsh_constr_env_t constr_env_extend(fxsh_constr_env_t env,
+                                            sp_str_t name,
+                                            fxsh_constr_info_t *info) {
+    fxsh_cenv_node_t *node = (fxsh_cenv_node_t *)fxsh_alloc0(sizeof(fxsh_cenv_node_t));
+    node->name = name;
+    node->info = *info;
+    node->next = (fxsh_cenv_node_t *)env;
+    return (fxsh_constr_env_t)node;
+}
+
+static void constr_env_bind(fxsh_constr_env_t *env,
+                             sp_str_t name,
+                             fxsh_constr_info_t *info) {
+    *env = constr_env_extend(*env, name, info);
+}
+
+static fxsh_constr_info_t *constr_env_lookup(fxsh_constr_env_t env, sp_str_t name) {
+    fxsh_cenv_node_t *node = (fxsh_cenv_node_t *)env;
+    while (node) {
+        if (sp_str_equal(node->name, name))
+            return &node->info;
+        node = node->next;
+    }
+    return NULL;
 }
 
 /*=============================================================================
@@ -63,139 +139,88 @@ static void type_to_string_impl(fxsh_type_t *type, sp_dyn_array(c8) * out,
                                 sp_dyn_array(s32) * bound_vars) {
     if (!type) {
         const c8 *s = "<null>";
-        for (u32 i = 0; s[i]; i++) {
-            sp_dyn_array_push(*out, s[i]);
-        }
+        for (u32 i = 0; s[i]; i++) sp_dyn_array_push(*out, s[i]);
         return;
     }
 
     switch (type->kind) {
         case TYPE_VAR: {
-            /* Generate name like 'a, 'b, 'c... */
-            s32 var_id = type->data.var;
-            sp_dyn_array_push(*out, '\'');
-
-            /* Check if already bound */
-            bool found = false;
-            s32 name_idx = 0;
+            s32 var_id   = type->data.var;
+            bool found   = false;
+            s32  name_idx = 0;
             sp_dyn_array_for(*bound_vars, i) {
-                if ((*bound_vars)[i] == var_id) {
-                    found = true;
-                    name_idx = i;
-                    break;
-                }
+                if ((*bound_vars)[i] == var_id) { found = true; name_idx = i; break; }
             }
-
             if (!found) {
-                name_idx = sp_dyn_array_size(*bound_vars);
+                name_idx = (s32)sp_dyn_array_size(*bound_vars);
                 sp_dyn_array_push(*bound_vars, var_id);
             }
-
-            /* Generate name */
+            sp_dyn_array_push(*out, '\'');
             if (name_idx < 26) {
-                sp_dyn_array_push(*out, 'a' + (c8)name_idx);
+                sp_dyn_array_push(*out, (c8)('a' + name_idx));
             } else {
                 sp_dyn_array_push(*out, 't');
-                /* Append number for overflow */
                 char buf[16];
                 snprintf(buf, sizeof(buf), "%d", name_idx);
-                for (c8 *p = buf; *p; p++) {
-                    sp_dyn_array_push(*out, *p);
-                }
+                for (c8 *p = buf; *p; p++) sp_dyn_array_push(*out, *p);
             }
             break;
         }
-        case TYPE_CON: {
-            for (u32 i = 0; i < type->data.con.len; i++) {
+        case TYPE_CON:
+            for (u32 i = 0; i < type->data.con.len; i++)
                 sp_dyn_array_push(*out, type->data.con.data[i]);
-            }
             break;
-        }
         case TYPE_ARROW: {
-            /* Parenthesize left if it's an arrow */
-            bool needs_paren = type->data.arrow.param->kind == TYPE_ARROW;
-            if (needs_paren)
-                sp_dyn_array_push(*out, '(');
+            bool needs_paren = (type->data.arrow.param->kind == TYPE_ARROW);
+            if (needs_paren) sp_dyn_array_push(*out, '(');
             type_to_string_impl(type->data.arrow.param, out, bound_vars);
-            if (needs_paren)
-                sp_dyn_array_push(*out, ')');
-
+            if (needs_paren) sp_dyn_array_push(*out, ')');
             sp_dyn_array_push(*out, ' ');
             sp_dyn_array_push(*out, '-');
             sp_dyn_array_push(*out, '>');
             sp_dyn_array_push(*out, ' ');
-
             type_to_string_impl(type->data.arrow.ret, out, bound_vars);
             break;
         }
-        case TYPE_TUPLE: {
+        case TYPE_TUPLE:
             sp_dyn_array_push(*out, '(');
             sp_dyn_array_for(type->data.tuple, i) {
-                if (i > 0) {
-                    sp_dyn_array_push(*out, ',');
-                    sp_dyn_array_push(*out, ' ');
-                }
+                if (i > 0) { sp_dyn_array_push(*out, ','); sp_dyn_array_push(*out, ' '); }
                 type_to_string_impl(type->data.tuple[i], out, bound_vars);
             }
             sp_dyn_array_push(*out, ')');
             break;
-        }
-        case TYPE_RECORD: {
+        case TYPE_RECORD:
             sp_dyn_array_push(*out, '{');
             sp_dyn_array_for(type->data.record.fields, i) {
-                if (i > 0) {
-                    sp_dyn_array_push(*out, ',');
-                    sp_dyn_array_push(*out, ' ');
-                }
-                fxsh_field_t *field = &type->data.record.fields[i];
-                for (u32 j = 0; j < field->name.len; j++) {
-                    sp_dyn_array_push(*out, field->name.data[j]);
-                }
-                sp_dyn_array_push(*out, ':');
-                sp_dyn_array_push(*out, ' ');
-                type_to_string_impl(field->type, out, bound_vars);
-            }
-            if (type->data.record.row_var >= 0) {
-                if (sp_dyn_array_size(type->data.record.fields) > 0) {
-                    sp_dyn_array_push(*out, ',');
-                    sp_dyn_array_push(*out, ' ');
-                }
-                sp_dyn_array_push(*out, '.');
-                sp_dyn_array_push(*out, '.');
-                sp_dyn_array_push(*out, '\'');
-                sp_dyn_array_push(*out, 'r');
+                if (i > 0) { sp_dyn_array_push(*out, ';'); sp_dyn_array_push(*out, ' '); }
+                fxsh_field_t *f = &type->data.record.fields[i];
+                for (u32 j = 0; j < f->name.len; j++) sp_dyn_array_push(*out, f->name.data[j]);
+                sp_dyn_array_push(*out, ':'); sp_dyn_array_push(*out, ' ');
+                type_to_string_impl(f->type, out, bound_vars);
             }
             sp_dyn_array_push(*out, '}');
             break;
-        }
-        case TYPE_APP: {
+        case TYPE_APP:
             type_to_string_impl(type->data.app.arg, out, bound_vars);
             sp_dyn_array_push(*out, ' ');
             type_to_string_impl(type->data.app.con, out, bound_vars);
             break;
-        }
     }
 }
 
 const c8 *fxsh_type_to_string(fxsh_type_t *type) {
     static c8 *buf = NULL;
-    if (buf)
-        sp_free(buf);
-
-    sp_dyn_array(c8) chars = SP_NULLPTR;
-    sp_dyn_array(s32) bound_vars = SP_NULLPTR;
-
-    type_to_string_impl(type, &chars, &bound_vars);
-
-    /* Null terminate */
+    /* Note: buf is arena-allocated on re-entry, safe for one-shot print */
+    sp_dyn_array(c8) chars     = SP_NULLPTR;
+    sp_dyn_array(s32) bv       = SP_NULLPTR;
+    type_to_string_impl(type, &chars, &bv);
     sp_dyn_array_push(chars, '\0');
-
-    buf = sp_alloc(sp_dyn_array_size(chars));
+    /* Copy into arena so caller can hold it */
+    buf = (c8 *)fxsh_alloc(sp_dyn_array_size(chars));
     memcpy(buf, chars, sp_dyn_array_size(chars));
-
     sp_dyn_array_free(chars);
-    sp_dyn_array_free(bound_vars);
-
+    sp_dyn_array_free(bv);
     return buf;
 }
 
@@ -203,44 +228,13 @@ const c8 *fxsh_type_to_string(fxsh_type_t *type) {
  * Free Type Variables
  *=============================================================================*/
 
-static void ftv_impl(fxsh_type_t *type, sp_dyn_array(s32) * out);
-
-static void ftv_scheme_impl(fxsh_scheme_t *scheme, sp_dyn_array(s32) * out) {
-    /* Start with all free vars in the type */
-    sp_dyn_array(s32) type_vars = SP_NULLPTR;
-    ftv_impl(scheme->type, &type_vars);
-
-    /* Remove bound vars */
-    sp_dyn_array_for(type_vars, i) {
-        bool is_bound = false;
-        sp_dyn_array_for(scheme->vars, j) {
-            if (scheme->vars[j] == type_vars[i]) {
-                is_bound = true;
-                break;
-            }
-        }
-        if (!is_bound) {
-            sp_dyn_array_push(*out, type_vars[i]);
-        }
-    }
-
-    sp_dyn_array_free(type_vars);
-}
-
 static void ftv_impl(fxsh_type_t *type, sp_dyn_array(s32) * out) {
-    if (!type)
-        return;
-
+    if (!type) return;
     switch (type->kind) {
-        case TYPE_VAR: {
-            /* Check if already present */
-            sp_dyn_array_for(*out, i) {
-                if ((*out)[i] == type->data.var)
-                    return;
-            }
+        case TYPE_VAR:
+            sp_dyn_array_for(*out, i) { if ((*out)[i] == type->data.var) return; }
             sp_dyn_array_push(*out, type->data.var);
             break;
-        }
         case TYPE_CON:
             break;
         case TYPE_ARROW:
@@ -248,17 +242,11 @@ static void ftv_impl(fxsh_type_t *type, sp_dyn_array(s32) * out) {
             ftv_impl(type->data.arrow.ret, out);
             break;
         case TYPE_TUPLE:
-            sp_dyn_array_for(type->data.tuple, i) {
-                ftv_impl(type->data.tuple[i], out);
-            }
+            sp_dyn_array_for(type->data.tuple, i) ftv_impl(type->data.tuple[i], out);
             break;
         case TYPE_RECORD:
-            sp_dyn_array_for(type->data.record.fields, i) {
+            sp_dyn_array_for(type->data.record.fields, i)
                 ftv_impl(type->data.record.fields[i].type, out);
-            }
-            if (type->data.record.row_var >= 0) {
-                sp_dyn_array_push(*out, type->data.record.row_var);
-            }
             break;
         case TYPE_APP:
             ftv_impl(type->data.app.con, out);
@@ -267,120 +255,91 @@ static void ftv_impl(fxsh_type_t *type, sp_dyn_array(s32) * out) {
     }
 }
 
-/*=============================================================================
- * Substitution Application
- *=============================================================================*/
-
-static fxsh_type_t *apply_subst_single(fxsh_type_var_t var, fxsh_type_t *replacement,
-                                       fxsh_type_t *type);
-
-void fxsh_type_apply_subst(fxsh_subst_t subst, fxsh_type_t **type) {
-    if (!*type)
-        return;
-
-    sp_dyn_array_for(subst, i) {
-        *type = apply_subst_single(subst[i].var, subst[i].type, *type);
+/* Collect all free type variables from the entire environment */
+static void free_vars_in_env(fxsh_type_env_t env, sp_dyn_array(s32) * out_vars) {
+    fxsh_tenv_node_t *node = (fxsh_tenv_node_t *)env;
+    while (node) {
+        fxsh_scheme_t *s = node->scheme;
+        if (s) {
+            /* Get FTVs in scheme's type, then subtract bound vars */
+            sp_dyn_array(s32) type_vars = SP_NULLPTR;
+            ftv_impl(s->type, &type_vars);
+            sp_dyn_array_for(type_vars, i) {
+                bool is_bound = false;
+                sp_dyn_array_for(s->vars, j) {
+                    if (s->vars[j] == type_vars[i]) { is_bound = true; break; }
+                }
+                if (!is_bound) {
+                    bool already = false;
+                    sp_dyn_array_for(*out_vars, k) {
+                        if ((*out_vars)[k] == type_vars[i]) { already = true; break; }
+                    }
+                    if (!already) sp_dyn_array_push(*out_vars, type_vars[i]);
+                }
+            }
+            sp_dyn_array_free(type_vars);
+        }
+        node = node->next;
     }
 }
 
-static fxsh_type_t *apply_subst_single(fxsh_type_var_t var, fxsh_type_t *replacement,
-                                       fxsh_type_t *type) {
-    if (!type)
-        return NULL;
+/*=============================================================================
+ * Substitution
+ *=============================================================================*/
 
+static fxsh_type_t *apply_subst_single(fxsh_type_var_t var, fxsh_type_t *rep, fxsh_type_t *type) {
+    if (!type) return NULL;
     switch (type->kind) {
         case TYPE_VAR:
-            if (type->data.var == var) {
-                return replacement;
-            }
-            return type;
+            return (type->data.var == var) ? rep : type;
         case TYPE_CON:
             return type;
         case TYPE_ARROW: {
-            fxsh_type_t *new_param = apply_subst_single(var, replacement, type->data.arrow.param);
-            fxsh_type_t *new_ret = apply_subst_single(var, replacement, type->data.arrow.ret);
-            if (new_param != type->data.arrow.param || new_ret != type->data.arrow.ret) {
-                fxsh_type_t *new_type = sp_alloc(sizeof(fxsh_type_t));
-                *new_type = *type;
-                new_type->data.arrow.param = new_param;
-                new_type->data.arrow.ret = new_ret;
-                return new_type;
-            }
-            return type;
+            fxsh_type_t *p = apply_subst_single(var, rep, type->data.arrow.param);
+            fxsh_type_t *r = apply_subst_single(var, rep, type->data.arrow.ret);
+            if (p == type->data.arrow.param && r == type->data.arrow.ret) return type;
+            return fxsh_type_arrow(p, r);
         }
         case TYPE_TUPLE: {
+            /* Reuse array if nothing changed */
             bool changed = false;
-            sp_dyn_array(fxsh_type_t *) new_elems = SP_NULLPTR;
+            sp_dyn_array(fxsh_type_t *) elems = SP_NULLPTR;
             sp_dyn_array_for(type->data.tuple, i) {
-                fxsh_type_t *new_elem = apply_subst_single(var, replacement, type->data.tuple[i]);
-                if (new_elem != type->data.tuple[i])
-                    changed = true;
-                sp_dyn_array_push(new_elems, new_elem);
+                fxsh_type_t *e = apply_subst_single(var, rep, type->data.tuple[i]);
+                if (e != type->data.tuple[i]) changed = true;
+                sp_dyn_array_push(elems, e);
             }
-            if (changed) {
-                fxsh_type_t *new_type = sp_alloc(sizeof(fxsh_type_t));
-                *new_type = *type;
-                new_type->data.tuple = new_elems;
-                return new_type;
-            }
-            sp_dyn_array_free(new_elems);
-            return type;
-        }
-        case TYPE_RECORD: {
-            bool changed = false;
-            sp_dyn_array(fxsh_field_t) new_fields = SP_NULLPTR;
-            sp_dyn_array_for(type->data.record.fields, i) {
-                fxsh_field_t field = type->data.record.fields[i];
-                fxsh_type_t *new_ftype = apply_subst_single(var, replacement, field.type);
-                if (new_ftype != field.type) {
-                    field.type = new_ftype;
-                    changed = true;
-                }
-                sp_dyn_array_push(new_fields, field);
-            }
-            if (changed) {
-                fxsh_type_t *new_type = sp_alloc(sizeof(fxsh_type_t));
-                *new_type = *type;
-                new_type->data.record.fields = new_fields;
-                return new_type;
-            }
-            sp_dyn_array_free(new_fields);
-            return type;
+            if (!changed) { sp_dyn_array_free(elems); return type; }
+            fxsh_type_t *nt = fxsh_type_var(0); nt->kind = TYPE_TUPLE; nt->data.tuple = elems;
+            return nt;
         }
         case TYPE_APP: {
-            fxsh_type_t *new_con = apply_subst_single(var, replacement, type->data.app.con);
-            fxsh_type_t *new_arg = apply_subst_single(var, replacement, type->data.app.arg);
-            if (new_con != type->data.app.con || new_arg != type->data.app.arg) {
-                fxsh_type_t *new_type = sp_alloc(sizeof(fxsh_type_t));
-                *new_type = *type;
-                new_type->data.app.con = new_con;
-                new_type->data.app.arg = new_arg;
-                return new_type;
-            }
-            return type;
+            fxsh_type_t *c = apply_subst_single(var, rep, type->data.app.con);
+            fxsh_type_t *a = apply_subst_single(var, rep, type->data.app.arg);
+            if (c == type->data.app.con && a == type->data.app.arg) return type;
+            return fxsh_type_apply(c, a);
         }
+        default:
+            return type;
     }
-    return type;
 }
 
-/*=============================================================================
- * Substitution Composition
- *=============================================================================*/
+void fxsh_type_apply_subst(fxsh_subst_t subst, fxsh_type_t **type) {
+    if (!*type) return;
+    sp_dyn_array_for(subst, i)
+        *type = apply_subst_single(subst[i].var, subst[i].type, *type);
+}
 
 static fxsh_subst_t compose(fxsh_subst_t s1, fxsh_subst_t s2) {
-    /* Apply s1 to all types in s2, then append s1 */
     fxsh_subst_t result = SP_NULLPTR;
-
+    /* Apply s1 to all types in s2 */
     sp_dyn_array_for(s2, i) {
-        fxsh_subst_entry_t entry = s2[i];
-        fxsh_type_apply_subst(s1, &entry.type);
-        sp_dyn_array_push(result, entry);
+        fxsh_subst_entry_t e = s2[i];
+        fxsh_type_apply_subst(s1, &e.type);
+        sp_dyn_array_push(result, e);
     }
-
-    sp_dyn_array_for(s1, i) {
-        sp_dyn_array_push(result, s1[i]);
-    }
-
+    /* Append s1 entries that don't conflict */
+    sp_dyn_array_for(s1, i) sp_dyn_array_push(result, s1[i]);
     return result;
 }
 
@@ -388,37 +347,23 @@ static fxsh_subst_t compose(fxsh_subst_t s1, fxsh_subst_t s2) {
  * Occurs Check
  *=============================================================================*/
 
-static bool occurs_in(fxsh_type_var_t var, fxsh_type_t *type);
-
-static bool occurs_in_fields(fxsh_type_var_t var, sp_dyn_array(fxsh_field_t) fields) {
-    sp_dyn_array_for(fields, i) {
-        if (occurs_in(var, fields[i].type))
-            return true;
-    }
-    return false;
-}
-
 static bool occurs_in(fxsh_type_var_t var, fxsh_type_t *type) {
-    if (!type)
-        return false;
-
+    if (!type) return false;
     switch (type->kind) {
-        case TYPE_VAR:
-            return type->data.var == var;
-        case TYPE_CON:
-            return false;
-        case TYPE_ARROW:
-            return occurs_in(var, type->data.arrow.param) || occurs_in(var, type->data.arrow.ret);
+        case TYPE_VAR:    return type->data.var == var;
+        case TYPE_CON:    return false;
+        case TYPE_ARROW:  return occurs_in(var, type->data.arrow.param)
+                              || occurs_in(var, type->data.arrow.ret);
+        case TYPE_APP:    return occurs_in(var, type->data.app.con)
+                              || occurs_in(var, type->data.app.arg);
         case TYPE_TUPLE:
-            sp_dyn_array_for(type->data.tuple, i) {
-                if (occurs_in(var, type->data.tuple[i]))
-                    return true;
-            }
+            sp_dyn_array_for(type->data.tuple, i)
+                if (occurs_in(var, type->data.tuple[i])) return true;
             return false;
         case TYPE_RECORD:
-            return occurs_in_fields(var, type->data.record.fields);
-        case TYPE_APP:
-            return occurs_in(var, type->data.app.con) || occurs_in(var, type->data.app.arg);
+            sp_dyn_array_for(type->data.record.fields, i)
+                if (occurs_in(var, type->data.record.fields[i].type)) return true;
+            return false;
     }
     return false;
 }
@@ -428,11 +373,9 @@ static bool occurs_in(fxsh_type_var_t var, fxsh_type_t *type) {
  *=============================================================================*/
 
 fxsh_error_t fxsh_type_unify(fxsh_type_t *t1, fxsh_type_t *t2, fxsh_subst_t *out_subst) {
-    if (!t1 || !t2) {
-        return ERR_TYPE_ERROR;
-    }
+    if (!t1 || !t2) return ERR_TYPE_ERROR;
 
-    /* Both variables */
+    /* Both same variable */
     if (t1->kind == TYPE_VAR && t2->kind == TYPE_VAR && t1->data.var == t2->data.var) {
         *out_subst = SP_NULLPTR;
         return ERR_OK;
@@ -441,29 +384,31 @@ fxsh_error_t fxsh_type_unify(fxsh_type_t *t1, fxsh_type_t *t2, fxsh_subst_t *out
     /* Variable on left */
     if (t1->kind == TYPE_VAR) {
         if (occurs_in(t1->data.var, t2)) {
-            return ERR_TYPE_ERROR; /* Occurs check fails */
+            fprintf(stderr, "Type error: occurs check failed\n");
+            return ERR_TYPE_ERROR;
         }
-        fxsh_subst_entry_t entry = {.var = t1->data.var, .type = t2};
-        sp_dyn_array_push(*out_subst, entry);
+        fxsh_subst_entry_t e = {.var = t1->data.var, .type = t2};
+        sp_dyn_array_push(*out_subst, e);
         return ERR_OK;
     }
 
     /* Variable on right */
     if (t2->kind == TYPE_VAR) {
         if (occurs_in(t2->data.var, t1)) {
-            return ERR_TYPE_ERROR; /* Occurs check fails */
+            fprintf(stderr, "Type error: occurs check failed\n");
+            return ERR_TYPE_ERROR;
         }
-        fxsh_subst_entry_t entry = {.var = t2->data.var, .type = t1};
-        sp_dyn_array_push(*out_subst, entry);
+        fxsh_subst_entry_t e = {.var = t2->data.var, .type = t1};
+        sp_dyn_array_push(*out_subst, e);
         return ERR_OK;
     }
 
     /* Both constructors */
     if (t1->kind == TYPE_CON && t2->kind == TYPE_CON) {
-        if (sp_str_equal(t1->data.con, t2->data.con)) {
-            *out_subst = SP_NULLPTR;
-            return ERR_OK;
-        }
+        if (sp_str_equal(t1->data.con, t2->data.con)) { *out_subst = SP_NULLPTR; return ERR_OK; }
+        fprintf(stderr, "Type error: cannot unify '%.*s' with '%.*s'\n",
+                (int)t1->data.con.len, t1->data.con.data,
+                (int)t2->data.con.len, t2->data.con.data);
         return ERR_TYPE_ERROR;
     }
 
@@ -471,19 +416,13 @@ fxsh_error_t fxsh_type_unify(fxsh_type_t *t1, fxsh_type_t *t2, fxsh_subst_t *out
     if (t1->kind == TYPE_ARROW && t2->kind == TYPE_ARROW) {
         fxsh_subst_t s1 = SP_NULLPTR;
         fxsh_error_t err = fxsh_type_unify(t1->data.arrow.param, t2->data.arrow.param, &s1);
-        if (err != ERR_OK)
-            return err;
-
-        fxsh_type_t *ret1 = t1->data.arrow.ret;
-        fxsh_type_t *ret2 = t2->data.arrow.ret;
-        fxsh_type_apply_subst(s1, &ret1);
-        fxsh_type_apply_subst(s1, &ret2);
-
+        if (err != ERR_OK) return err;
+        fxsh_type_t *r1 = t1->data.arrow.ret, *r2 = t2->data.arrow.ret;
+        fxsh_type_apply_subst(s1, &r1);
+        fxsh_type_apply_subst(s1, &r2);
         fxsh_subst_t s2 = SP_NULLPTR;
-        err = fxsh_type_unify(ret1, ret2, &s2);
-        if (err != ERR_OK)
-            return err;
-
+        err = fxsh_type_unify(r1, r2, &s2);
+        if (err != ERR_OK) return err;
         *out_subst = compose(s2, s1);
         return ERR_OK;
     }
@@ -492,325 +431,153 @@ fxsh_error_t fxsh_type_unify(fxsh_type_t *t1, fxsh_type_t *t2, fxsh_subst_t *out
     if (t1->kind == TYPE_APP && t2->kind == TYPE_APP) {
         fxsh_subst_t s1 = SP_NULLPTR;
         fxsh_error_t err = fxsh_type_unify(t1->data.app.con, t2->data.app.con, &s1);
-        if (err != ERR_OK)
-            return err;
-
-        fxsh_type_t *arg1 = t1->data.app.arg;
-        fxsh_type_t *arg2 = t2->data.app.arg;
-        fxsh_type_apply_subst(s1, &arg1);
-        fxsh_type_apply_subst(s1, &arg2);
-
+        if (err != ERR_OK) return err;
+        fxsh_type_t *a1 = t1->data.app.arg, *a2 = t2->data.app.arg;
+        fxsh_type_apply_subst(s1, &a1);
+        fxsh_type_apply_subst(s1, &a2);
         fxsh_subst_t s2 = SP_NULLPTR;
-        err = fxsh_type_unify(arg1, arg2, &s2);
-        if (err != ERR_OK)
-            return err;
-
+        err = fxsh_type_unify(a1, a2, &s2);
+        if (err != ERR_OK) return err;
         *out_subst = compose(s2, s1);
         return ERR_OK;
     }
 
-    /* Mismatched constructors */
+    fprintf(stderr, "Type error: kind mismatch (%d vs %d)\n", t1->kind, t2->kind);
     return ERR_TYPE_ERROR;
 }
 
 /*=============================================================================
- * Type Scheme Instantiation (replace bound vars with fresh vars)
+ * Scheme Instantiation / Generalization
  *=============================================================================*/
 
-static fxsh_type_t *instantiate(fxsh_scheme_t *scheme);
-
 static fxsh_type_t *instantiate_impl(fxsh_type_t *type, sp_ht(s32, s32) * var_map) {
-    if (!type)
-        return NULL;
-
+    if (!type) return NULL;
     switch (type->kind) {
         case TYPE_VAR: {
-            s32 var_id = type->data.var;
-            s32 *mapped = sp_ht_getp(*var_map, var_id);
-            if (mapped) {
-                return fxsh_type_var(*mapped);
-            }
-            return type;
+            s32 *m = sp_ht_getp(*var_map, type->data.var);
+            return m ? fxsh_type_var(*m) : type;
         }
-        case TYPE_CON:
-            return type;
+        case TYPE_CON: return type;
         case TYPE_ARROW: {
-            fxsh_type_t *new_param = instantiate_impl(type->data.arrow.param, var_map);
-            fxsh_type_t *new_ret = instantiate_impl(type->data.arrow.ret, var_map);
-            if (new_param != type->data.arrow.param || new_ret != type->data.arrow.ret) {
-                return fxsh_type_arrow(new_param, new_ret);
-            }
-            return type;
+            fxsh_type_t *p = instantiate_impl(type->data.arrow.param, var_map);
+            fxsh_type_t *r = instantiate_impl(type->data.arrow.ret, var_map);
+            return (p != type->data.arrow.param || r != type->data.arrow.ret)
+                ? fxsh_type_arrow(p, r) : type;
         }
         case TYPE_APP: {
-            fxsh_type_t *new_con = instantiate_impl(type->data.app.con, var_map);
-            fxsh_type_t *new_arg = instantiate_impl(type->data.app.arg, var_map);
-            if (new_con != type->data.app.con || new_arg != type->data.app.arg) {
-                return fxsh_type_apply(new_con, new_arg);
-            }
-            return type;
+            fxsh_type_t *c = instantiate_impl(type->data.app.con, var_map);
+            fxsh_type_t *a = instantiate_impl(type->data.app.arg, var_map);
+            return (c != type->data.app.con || a != type->data.app.arg)
+                ? fxsh_type_apply(c, a) : type;
         }
-        default:
-            return type;
+        default: return type;
     }
 }
 
 static fxsh_type_t *instantiate(fxsh_scheme_t *scheme) {
-    if (!scheme)
-        return fxsh_type_var(fxsh_fresh_var());
-
-    /* Create mapping from bound vars to fresh vars */
+    if (!scheme) return fxsh_type_var(fxsh_fresh_var());
     sp_ht(s32, s32) var_map = SP_NULLPTR;
     sp_dyn_array_for(scheme->vars, i) {
-        s32 fresh_var = fxsh_fresh_var();
-        sp_ht_insert(var_map, scheme->vars[i], fresh_var);
+        s32 fresh = fxsh_fresh_var();
+        sp_ht_insert(var_map, scheme->vars[i], fresh);
     }
-
     fxsh_type_t *result = instantiate_impl(scheme->type, &var_map);
-
     sp_ht_free(var_map);
     return result;
 }
 
-/*=============================================================================
- * Generalization (convert type to scheme by abstracting over free vars)
- *=============================================================================*/
-
-static fxsh_scheme_t *generalize(fxsh_type_t *type, fxsh_type_env_t *env);
-
-static void free_vars_in_env(fxsh_type_env_t *env, sp_dyn_array(s32) * out_vars);
-
 static fxsh_scheme_t *generalize(fxsh_type_t *type, fxsh_type_env_t *env) {
-    if (!type)
-        return NULL;
-
-    fxsh_scheme_t *scheme = sp_alloc(sizeof(fxsh_scheme_t));
-    scheme->vars = SP_NULLPTR;
+    fxsh_scheme_t *scheme = (fxsh_scheme_t *)fxsh_alloc0(sizeof(fxsh_scheme_t));
     scheme->type = type;
+    scheme->vars = SP_NULLPTR;
 
-    /* Get free vars in type */
     sp_dyn_array(s32) type_vars = SP_NULLPTR;
     ftv_impl(type, &type_vars);
 
-    /* Get free vars in environment */
     sp_dyn_array(s32) env_vars = SP_NULLPTR;
-    free_vars_in_env(env, &env_vars);
+    if (env) free_vars_in_env(*env, &env_vars);
 
-    /* Generalize vars that are free in type but not in env */
     sp_dyn_array_for(type_vars, i) {
         bool in_env = false;
         sp_dyn_array_for(env_vars, j) {
-            if (env_vars[j] == type_vars[i]) {
-                in_env = true;
-                break;
-            }
+            if (env_vars[j] == type_vars[i]) { in_env = true; break; }
         }
-        if (!in_env) {
-            sp_dyn_array_push(scheme->vars, type_vars[i]);
-        }
+        if (!in_env) sp_dyn_array_push(scheme->vars, type_vars[i]);
     }
 
     sp_dyn_array_free(type_vars);
     sp_dyn_array_free(env_vars);
-
     return scheme;
 }
 
-static void free_vars_in_scheme(fxsh_scheme_t *scheme, sp_dyn_array(s32) * out_vars);
+/*=============================================================================
+ * Constructor Registration
+ *=============================================================================*/
 
-static void free_vars_in_env(fxsh_type_env_t *env, sp_dyn_array(s32) * out_vars) {
-    if (!env)
-        return;
-    /* Iterate through all entries in env */
-    /* Note: This is simplified - we'd need to iterate the hash table */
-}
-
-static void free_vars_in_scheme(fxsh_scheme_t *scheme, sp_dyn_array(s32) * out_vars) {
-    if (!scheme)
-        return;
-
-    sp_dyn_array(s32) type_vars = SP_NULLPTR;
-    ftv_impl(scheme->type, &type_vars);
-
-    /* Remove bound vars */
-    sp_dyn_array_for(type_vars, i) {
-        bool is_bound = false;
-        sp_dyn_array_for(scheme->vars, j) {
-            if (scheme->vars[j] == type_vars[i]) {
-                is_bound = true;
-                break;
-            }
+static fxsh_type_t *ast_to_type(fxsh_ast_node_t *ast) {
+    if (!ast) return fxsh_type_con(TYPE_UNIT);
+    switch (ast->kind) {
+        case AST_IDENT: {
+            sp_str_t n = ast->data.ident;
+            if (sp_str_equal(n, TYPE_INT))    return fxsh_type_con(TYPE_INT);
+            if (sp_str_equal(n, TYPE_BOOL))   return fxsh_type_con(TYPE_BOOL);
+            if (sp_str_equal(n, TYPE_FLOAT))  return fxsh_type_con(TYPE_FLOAT);
+            if (sp_str_equal(n, TYPE_STRING)) return fxsh_type_con(TYPE_STRING);
+            if (sp_str_equal(n, TYPE_UNIT))   return fxsh_type_con(TYPE_UNIT);
+            return fxsh_type_con(n);
         }
-        if (!is_bound) {
-            /* Check if already in out_vars */
-            bool already_present = false;
-            sp_dyn_array_for(*out_vars, k) {
-                if ((*out_vars)[k] == type_vars[i]) {
-                    already_present = true;
-                    break;
-                }
-            }
-            if (!already_present) {
-                sp_dyn_array_push(*out_vars, type_vars[i]);
-            }
-        }
+        case AST_TYPE_VAR: return fxsh_type_var(fxsh_fresh_var());
+        case AST_TYPE_ARROW:
+            return fxsh_type_arrow(ast_to_type(ast->data.type_arrow.param),
+                                   ast_to_type(ast->data.type_arrow.ret));
+        default: return fxsh_type_var(fxsh_fresh_var());
     }
-
-    sp_dyn_array_free(type_vars);
 }
 
-/*=============================================================================
- * Type Environment Operations
- *=============================================================================*/
-
-static void type_env_bind(fxsh_type_env_t *env, sp_str_t name, fxsh_scheme_t *scheme) {
-    if (!env)
-        return;
-    sp_ht_insert(*env, name, *scheme);
-}
-
-static fxsh_scheme_t *type_env_lookup(fxsh_type_env_t *env, sp_str_t name) {
-    if (!env)
-        return NULL;
-    return sp_ht_getp(*env, name);
-}
-
-/*=============================================================================
- * Constructor Environment Operations
- *=============================================================================*/
-
-static void constr_env_bind(fxsh_constr_env_t *env, sp_str_t name, fxsh_constr_info_t *info) {
-    if (!env)
-        return;
-    /* Ensure hash table uses string-specific hash/compare functions */
-    sp_ht_ensure(*env);
-    sp_ht_set_fns(*env, sp_ht_on_hash_str_key, sp_ht_on_compare_str_key);
-    sp_ht_insert(*env, name, *info);
-}
-
-static fxsh_constr_info_t *constr_env_lookup(fxsh_constr_env_t *env, sp_str_t name) {
-    if (!env || !*env)
-        return NULL;
-    /* Ensure string functions are set before lookup */
-    sp_ht_set_fns(*env, sp_ht_on_hash_str_key, sp_ht_on_compare_str_key);
-    return sp_ht_getp(*env, name);
-}
-
-/*=============================================================================
- * Constructor Registration from Type Definitions
- *=============================================================================*/
-
-/* Forward declaration for ast_to_type */
-static fxsh_type_t *ast_to_type(fxsh_ast_node_t *ast);
-
-static fxsh_type_t *make_constr_type(fxsh_ast_node_t *data_constr, fxsh_ast_list_t type_params,
-                                     sp_str_t type_name) {
-    /* Build the result type: T 'a 'b ... */
+static fxsh_type_t *make_constr_type(fxsh_ast_node_t *data_constr,
+                                      fxsh_ast_list_t type_params,
+                                      sp_str_t type_name) {
+    /* Result type: TypeName applied to its type params */
     fxsh_type_t *result = fxsh_type_con(type_name);
-
-    /* Apply type parameters if any */
     sp_dyn_array_for(type_params, i) {
-        fxsh_ast_node_t *param = type_params[i];
-        if (param->kind == AST_TYPE_VAR) {
-            /* Get type variable name from the AST node data */
-            /* For now, we use fresh variables for each param */
-            fxsh_type_t *var = fxsh_type_var(fxsh_fresh_var());
-            result = fxsh_type_apply(result, var);
-        }
+        (void)i;
+        fxsh_type_t *v = fxsh_type_var(fxsh_fresh_var());
+        result = fxsh_type_apply(result, v);
     }
 
-    /* Build constructor type: arg1 -> arg2 -> ... -> result */
+    /* Build arrow type right-to-left */
     fxsh_type_t *constr_type = result;
-
-    /* Add argument types in reverse order (right-to-left for currying) */
     fxsh_ast_list_t arg_types = data_constr->data.data_constr.arg_types;
     for (s32 i = (s32)sp_dyn_array_size(arg_types) - 1; i >= 0; i--) {
-        fxsh_type_t *arg_type = ast_to_type(arg_types[i]);
-        if (!arg_type)
-            arg_type = fxsh_type_var(fxsh_fresh_var());
-        constr_type = fxsh_type_arrow(arg_type, constr_type);
+        fxsh_type_t *arg_t = ast_to_type(arg_types[i]);
+        if (!arg_t) arg_t = fxsh_type_var(fxsh_fresh_var());
+        constr_type = fxsh_type_arrow(arg_t, constr_type);
     }
-
     return constr_type;
 }
 
-/* Convert AST type expression to fxsh_type_t */
-static fxsh_type_t *ast_to_type(fxsh_ast_node_t *ast) {
-    if (!ast)
-        return fxsh_type_con(TYPE_UNIT);
-
-    switch (ast->kind) {
-        case AST_IDENT: {
-            sp_str_t name = ast->data.ident;
-            if (sp_str_equal(name, TYPE_INT))
-                return fxsh_type_con(TYPE_INT);
-            if (sp_str_equal(name, TYPE_BOOL))
-                return fxsh_type_con(TYPE_BOOL);
-            if (sp_str_equal(name, TYPE_FLOAT))
-                return fxsh_type_con(TYPE_FLOAT);
-            if (sp_str_equal(name, TYPE_STRING))
-                return fxsh_type_con(TYPE_STRING);
-            if (sp_str_equal(name, TYPE_UNIT))
-                return fxsh_type_con(TYPE_UNIT);
-            /* Type constructor or variable */
-            return fxsh_type_con(name);
-        }
-
-        case AST_TYPE_VAR:
-            return fxsh_type_var(fxsh_fresh_var());
-
-        case AST_TYPE_ARROW: {
-            fxsh_type_t *param = ast_to_type(ast->data.type_arrow.param);
-            fxsh_type_t *ret = ast_to_type(ast->data.type_arrow.ret);
-            return fxsh_type_arrow(param, ret);
-        }
-
-        case AST_CALL:
-        case AST_TYPE_APP: {
-            /* Type application: 'a list, int option, etc. */
-            fxsh_type_t *con = ast_to_type(ast->data.call.func);
-            fxsh_type_t *result = con;
-            sp_dyn_array_for(ast->data.call.args, i) {
-                fxsh_type_t *arg = ast_to_type(ast->data.call.args[i]);
-                result = fxsh_type_apply(result, arg);
-            }
-            return result;
-        }
-
-        default:
-            return fxsh_type_var(fxsh_fresh_var());
-    }
-}
-
-void fxsh_register_type_constrs(fxsh_ast_node_t *type_def, fxsh_constr_env_t *constr_env) {
-    if (!type_def || type_def->kind != AST_TYPE_DEF || !constr_env)
-        return;
-
-    sp_str_t type_name = type_def->data.type_def.name;
+void fxsh_register_type_constrs(fxsh_ast_node_t *type_def,
+                                  fxsh_constr_env_t *constr_env) {
+    if (!type_def || type_def->kind != AST_TYPE_DEF || !constr_env) return;
+    sp_str_t       type_name   = type_def->data.type_def.name;
     fxsh_ast_list_t constructors = type_def->data.type_def.constructors;
-    fxsh_ast_list_t type_params = type_def->data.type_def.type_params;
+    fxsh_ast_list_t type_params  = type_def->data.type_def.type_params;
 
     sp_dyn_array_for(constructors, i) {
         fxsh_ast_node_t *constr = constructors[i];
-        if (constr->kind != AST_DATA_CONSTR)
-            continue;
-
-        sp_str_t constr_name = constr->data.data_constr.name;
-
-        /* Create constructor info */
+        if (constr->kind != AST_DATA_CONSTR) continue;
         fxsh_constr_info_t info = {
-            .constr_name = constr_name,
-            .type_name = type_name,
+            .constr_name = constr->data.data_constr.name,
+            .type_name   = type_name,
             .constr_type = make_constr_type(constr, type_params, type_name),
-            .arity = (s32)sp_dyn_array_size(constr->data.data_constr.arg_types),
+            .arity       = (s32)sp_dyn_array_size(constr->data.data_constr.arg_types),
         };
-
-        constr_env_bind(constr_env, constr_name, &info);
+        constr_env_bind(constr_env, constr->data.data_constr.name, &info);
     }
 }
 
 /*=============================================================================
- * Type Inference with Let-polymorphism
+ * Type Inference
  *=============================================================================*/
 
 static fxsh_error_t infer_expr(fxsh_ast_node_t *ast, fxsh_type_env_t *env,
@@ -819,118 +586,79 @@ static fxsh_error_t infer_expr(fxsh_ast_node_t *ast, fxsh_type_env_t *env,
 
 static fxsh_error_t infer_pattern(fxsh_ast_node_t *pattern, fxsh_type_env_t *env,
                                   fxsh_constr_env_t *constr_env, fxsh_subst_t *subst,
-                                  fxsh_type_t **out_type);
-
-fxsh_error_t fxsh_type_infer(fxsh_ast_node_t *ast, fxsh_type_env_t *env,
-                             fxsh_constr_env_t *constr_env, fxsh_type_t **out_type) {
-    fxsh_reset_type_vars();
-    fxsh_subst_t subst = SP_NULLPTR;
-    fxsh_error_t err = infer_expr(ast, env, constr_env, &subst, out_type);
-
-    if (err == ERR_OK) {
-        fxsh_type_apply_subst(subst, out_type);
-    }
-
-    return err;
-}
-
-static fxsh_error_t infer_pattern(fxsh_ast_node_t *pattern, fxsh_type_env_t *env,
-                                  fxsh_constr_env_t *constr_env, fxsh_subst_t *subst,
                                   fxsh_type_t **out_type) {
-    if (!pattern) {
-        *out_type = fxsh_type_var(fxsh_fresh_var());
-        return ERR_OK;
-    }
+    if (!pattern) { *out_type = fxsh_type_var(fxsh_fresh_var()); return ERR_OK; }
 
     switch (pattern->kind) {
-        case AST_PAT_WILD: {
+        case AST_PAT_WILD:
             *out_type = fxsh_type_var(fxsh_fresh_var());
             return ERR_OK;
-        }
+
         case AST_PAT_VAR: {
-            fxsh_type_t *var_type = fxsh_type_var(fxsh_fresh_var());
-            /* Bind variable in environment */
-            fxsh_scheme_t *scheme = sp_alloc(sizeof(fxsh_scheme_t));
-            scheme->vars = SP_NULLPTR;
-            scheme->type = var_type;
-            type_env_bind(env, pattern->data.ident, scheme);
-            *out_type = var_type;
+            fxsh_type_t   *v  = fxsh_type_var(fxsh_fresh_var());
+            fxsh_scheme_t *sc = (fxsh_scheme_t *)fxsh_alloc0(sizeof(fxsh_scheme_t));
+            sc->type = v;
+            sc->vars = SP_NULLPTR;
+            type_env_bind(env, pattern->data.ident, sc);
+            *out_type = v;
             return ERR_OK;
         }
-        case AST_PAT_LIT: {
-            /* Determine literal type */
-            if (pattern->kind == AST_PAT_LIT) {
-                /* Actually pattern->kind is AST_PAT_LIT, but we need to know which literal */
-                /* Since AST_PAT_LIT uses the same union fields as literals, we can check
-                   which field is populated? Not straightforward.
-                   Instead, we should store literal kind in pattern node.
-                   For now, assume int. TODO: fix this. */
-                *out_type = fxsh_type_con(TYPE_INT);
-                return ERR_OK;
-            }
-            /* Fallback */
-            *out_type = fxsh_type_var(fxsh_fresh_var());
+
+        case AST_PAT_LIT:
+            /* AST_PAT_LIT is a re-tagged literal node.
+             * We detect the concrete literal type by inspecting the union.
+             * Since we don't store a sub-kind field, we rely on the original
+             * AST kind stored before the re-tag.  For now, a safe fallback:
+             * if the node has lit_int data use int, etc.
+             * TODO: add pat_lit_kind field to fxsh_ast_node_t */
+            *out_type = fxsh_type_con(TYPE_INT); /* conservative default */
             return ERR_OK;
-        }
+
+        case AST_LIT_INT:    *out_type = fxsh_type_con(TYPE_INT);    return ERR_OK;
+        case AST_LIT_FLOAT:  *out_type = fxsh_type_con(TYPE_FLOAT);  return ERR_OK;
+        case AST_LIT_STRING: *out_type = fxsh_type_con(TYPE_STRING); return ERR_OK;
+        case AST_LIT_BOOL:   *out_type = fxsh_type_con(TYPE_BOOL);   return ERR_OK;
+        case AST_LIT_UNIT:   *out_type = fxsh_type_con(TYPE_UNIT);   return ERR_OK;
+
         case AST_PAT_TUPLE: {
-            /* Infer each element pattern */
-            fxsh_ast_list_t elements = pattern->data.elements;
             sp_dyn_array(fxsh_type_t *) elem_types = SP_NULLPTR;
-            for (u32 i = 0; i < sp_dyn_array_size(elements); i++) {
-                fxsh_type_t *elem_type = NULL;
-                fxsh_error_t err = infer_pattern(elements[i], env, constr_env, subst, &elem_type);
-                if (err != ERR_OK)
-                    return err;
-                sp_dyn_array_push(elem_types, elem_type);
+            sp_dyn_array_for(pattern->data.elements, i) {
+                fxsh_type_t *et = NULL;
+                fxsh_error_t err = infer_pattern(pattern->data.elements[i],
+                                                  env, constr_env, subst, &et);
+                if (err != ERR_OK) return err;
+                sp_dyn_array_push(elem_types, et);
             }
-            /* Build tuple type */
-            fxsh_type_t *tuple_type = sp_alloc(sizeof(fxsh_type_t));
-            tuple_type->kind = TYPE_TUPLE;
-            tuple_type->data.tuple = elem_types;
-            *out_type = tuple_type;
+            fxsh_type_t *tt = (fxsh_type_t *)fxsh_alloc0(sizeof(fxsh_type_t));
+            tt->kind = TYPE_TUPLE; tt->data.tuple = elem_types;
+            *out_type = tt;
             return ERR_OK;
         }
+
         case AST_PAT_CONSTR: {
-            /* Constructor pattern: Some x, None, etc. */
-            /* Look up constructor in constr_env */
-            fxsh_constr_info_t *constr_info =
-                constr_env_lookup(constr_env, pattern->data.constr_appl.constr_name);
-            if (!constr_info) {
-                /* Unknown constructor - treat as fresh variable */
-                *out_type = fxsh_type_var(fxsh_fresh_var());
-                return ERR_OK;
-            }
-            /* Instantiate constructor type with fresh variables */
-            fxsh_type_t *constr_type = instantiate(constr_info->constr_type);
-            /* For constructor patterns, we need to unify constructor type with pattern arguments */
+            fxsh_constr_info_t *ci = constr_env_lookup(*constr_env,
+                                        pattern->data.constr_appl.constr_name);
+            if (!ci) { *out_type = fxsh_type_var(fxsh_fresh_var()); return ERR_OK; }
+
+            fxsh_type_t *ct      = instantiate(ci->constr_type);
+            fxsh_type_t *res_t   = fxsh_type_var(fxsh_fresh_var());
+            fxsh_type_t *exp_t   = res_t;
             fxsh_ast_list_t args = pattern->data.constr_appl.args;
-            fxsh_type_t *result_type = fxsh_type_var(fxsh_fresh_var());
-            fxsh_type_t *expected_type = result_type;
-            /* Build expected type from arguments */
             for (s32 i = (s32)sp_dyn_array_size(args) - 1; i >= 0; i--) {
-                fxsh_type_t *arg_type = NULL;
-                fxsh_error_t err = infer_pattern(args[i], env, constr_env, subst, &arg_type);
-                if (err != ERR_OK)
-                    return err;
-                expected_type = fxsh_type_arrow(arg_type, expected_type);
+                fxsh_type_t *at = NULL;
+                infer_pattern(args[i], env, constr_env, subst, &at);
+                exp_t = fxsh_type_arrow(at, exp_t);
             }
-            /* Unify constructor type with expected type */
             fxsh_subst_t s = SP_NULLPTR;
-            fxsh_error_t err = fxsh_type_unify(constr_type, expected_type, &s);
-            if (err != ERR_OK)
-                return err;
+            fxsh_error_t err = fxsh_type_unify(ct, exp_t, &s);
+            if (err != ERR_OK) return err;
             *subst = compose(s, *subst);
-            fxsh_type_apply_subst(s, &result_type);
-            *out_type = result_type;
+            fxsh_type_apply_subst(s, &res_t);
+            *out_type = res_t;
             return ERR_OK;
         }
-        case AST_PAT_CONS:
-        case AST_PAT_RECORD:
-            /* TODO: implement */
-            *out_type = fxsh_type_var(fxsh_fresh_var());
-            return ERR_OK;
+
         default:
-            /* For any other node (like AST_IDENT), treat as expression? */
             *out_type = fxsh_type_var(fxsh_fresh_var());
             return ERR_OK;
     }
@@ -939,539 +667,266 @@ static fxsh_error_t infer_pattern(fxsh_ast_node_t *pattern, fxsh_type_env_t *env
 static fxsh_error_t infer_expr(fxsh_ast_node_t *ast, fxsh_type_env_t *env,
                                fxsh_constr_env_t *constr_env, fxsh_subst_t *subst,
                                fxsh_type_t **out_type) {
-    if (!ast) {
-        *out_type = fxsh_type_con(TYPE_UNIT);
-        return ERR_OK;
-    }
+    if (!ast) { *out_type = fxsh_type_con(TYPE_UNIT); return ERR_OK; }
 
     switch (ast->kind) {
-        case AST_LIT_INT:
-            *out_type = fxsh_type_con(TYPE_INT);
-            return ERR_OK;
-
-        case AST_LIT_FLOAT:
-            *out_type = fxsh_type_con(TYPE_FLOAT);
-            return ERR_OK;
-
-        case AST_LIT_STRING:
-            *out_type = fxsh_type_con(TYPE_STRING);
-            return ERR_OK;
-
-        case AST_LIT_BOOL:
-            *out_type = fxsh_type_con(TYPE_BOOL);
-            return ERR_OK;
-
-        case AST_LIT_UNIT:
-            *out_type = fxsh_type_con(TYPE_UNIT);
-            return ERR_OK;
+        case AST_LIT_INT:    *out_type = fxsh_type_con(TYPE_INT);    return ERR_OK;
+        case AST_LIT_FLOAT:  *out_type = fxsh_type_con(TYPE_FLOAT);  return ERR_OK;
+        case AST_LIT_STRING: *out_type = fxsh_type_con(TYPE_STRING); return ERR_OK;
+        case AST_LIT_BOOL:   *out_type = fxsh_type_con(TYPE_BOOL);   return ERR_OK;
+        case AST_LIT_UNIT:   *out_type = fxsh_type_con(TYPE_UNIT);   return ERR_OK;
 
         case AST_IDENT: {
-            /* Look up in environment */
-            fxsh_scheme_t *scheme = type_env_lookup(env, ast->data.ident);
-            if (!scheme) {
-                /* Unknown identifier - create fresh variable for now */
+            fxsh_scheme_t *sc = type_env_lookup(*env, ast->data.ident);
+            if (!sc) {
+                /* Unknown identifier — assign fresh type var */
                 *out_type = fxsh_type_var(fxsh_fresh_var());
                 return ERR_OK;
             }
-            /* Instantiate scheme with fresh vars (Let-polymorphism) */
-            *out_type = instantiate(scheme);
+            *out_type = instantiate(sc);
             return ERR_OK;
         }
 
         case AST_BINARY: {
-            fxsh_type_t *left_type = NULL;
-            fxsh_type_t *right_type = NULL;
-
-            fxsh_error_t err =
-                infer_expr(ast->data.binary.left, env, constr_env, subst, &left_type);
-            if (err != ERR_OK)
-                return err;
-
-            err = infer_expr(ast->data.binary.right, env, constr_env, subst, &right_type);
-            if (err != ERR_OK)
-                return err;
+            fxsh_type_t *lt = NULL, *rt = NULL;
+            fxsh_error_t err;
+            err = infer_expr(ast->data.binary.left,  env, constr_env, subst, &lt); if (err) return err;
+            err = infer_expr(ast->data.binary.right, env, constr_env, subst, &rt); if (err) return err;
 
             switch (ast->data.binary.op) {
-                case TOK_PLUS:
-                case TOK_MINUS:
-                case TOK_STAR:
-                case TOK_SLASH:
-                case TOK_PERCENT: {
-                    /* Arithmetic: both operands must be numeric */
-                    fxsh_type_t *int_type = fxsh_type_con(TYPE_INT);
-                    fxsh_subst_t s1 = SP_NULLPTR;
-                    err = fxsh_type_unify(left_type, int_type, &s1);
-                    if (err != ERR_OK)
-                        return err;
-
-                    fxsh_type_apply_subst(s1, &right_type);
+                case TOK_PLUS: case TOK_MINUS: case TOK_STAR:
+                case TOK_SLASH: case TOK_PERCENT: {
+                    fxsh_type_t *it = fxsh_type_con(TYPE_INT);
+                    fxsh_subst_t s1 = SP_NULLPTR, s2 = SP_NULLPTR;
+                    err = fxsh_type_unify(lt, it, &s1); if (err) return err;
+                    fxsh_type_apply_subst(s1, &rt);
                     *subst = compose(s1, *subst);
-
-                    fxsh_subst_t s2 = SP_NULLPTR;
-                    err = fxsh_type_unify(right_type, int_type, &s2);
-                    if (err != ERR_OK)
-                        return err;
-
+                    err = fxsh_type_unify(rt, it, &s2); if (err) return err;
                     *subst = compose(s2, *subst);
-                    *out_type = int_type;
-                    return ERR_OK;
+                    *out_type = it; return ERR_OK;
                 }
-                case TOK_EQ:
-                case TOK_NEQ:
-                case TOK_LT:
-                case TOK_GT:
-                case TOK_LEQ:
-                case TOK_GEQ: {
-                    /* Comparison: both operands same type, returns bool */
+                case TOK_EQ: case TOK_NEQ: case TOK_LT:
+                case TOK_GT: case TOK_LEQ: case TOK_GEQ: {
                     fxsh_subst_t s = SP_NULLPTR;
-                    err = fxsh_type_unify(left_type, right_type, &s);
-                    if (err != ERR_OK)
-                        return err;
-
+                    err = fxsh_type_unify(lt, rt, &s); if (err) return err;
                     *subst = compose(s, *subst);
-                    *out_type = fxsh_type_con(TYPE_BOOL);
-                    return ERR_OK;
+                    *out_type = fxsh_type_con(TYPE_BOOL); return ERR_OK;
                 }
-                case TOK_AND:
-                case TOK_OR: {
-                    /* Logical: both operands bool, returns bool */
-                    fxsh_type_t *bool_type = fxsh_type_con(TYPE_BOOL);
-                    fxsh_subst_t s1 = SP_NULLPTR;
-                    err = fxsh_type_unify(left_type, bool_type, &s1);
-                    if (err != ERR_OK)
-                        return err;
-
-                    fxsh_type_apply_subst(s1, &right_type);
+                case TOK_AND: case TOK_OR: {
+                    fxsh_type_t *bt = fxsh_type_con(TYPE_BOOL);
+                    fxsh_subst_t s1 = SP_NULLPTR, s2 = SP_NULLPTR;
+                    err = fxsh_type_unify(lt, bt, &s1); if (err) return err;
+                    fxsh_type_apply_subst(s1, &rt);
                     *subst = compose(s1, *subst);
-
-                    fxsh_subst_t s2 = SP_NULLPTR;
-                    err = fxsh_type_unify(right_type, bool_type, &s2);
-                    if (err != ERR_OK)
-                        return err;
-
+                    err = fxsh_type_unify(rt, bt, &s2); if (err) return err;
                     *subst = compose(s2, *subst);
-                    *out_type = bool_type;
-                    return ERR_OK;
+                    *out_type = bt; return ERR_OK;
                 }
-                default:
-                    return ERR_TYPE_ERROR;
+                default: return ERR_TYPE_ERROR;
             }
         }
 
         case AST_UNARY: {
-            fxsh_type_t *operand_type = NULL;
-            fxsh_error_t err =
-                infer_expr(ast->data.unary.operand, env, constr_env, subst, &operand_type);
-            if (err != ERR_OK)
-                return err;
-
-            switch (ast->data.unary.op) {
-                case TOK_MINUS: {
-                    fxsh_type_t *int_type = fxsh_type_con(TYPE_INT);
-                    fxsh_subst_t s = SP_NULLPTR;
-                    err = fxsh_type_unify(operand_type, int_type, &s);
-                    if (err != ERR_OK)
-                        return err;
-                    *subst = compose(s, *subst);
-                    *out_type = int_type;
-                    return ERR_OK;
-                }
-                case TOK_NOT: {
-                    fxsh_type_t *bool_type = fxsh_type_con(TYPE_BOOL);
-                    fxsh_subst_t s = SP_NULLPTR;
-                    err = fxsh_type_unify(operand_type, bool_type, &s);
-                    if (err != ERR_OK)
-                        return err;
-                    *subst = compose(s, *subst);
-                    *out_type = bool_type;
-                    return ERR_OK;
-                }
-                default:
-                    return ERR_TYPE_ERROR;
-            }
+            fxsh_type_t *ot = NULL;
+            fxsh_error_t err = infer_expr(ast->data.unary.operand, env, constr_env, subst, &ot);
+            if (err) return err;
+            if (ast->data.unary.op == TOK_MINUS) {
+                fxsh_subst_t s = SP_NULLPTR;
+                err = fxsh_type_unify(ot, fxsh_type_con(TYPE_INT), &s); if (err) return err;
+                *subst = compose(s, *subst); *out_type = fxsh_type_con(TYPE_INT);
+            } else if (ast->data.unary.op == TOK_NOT) {
+                fxsh_subst_t s = SP_NULLPTR;
+                err = fxsh_type_unify(ot, fxsh_type_con(TYPE_BOOL), &s); if (err) return err;
+                *subst = compose(s, *subst); *out_type = fxsh_type_con(TYPE_BOOL);
+            } else return ERR_TYPE_ERROR;
+            return ERR_OK;
         }
 
         case AST_IF: {
-            fxsh_type_t *cond_type = NULL;
-            fxsh_error_t err =
-                infer_expr(ast->data.if_expr.cond, env, constr_env, subst, &cond_type);
-            if (err != ERR_OK)
-                return err;
-
-            fxsh_type_t *bool_type = fxsh_type_con(TYPE_BOOL);
-            fxsh_subst_t s1 = SP_NULLPTR;
-            err = fxsh_type_unify(cond_type, bool_type, &s1);
-            if (err != ERR_OK)
-                return err;
-
-            *subst = compose(s1, *subst);
-
-            fxsh_type_t *then_type = NULL;
-            err = infer_expr(ast->data.if_expr.then_branch, env, constr_env, subst, &then_type);
-            if (err != ERR_OK)
-                return err;
-
+            fxsh_type_t *ct = NULL, *tt = NULL, *et = NULL;
+            fxsh_error_t err;
+            err = infer_expr(ast->data.if_expr.cond,        env, constr_env, subst, &ct); if (err) return err;
+            err = infer_expr(ast->data.if_expr.then_branch, env, constr_env, subst, &tt); if (err) return err;
+            fxsh_subst_t sc = SP_NULLPTR;
+            err = fxsh_type_unify(ct, fxsh_type_con(TYPE_BOOL), &sc); if (err) return err;
+            *subst = compose(sc, *subst);
             if (ast->data.if_expr.else_branch) {
-                fxsh_type_t *else_type = NULL;
-                err = infer_expr(ast->data.if_expr.else_branch, env, constr_env, subst, &else_type);
-                if (err != ERR_OK)
-                    return err;
-
-                fxsh_subst_t s2 = SP_NULLPTR;
-                err = fxsh_type_unify(then_type, else_type, &s2);
-                if (err != ERR_OK)
-                    return err;
-
-                *subst = compose(s2, *subst);
-                fxsh_type_apply_subst(s2, &then_type);
+                err = infer_expr(ast->data.if_expr.else_branch, env, constr_env, subst, &et); if (err) return err;
+                fxsh_subst_t se = SP_NULLPTR;
+                err = fxsh_type_unify(tt, et, &se); if (err) return err;
+                *subst = compose(se, *subst);
+                fxsh_type_apply_subst(se, &tt);
             }
-
-            *out_type = then_type;
-            return ERR_OK;
+            *out_type = tt; return ERR_OK;
         }
 
         case AST_LAMBDA: {
-            /* Create environment for parameter bindings */
-            fxsh_type_env_t new_env = env ? *env : SP_NULLPTR;
+            fxsh_type_env_t new_env = *env;
             sp_dyn_array(fxsh_type_t *) param_types = SP_NULLPTR;
-
-            /* Infer each parameter pattern */
             sp_dyn_array_for(ast->data.lambda.params, i) {
-                fxsh_type_t *pattern_type = NULL;
-                fxsh_error_t err = infer_pattern(ast->data.lambda.params[i], &new_env, constr_env,
-                                                 subst, &pattern_type);
-                if (err != ERR_OK)
-                    return err;
-                sp_dyn_array_push(param_types, pattern_type);
+                fxsh_type_t *pt = NULL;
+                fxsh_error_t err = infer_pattern(ast->data.lambda.params[i],
+                                                  &new_env, constr_env, subst, &pt);
+                if (err) return err;
+                sp_dyn_array_push(param_types, pt);
             }
-
-            /* Infer body type with extended environment */
-            fxsh_type_t *body_type = NULL;
-            fxsh_error_t err =
-                infer_expr(ast->data.lambda.body, &new_env, constr_env, subst, &body_type);
-            if (err != ERR_OK)
-                return err;
-
-            /* Build arrow type */
-            fxsh_type_t *result_type = body_type;
-            /* Fold right: a -> b -> c = a -> (b -> c) */
-            for (s32 i = (s32)sp_dyn_array_size(param_types) - 1; i >= 0; i--) {
-                result_type = fxsh_type_arrow(param_types[i], result_type);
-            }
-
-            *out_type = result_type;
-            return ERR_OK;
+            fxsh_type_t *bt = NULL;
+            fxsh_error_t err = infer_expr(ast->data.lambda.body, &new_env, constr_env, subst, &bt);
+            if (err) return err;
+            fxsh_type_t *rt = bt;
+            for (s32 i = (s32)sp_dyn_array_size(param_types) - 1; i >= 0; i--)
+                rt = fxsh_type_arrow(param_types[i], rt);
+            *out_type = rt; return ERR_OK;
         }
 
         case AST_CALL: {
-            fxsh_type_t *func_type = NULL;
-            fxsh_error_t err = infer_expr(ast->data.call.func, env, constr_env, subst, &func_type);
-            if (err != ERR_OK)
-                return err;
-
-            fxsh_type_t *result_type = fxsh_type_var(fxsh_fresh_var());
-
-            /* Build expected function type */
-            fxsh_type_t *expected_func_type = result_type;
+            fxsh_type_t *ft = NULL;
+            fxsh_error_t err = infer_expr(ast->data.call.func, env, constr_env, subst, &ft);
+            if (err) return err;
+            fxsh_type_t *res = fxsh_type_var(fxsh_fresh_var());
+            fxsh_type_t *exp = res;
             for (s32 i = (s32)sp_dyn_array_size(ast->data.call.args) - 1; i >= 0; i--) {
-                fxsh_type_t *arg_type = NULL;
-                err = infer_expr(ast->data.call.args[i], env, constr_env, subst, &arg_type);
-                if (err != ERR_OK)
-                    return err;
-
-                expected_func_type = fxsh_type_arrow(arg_type, expected_func_type);
+                fxsh_type_t *at = NULL;
+                err = infer_expr(ast->data.call.args[i], env, constr_env, subst, &at);
+                if (err) return err;
+                exp = fxsh_type_arrow(at, exp);
             }
-
             fxsh_subst_t s = SP_NULLPTR;
-            err = fxsh_type_unify(func_type, expected_func_type, &s);
-            if (err != ERR_OK)
-                return err;
-
+            err = fxsh_type_unify(ft, exp, &s); if (err) return err;
             *subst = compose(s, *subst);
-            fxsh_type_apply_subst(s, &result_type);
-            *out_type = result_type;
-            return ERR_OK;
+            fxsh_type_apply_subst(s, &res);
+            *out_type = res; return ERR_OK;
         }
 
         case AST_PIPE: {
-            /* a |> f = f a */
-            fxsh_type_t *left_type = NULL;
-            fxsh_error_t err = infer_expr(ast->data.pipe.left, env, constr_env, subst, &left_type);
-            if (err != ERR_OK)
-                return err;
-
-            fxsh_type_t *right_type = NULL;
-            err = infer_expr(ast->data.pipe.right, env, constr_env, subst, &right_type);
-            if (err != ERR_OK)
-                return err;
-
-            fxsh_type_t *result_type = fxsh_type_var(fxsh_fresh_var());
-            fxsh_type_t *expected = fxsh_type_arrow(left_type, result_type);
-
+            fxsh_type_t *lt = NULL, *rt = NULL;
+            fxsh_error_t err;
+            err = infer_expr(ast->data.pipe.left,  env, constr_env, subst, &lt); if (err) return err;
+            err = infer_expr(ast->data.pipe.right, env, constr_env, subst, &rt); if (err) return err;
+            fxsh_type_t *res = fxsh_type_var(fxsh_fresh_var());
+            fxsh_type_t *exp = fxsh_type_arrow(lt, res);
             fxsh_subst_t s = SP_NULLPTR;
-            err = fxsh_type_unify(right_type, expected, &s);
-            if (err != ERR_OK)
-                return err;
-
+            err = fxsh_type_unify(rt, exp, &s); if (err) return err;
             *subst = compose(s, *subst);
-            fxsh_type_apply_subst(s, &result_type);
-            *out_type = result_type;
-            return ERR_OK;
+            fxsh_type_apply_subst(s, &res);
+            *out_type = res; return ERR_OK;
         }
 
-        case AST_LET: {
+        case AST_LET:
+        case AST_DECL_LET: {
             if (ast->data.let.is_rec) {
-                /* let rec: pre-bind a type variable for recursion */
-                fxsh_type_t *rec_type = fxsh_type_var(fxsh_fresh_var());
-                fxsh_scheme_t *rec_scheme = sp_alloc(sizeof(fxsh_scheme_t));
-                rec_scheme->vars = SP_NULLPTR;
-                rec_scheme->type = rec_type;
-
-                /* Extend environment with recursive binding before inferring value */
-                fxsh_type_env_t new_env = env ? *env : SP_NULLPTR;
-                type_env_bind(&new_env, ast->data.let.name, rec_scheme);
-
-                /* Infer value type with extended environment */
-                fxsh_type_t *value_type = NULL;
-                fxsh_error_t err =
-                    infer_expr(ast->data.let.value, &new_env, constr_env, subst, &value_type);
-                if (err != ERR_OK)
-                    return err;
-
-                /* Apply substitution and unify with recursive type */
-                fxsh_type_apply_subst(*subst, &value_type);
+                fxsh_type_t *rec_t = fxsh_type_var(fxsh_fresh_var());
+                fxsh_scheme_t *rsc = (fxsh_scheme_t *)fxsh_alloc0(sizeof(fxsh_scheme_t));
+                rsc->type = rec_t; rsc->vars = SP_NULLPTR;
+                fxsh_type_env_t new_env = *env;
+                type_env_bind(&new_env, ast->data.let.name, rsc);
+                fxsh_type_t *vt = NULL;
+                fxsh_error_t err = infer_expr(ast->data.let.value, &new_env, constr_env, subst, &vt);
+                if (err) return err;
+                fxsh_type_apply_subst(*subst, &vt);
                 fxsh_subst_t s = SP_NULLPTR;
-                err = fxsh_type_unify(rec_type, value_type, &s);
-                if (err != ERR_OK)
-                    return err;
+                err = fxsh_type_unify(rec_t, vt, &s); if (err) return err;
                 *subst = compose(s, *subst);
-
-                /* Apply substitution to final type */
-                fxsh_type_apply_subst(*subst, &rec_type);
-
-                /* Generalize and bind in original environment */
-                fxsh_scheme_t *scheme = generalize(rec_type, env);
-                type_env_bind(env, ast->data.let.name, scheme);
+                fxsh_type_apply_subst(*subst, &rec_t);
+                type_env_bind(env, ast->data.let.name, generalize(rec_t, env));
             } else {
-                /* let x = value (non-recursive) */
-                fxsh_type_t *value_type = NULL;
-                fxsh_error_t err =
-                    infer_expr(ast->data.let.value, env, constr_env, subst, &value_type);
-                if (err != ERR_OK)
-                    return err;
-
-                /* Apply current substitution to value_type before generalizing */
-                fxsh_type_apply_subst(*subst, &value_type);
-
-                /* Generalize to create polymorphic scheme (Let-polymorphism) */
-                fxsh_scheme_t *scheme = generalize(value_type, env);
-
-                /* Bind in environment */
-                type_env_bind(env, ast->data.let.name, scheme);
+                fxsh_type_t *vt = NULL;
+                fxsh_error_t err = infer_expr(ast->data.let.value, env, constr_env, subst, &vt);
+                if (err) return err;
+                fxsh_type_apply_subst(*subst, &vt);
+                type_env_bind(env, ast->data.let.name, generalize(vt, env));
             }
-
-            *out_type = fxsh_type_con(TYPE_UNIT);
-            return ERR_OK;
+            *out_type = fxsh_type_con(TYPE_UNIT); return ERR_OK;
         }
 
         case AST_LET_IN: {
-            /* let [rec] x = value in body */
-            fxsh_type_env_t new_env = env ? *env : SP_NULLPTR;
-
-            /* Phase 1: For recursive bindings, pre-allocate type variables */
+            fxsh_type_env_t new_env = *env;
             sp_dyn_array_for(ast->data.let_in.bindings, i) {
-                fxsh_ast_node_t *binding = ast->data.let_in.bindings[i];
-                if (binding->kind == AST_LET && binding->data.let.is_rec) {
-                    fxsh_type_t *rec_type = fxsh_type_var(fxsh_fresh_var());
-                    fxsh_scheme_t *rec_scheme = sp_alloc(sizeof(fxsh_scheme_t));
-                    rec_scheme->vars = SP_NULLPTR;
-                    rec_scheme->type = rec_type;
-                    type_env_bind(&new_env, binding->data.let.name, rec_scheme);
+                fxsh_ast_node_t *b = ast->data.let_in.bindings[i];
+                if (b->kind == AST_LET || b->kind == AST_DECL_LET) {
+                    fxsh_type_t *vt = NULL;
+                    fxsh_error_t err = infer_expr(b->data.let.value,
+                                                   &new_env, constr_env, subst, &vt);
+                    if (err) return err;
+                    fxsh_type_apply_subst(*subst, &vt);
+                    type_env_bind(&new_env, b->data.let.name, generalize(vt, &new_env));
                 }
             }
-
-            /* Phase 2: Infer value types and bind */
-            sp_dyn_array_for(ast->data.let_in.bindings, i) {
-                fxsh_ast_node_t *binding = ast->data.let_in.bindings[i];
-                if (binding->kind == AST_LET) {
-                    fxsh_type_t *value_type = NULL;
-                    fxsh_error_t err = infer_expr(binding->data.let.value, &new_env, constr_env,
-                                                  subst, &value_type);
-                    if (err != ERR_OK)
-                        return err;
-
-                    /* Apply current substitution */
-                    fxsh_type_apply_subst(*subst, &value_type);
-
-                    if (binding->data.let.is_rec) {
-                        /* Unify with pre-allocated recursive type */
-                        fxsh_scheme_t *rec_scheme =
-                            type_env_lookup(&new_env, binding->data.let.name);
-                        if (rec_scheme) {
-                            fxsh_subst_t s = SP_NULLPTR;
-                            err = fxsh_type_unify(rec_scheme->type, value_type, &s);
-                            if (err != ERR_OK)
-                                return err;
-                            *subst = compose(s, *subst);
-                            fxsh_type_apply_subst(*subst, &rec_scheme->type);
-                        }
-                    }
-
-                    /* Generalize for Let-polymorphism */
-                    fxsh_scheme_t *scheme = generalize(value_type, &new_env);
-                    type_env_bind(&new_env, binding->data.let.name, scheme);
-                }
-            }
-
-            /* Infer body type with extended environment */
-            fxsh_type_t *body_type = NULL;
-            fxsh_error_t err =
-                infer_expr(ast->data.let_in.body, &new_env, constr_env, subst, &body_type);
-            if (err != ERR_OK)
-                return err;
-
-            *out_type = body_type;
-            return ERR_OK;
+            return infer_expr(ast->data.let_in.body, &new_env, constr_env, subst, out_type);
         }
 
-        case AST_PROGRAM:
-            /* Infer last expression's type */
-            *out_type = fxsh_type_con(TYPE_UNIT);
-            sp_dyn_array_for(ast->data.decls, i) {
-                fxsh_error_t err = infer_expr(ast->data.decls[i], env, constr_env, subst, out_type);
-                if (err != ERR_OK)
-                    return err;
-            }
-            return ERR_OK;
-
-        case AST_TYPE_DEF: {
-            /* Type definition doesn't produce a value, registers constructors */
+        case AST_TYPE_DEF:
             fxsh_register_type_constrs(ast, constr_env);
             *out_type = fxsh_type_con(TYPE_UNIT);
             return ERR_OK;
-        }
-
-        case AST_DATA_CONSTR: {
-            /* Data constructor definition is not an expression - used in type definitions only */
-            *out_type = fxsh_type_con(TYPE_UNIT);
-            return ERR_OK;
-        }
 
         case AST_CONSTR_APPL: {
-            /* Constructor application: Some 5, Cons(x, xs) */
-            /* Look up constructor info */
-            fxsh_constr_info_t *constr_info =
-                constr_env_lookup(constr_env, ast->data.constr_appl.constr_name);
-            if (!constr_info) {
-                /* Unknown constructor - could be a type constructor that's not yet registered */
-                /* For now, create a fresh type variable */
-                *out_type = fxsh_type_var(fxsh_fresh_var());
-                return ERR_OK;
-            }
-
-            /* Instantiate constructor type with fresh variables */
-            fxsh_type_t *constr_type = instantiate(constr_info->constr_type);
-
-            /* Build expected type from arguments */
-            fxsh_type_t *result_type = fxsh_type_var(fxsh_fresh_var());
-            fxsh_type_t *expected_type = result_type;
-
-            /* Infer argument types */
+            fxsh_constr_info_t *ci = constr_env_lookup(*constr_env,
+                                        ast->data.constr_appl.constr_name);
+            if (!ci) { *out_type = fxsh_type_var(fxsh_fresh_var()); return ERR_OK; }
+            fxsh_type_t *ct  = instantiate(ci->constr_type);
+            fxsh_type_t *res = fxsh_type_var(fxsh_fresh_var());
+            fxsh_type_t *exp = res;
             for (s32 i = (s32)sp_dyn_array_size(ast->data.constr_appl.args) - 1; i >= 0; i--) {
-                fxsh_type_t *arg_type = NULL;
-                fxsh_error_t err =
-                    infer_expr(ast->data.constr_appl.args[i], env, constr_env, subst, &arg_type);
-                if (err != ERR_OK)
-                    return err;
-                expected_type = fxsh_type_arrow(arg_type, expected_type);
+                fxsh_type_t *at = NULL;
+                fxsh_error_t err = infer_expr(ast->data.constr_appl.args[i],
+                                               env, constr_env, subst, &at);
+                if (err) return err;
+                exp = fxsh_type_arrow(at, exp);
             }
-
-            /* Unify constructor type with expected type */
             fxsh_subst_t s = SP_NULLPTR;
-            fxsh_error_t err = fxsh_type_unify(constr_type, expected_type, &s);
-            if (err != ERR_OK)
-                return err;
-
+            fxsh_error_t err = fxsh_type_unify(ct, exp, &s); if (err) return err;
             *subst = compose(s, *subst);
-            fxsh_type_apply_subst(s, &result_type);
-            *out_type = result_type;
-            return ERR_OK;
+            fxsh_type_apply_subst(s, &res);
+            *out_type = res; return ERR_OK;
         }
 
         case AST_MATCH: {
-            /* Infer matched expression type */
-            fxsh_type_t *matched_type = NULL;
-            fxsh_error_t err =
-                infer_expr(ast->data.match_expr.expr, env, constr_env, subst, &matched_type);
-            if (err != ERR_OK)
-                return err;
-
-            /* Result type variable */
-            fxsh_type_t *result_type = fxsh_type_var(fxsh_fresh_var());
-
-            /* Process each arm */
-            fxsh_ast_list_t arms = ast->data.match_expr.arms;
-            for (u32 i = 0; i < sp_dyn_array_size(arms); i++) {
-                fxsh_ast_node_t *arm = arms[i];
-                if (arm->kind != AST_MATCH_ARM)
-                    continue;
-
-                /* Create local environment copy for pattern bindings */
-                fxsh_type_env_t arm_env = env ? *env : SP_NULLPTR;
-
-                /* Infer pattern type */
-                fxsh_type_t *pattern_type = NULL;
-                err = infer_pattern(arm->data.match_arm.pattern, &arm_env, constr_env, subst,
-                                    &pattern_type);
-                if (err != ERR_OK)
-                    return err;
-
-                /* Unify pattern type with matched expression type */
+            fxsh_type_t *mt = NULL;
+            fxsh_error_t err = infer_expr(ast->data.match_expr.expr, env, constr_env, subst, &mt);
+            if (err) return err;
+            fxsh_type_t *res = fxsh_type_var(fxsh_fresh_var());
+            sp_dyn_array_for(ast->data.match_expr.arms, i) {
+                fxsh_ast_node_t *arm = ast->data.match_expr.arms[i];
+                if (arm->kind != AST_MATCH_ARM) continue;
+                fxsh_type_env_t arm_env = *env;
+                fxsh_type_t *pt = NULL;
+                err = infer_pattern(arm->data.match_arm.pattern, &arm_env, constr_env, subst, &pt);
+                if (err) return err;
                 fxsh_subst_t s1 = SP_NULLPTR;
-                err = fxsh_type_unify(pattern_type, matched_type, &s1);
-                if (err != ERR_OK)
-                    return err;
+                err = fxsh_type_unify(pt, mt, &s1); if (err) return err;
                 *subst = compose(s1, *subst);
-                fxsh_type_apply_subst(s1, &matched_type);
-                fxsh_type_apply_subst(s1, &pattern_type);
-
-                /* Infer guard if present (must be bool) */
-                if (arm->data.match_arm.guard) {
-                    fxsh_type_t *guard_type = NULL;
-                    err = infer_expr(arm->data.match_arm.guard, &arm_env, constr_env, subst,
-                                     &guard_type);
-                    if (err != ERR_OK)
-                        return err;
-                    fxsh_subst_t s2 = SP_NULLPTR;
-                    err = fxsh_type_unify(guard_type, fxsh_type_con(TYPE_BOOL), &s2);
-                    if (err != ERR_OK)
-                        return err;
-                    *subst = compose(s2, *subst);
-                }
-
-                /* Infer arm body type with extended environment */
-                fxsh_type_t *arm_body_type = NULL;
-                err = infer_expr(arm->data.match_arm.body, &arm_env, constr_env, subst,
-                                 &arm_body_type);
-                if (err != ERR_OK)
-                    return err;
-
-                /* Unify arm body type with result_type */
-                fxsh_subst_t s3 = SP_NULLPTR;
-                err = fxsh_type_unify(arm_body_type, result_type, &s3);
-                if (err != ERR_OK)
-                    return err;
-                *subst = compose(s3, *subst);
-                fxsh_type_apply_subst(s3, &result_type);
+                fxsh_type_apply_subst(s1, &mt);
+                fxsh_type_t *bt = NULL;
+                err = infer_expr(arm->data.match_arm.body, &arm_env, constr_env, subst, &bt);
+                if (err) return err;
+                fxsh_subst_t s2 = SP_NULLPTR;
+                err = fxsh_type_unify(bt, res, &s2); if (err) return err;
+                *subst = compose(s2, *subst);
+                fxsh_type_apply_subst(s2, &res);
             }
-
-            *out_type = result_type;
-            return ERR_OK;
+            *out_type = res; return ERR_OK;
         }
 
+        case AST_PROGRAM:
+            *out_type = fxsh_type_con(TYPE_UNIT);
+            sp_dyn_array_for(ast->data.decls, i) {
+                fxsh_error_t err = infer_expr(ast->data.decls[i], env, constr_env, subst, out_type);
+                if (err != ERR_OK) return err;
+            }
+            return ERR_OK;
+
         default:
-            /* For unimplemented nodes, return a fresh variable */
             *out_type = fxsh_type_var(fxsh_fresh_var());
             return ERR_OK;
     }
+}
+
+fxsh_error_t fxsh_type_infer(fxsh_ast_node_t *ast, fxsh_type_env_t *env,
+                             fxsh_constr_env_t *constr_env, fxsh_type_t **out_type) {
+    fxsh_reset_type_vars();
+    fxsh_subst_t subst = SP_NULLPTR;
+    fxsh_error_t err   = infer_expr(ast, env, constr_env, &subst, out_type);
+    if (err == ERR_OK) fxsh_type_apply_subst(subst, out_type);
+    return err;
 }

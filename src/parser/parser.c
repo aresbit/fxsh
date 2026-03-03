@@ -624,11 +624,29 @@ static fxsh_ast_node_t *parse_primary(fxsh_parser_t *parser) {
                 if (!name_tok)
                     return NULL;
 
+                /* Parse function parameters if present (function definition sugar: let f x y = ...) */
+                fxsh_ast_list_t params = SP_NULLPTR;
+                while (check(parser, TOK_IDENT)) {
+                    fxsh_token_t *param_tok = advance(parser);
+                    fxsh_ast_node_t *pat = fxsh_ast_ident(param_tok->data.ident, param_tok->loc);
+                    sp_dyn_array_push(params, pat);
+                    skip_newlines(parser);
+                }
+
                 /* TODO: Parse type annotation if present */
 
                 consume(parser, TOK_ASSIGN, "'='");
 
                 fxsh_ast_node_t *value = parse_expr(parser);
+
+                /* If we have params, wrap value in curried lambda */
+                if (params && sp_dyn_array_size(params) > 0) {
+                    for (int i = (int)sp_dyn_array_size(params) - 1; i >= 0; i--) {
+                        fxsh_ast_list_t single_param = SP_NULLPTR;
+                        sp_dyn_array_push(single_param, params[i]);
+                        value = fxsh_ast_lambda(single_param, value, name_tok->loc);
+                    }
+                }
 
                 fxsh_ast_node_t *binding =
                     fxsh_ast_let(name_tok->data.ident, value, is_comptime, is_rec, name_tok->loc);
@@ -981,11 +999,29 @@ static fxsh_ast_node_t *parse_let_decl(fxsh_parser_t *parser) {
     if (!name_tok)
         return NULL;
 
+    /* Parse function parameters if present (function definition sugar: let f x y = ...) */
+    fxsh_ast_list_t params = SP_NULLPTR;
+    while (check(parser, TOK_IDENT)) {
+        fxsh_token_t *param_tok = advance(parser);
+        fxsh_ast_node_t *pat = fxsh_ast_ident(param_tok->data.ident, param_tok->loc);
+        sp_dyn_array_push(params, pat);
+        skip_newlines(parser);
+    }
+
     /* TODO: Parse type annotation if present */
 
     consume(parser, TOK_ASSIGN, "'='");
 
     fxsh_ast_node_t *value = parse_expr(parser);
+
+    /* If we have params, wrap value in curried lambda */
+    if (params && sp_dyn_array_size(params) > 0) {
+        for (int i = (int)sp_dyn_array_size(params) - 1; i >= 0; i--) {
+            fxsh_ast_list_t single_param = SP_NULLPTR;
+            sp_dyn_array_push(single_param, params[i]);
+            value = fxsh_ast_lambda(single_param, value, name_tok->loc);
+        }
+    }
 
     return fxsh_ast_let(name_tok->data.ident, value, is_comptime, is_rec, name_tok->loc);
 }
