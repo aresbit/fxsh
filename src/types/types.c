@@ -892,11 +892,28 @@ static fxsh_error_t infer_expr(fxsh_ast_node_t *ast, fxsh_type_env_t *env, fxsh_
                 sp_dyn_array_push(param_types, param_type);
             }
 
-            /* Extend environment with parameter types */
-            /* TODO: Actually extend env */
+            /* Extend environment with parameter bindings */
+            fxsh_type_env_t new_env = env ? *env : SP_NULLPTR;
+            sp_dyn_array_for(ast->data.lambda.params, i) {
+                fxsh_ast_node_t *param = ast->data.lambda.params[i];
+                if (param->kind == AST_PAT_VAR) {
+                    /* Simple variable pattern: fn x -> ... */
+                    fxsh_scheme_t *scheme = sp_alloc(sizeof(fxsh_scheme_t));
+                    scheme->vars = SP_NULLPTR;
+                    scheme->type = param_types[i];
+                    type_env_bind(&new_env, param->data.ident, scheme);
+                } else if (param->kind == AST_IDENT) {
+                    /* Direct identifier (simplified case) */
+                    fxsh_scheme_t *scheme = sp_alloc(sizeof(fxsh_scheme_t));
+                    scheme->vars = SP_NULLPTR;
+                    scheme->type = param_types[i];
+                    type_env_bind(&new_env, param->data.ident, scheme);
+                }
+                /* TODO: Handle other pattern types (AST_PAT_WILD, AST_PAT_TUPLE, etc.) */
+            }
 
             fxsh_type_t *body_type = NULL;
-            fxsh_error_t err = infer_expr(ast->data.lambda.body, env, subst, &body_type);
+            fxsh_error_t err = infer_expr(ast->data.lambda.body, &new_env, subst, &body_type);
             if (err != ERR_OK)
                 return err;
 
@@ -968,29 +985,75 @@ static fxsh_error_t infer_expr(fxsh_ast_node_t *ast, fxsh_type_env_t *env, fxsh_
         }
 
         case AST_LET: {
-            /* let x = value (non-recursive) */
-            fxsh_type_t *value_type = NULL;
-            fxsh_error_t err = infer_expr(ast->data.let.value, env, subst, &value_type);
-            if (err != ERR_OK)
-                return err;
+            if (ast->data.let.is_rec) {
+                /* let rec: pre-bind a type variable for recursion */
+                fxsh_type_t *rec_type = fxsh_type_var(fxsh_fresh_var());
+                fxsh_scheme_t *rec_scheme = sp_alloc(sizeof(fxsh_scheme_t));
+                rec_scheme->vars = SP_NULLPTR;
+                rec_scheme->type = rec_type;
 
-            /* Apply current substitution to value_type before generalizing */
-            fxsh_type_apply_subst(*subst, &value_type);
+                /* Extend environment with recursive binding before inferring value */
+                fxsh_type_env_t new_env = env ? *env : SP_NULLPTR;
+                type_env_bind(&new_env, ast->data.let.name, rec_scheme);
 
-            /* Generalize to create polymorphic scheme (Let-polymorphism) */
-            fxsh_scheme_t *scheme = generalize(value_type, env);
+                /* Infer value type with extended environment */
+                fxsh_type_t *value_type = NULL;
+                fxsh_error_t err = infer_expr(ast->data.let.value, &new_env, subst, &value_type);
+                if (err != ERR_OK)
+                    return err;
 
-            /* Bind in environment */
-            type_env_bind(env, ast->data.let.name, scheme);
+                /* Apply substitution and unify with recursive type */
+                fxsh_type_apply_subst(*subst, &value_type);
+                fxsh_subst_t s = SP_NULLPTR;
+                err = fxsh_type_unify(rec_type, value_type, &s);
+                if (err != ERR_OK)
+                    return err;
+                *subst = compose(s, *subst);
+
+                /* Apply substitution to final type */
+                fxsh_type_apply_subst(*subst, &rec_type);
+
+                /* Generalize and bind in original environment */
+                fxsh_scheme_t *scheme = generalize(rec_type, env);
+                type_env_bind(env, ast->data.let.name, scheme);
+            } else {
+                /* let x = value (non-recursive) */
+                fxsh_type_t *value_type = NULL;
+                fxsh_error_t err = infer_expr(ast->data.let.value, env, subst, &value_type);
+                if (err != ERR_OK)
+                    return err;
+
+                /* Apply current substitution to value_type before generalizing */
+                fxsh_type_apply_subst(*subst, &value_type);
+
+                /* Generalize to create polymorphic scheme (Let-polymorphism) */
+                fxsh_scheme_t *scheme = generalize(value_type, env);
+
+                /* Bind in environment */
+                type_env_bind(env, ast->data.let.name, scheme);
+            }
 
             *out_type = fxsh_type_con(TYPE_UNIT);
             return ERR_OK;
         }
 
         case AST_LET_IN: {
-            /* let x = value in body */
+            /* let [rec] x = value in body */
             fxsh_type_env_t new_env = env ? *env : SP_NULLPTR;
 
+            /* Phase 1: For recursive bindings, pre-allocate type variables */
+            sp_dyn_array_for(ast->data.let_in.bindings, i) {
+                fxsh_ast_node_t *binding = ast->data.let_in.bindings[i];
+                if (binding->kind == AST_LET && binding->data.let.is_rec) {
+                    fxsh_type_t *rec_type = fxsh_type_var(fxsh_fresh_var());
+                    fxsh_scheme_t *rec_scheme = sp_alloc(sizeof(fxsh_scheme_t));
+                    rec_scheme->vars = SP_NULLPTR;
+                    rec_scheme->type = rec_type;
+                    type_env_bind(&new_env, binding->data.let.name, rec_scheme);
+                }
+            }
+
+            /* Phase 2: Infer value types and bind */
             sp_dyn_array_for(ast->data.let_in.bindings, i) {
                 fxsh_ast_node_t *binding = ast->data.let_in.bindings[i];
                 if (binding->kind == AST_LET) {
@@ -1002,6 +1065,20 @@ static fxsh_error_t infer_expr(fxsh_ast_node_t *ast, fxsh_type_env_t *env, fxsh_
 
                     /* Apply current substitution */
                     fxsh_type_apply_subst(*subst, &value_type);
+
+                    if (binding->data.let.is_rec) {
+                        /* Unify with pre-allocated recursive type */
+                        fxsh_scheme_t *rec_scheme =
+                            type_env_lookup(&new_env, binding->data.let.name);
+                        if (rec_scheme) {
+                            fxsh_subst_t s = SP_NULLPTR;
+                            err = fxsh_type_unify(rec_scheme->type, value_type, &s);
+                            if (err != ERR_OK)
+                                return err;
+                            *subst = compose(s, *subst);
+                            fxsh_type_apply_subst(*subst, &rec_scheme->type);
+                        }
+                    }
 
                     /* Generalize for Let-polymorphism */
                     fxsh_scheme_t *scheme = generalize(value_type, &new_env);

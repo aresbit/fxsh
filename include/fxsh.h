@@ -101,6 +101,7 @@ typedef enum {
     TOK_AND,
     TOK_OR,
     TOK_NOT,
+    TOK_REC,
 
     /* Operators */
     TOK_PLUS,      /* + */
@@ -538,7 +539,7 @@ fxsh_ast_node_t *fxsh_ast_ident(sp_str_t name, fxsh_loc_t loc);
 fxsh_ast_node_t *fxsh_ast_binary(fxsh_token_kind_t op, fxsh_ast_node_t *left,
                                  fxsh_ast_node_t *right, fxsh_loc_t loc);
 fxsh_ast_node_t *fxsh_ast_lambda(fxsh_ast_list_t params, fxsh_ast_node_t *body, fxsh_loc_t loc);
-fxsh_ast_node_t *fxsh_ast_let(sp_str_t name, fxsh_ast_node_t *value, bool is_comptime,
+fxsh_ast_node_t *fxsh_ast_let(sp_str_t name, fxsh_ast_node_t *value, bool is_comptime, bool is_rec,
                               fxsh_loc_t loc);
 fxsh_ast_node_t *fxsh_ast_if(fxsh_ast_node_t *cond, fxsh_ast_node_t *then_branch,
                              fxsh_ast_node_t *else_branch, fxsh_loc_t loc);

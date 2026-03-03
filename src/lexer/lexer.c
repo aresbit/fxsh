@@ -35,7 +35,7 @@ static keyword_entry_t keywords[] = {
     {sp_str_lit("while"), TOK_WHILE},   {sp_str_lit("return"), TOK_RETURN},
     {sp_str_lit("true"), TOK_TRUE},     {sp_str_lit("false"), TOK_FALSE},
     {sp_str_lit("and"), TOK_AND},       {sp_str_lit("or"), TOK_OR},
-    {sp_str_lit("not"), TOK_NOT},
+    {sp_str_lit("not"), TOK_NOT},       {sp_str_lit("rec"), TOK_REC},
 };
 
 static fxsh_token_kind_t lookup_keyword(sp_str_t ident) {
@@ -117,6 +117,8 @@ const c8 *fxsh_token_kind_name(fxsh_token_kind_t kind) {
             return "OR";
         case TOK_NOT:
             return "NOT";
+        case TOK_REC:
+            return "REC";
         case TOK_PLUS:
             return "PLUS";
         case TOK_MINUS:

@@ -133,7 +133,7 @@ fxsh_ast_node_t *fxsh_ast_lambda(fxsh_ast_list_t params, fxsh_ast_node_t *body, 
     return node;
 }
 
-fxsh_ast_node_t *fxsh_ast_let(sp_str_t name, fxsh_ast_node_t *value, bool is_comptime,
+fxsh_ast_node_t *fxsh_ast_let(sp_str_t name, fxsh_ast_node_t *value, bool is_comptime, bool is_rec,
                               fxsh_loc_t loc) {
     fxsh_ast_node_t *node = alloc_node(AST_DECL_LET, loc);
     node->data.let.name = name;
@@ -141,7 +141,7 @@ fxsh_ast_node_t *fxsh_ast_let(sp_str_t name, fxsh_ast_node_t *value, bool is_com
     node->data.let.type = NULL;
     node->data.let.value = value;
     node->data.let.is_comptime = is_comptime;
-    node->data.let.is_rec = false;
+    node->data.let.is_rec = is_rec;
     return node;
 }
 
@@ -465,6 +465,7 @@ static fxsh_ast_node_t *parse_primary(fxsh_parser_t *parser) {
 
             while (!check(parser, TOK_IN) && !check(parser, TOK_EOF)) {
                 bool is_comptime = match(parser, TOK_COMPTIME);
+                bool is_rec = match(parser, TOK_REC);
 
                 fxsh_token_t *name_tok = consume(parser, TOK_IDENT, "identifier");
                 if (!name_tok)
@@ -477,7 +478,7 @@ static fxsh_ast_node_t *parse_primary(fxsh_parser_t *parser) {
                 fxsh_ast_node_t *value = parse_expr(parser);
 
                 fxsh_ast_node_t *binding =
-                    fxsh_ast_let(name_tok->data.ident, value, is_comptime, name_tok->loc);
+                    fxsh_ast_let(name_tok->data.ident, value, is_comptime, is_rec, name_tok->loc);
                 sp_dyn_array_push(bindings, binding);
 
                 skip_newlines(parser);
