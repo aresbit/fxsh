@@ -1041,6 +1041,14 @@ static fxsh_error_t infer_expr(fxsh_ast_node_t *ast, fxsh_type_env_t *env,
                 if (err)
                     return err;
                 *subst = compose(s, *subst);
+                if (ast->data.let.type) {
+                    fxsh_type_t *ann_t = ast_to_type(ast->data.let.type);
+                    fxsh_subst_t s_ann = SP_NULLPTR;
+                    err = fxsh_type_unify(rec_t, ann_t, &s_ann);
+                    if (err)
+                        return err;
+                    *subst = compose(s_ann, *subst);
+                }
                 fxsh_type_apply_subst(*subst, &rec_t);
                 type_env_bind(env, ast->data.let.name, generalize(rec_t, env));
             } else {
@@ -1048,6 +1056,14 @@ static fxsh_error_t infer_expr(fxsh_ast_node_t *ast, fxsh_type_env_t *env,
                 fxsh_error_t err = infer_expr(ast->data.let.value, env, constr_env, subst, &vt);
                 if (err)
                     return err;
+                if (ast->data.let.type) {
+                    fxsh_type_t *ann_t = ast_to_type(ast->data.let.type);
+                    fxsh_subst_t s_ann = SP_NULLPTR;
+                    err = fxsh_type_unify(vt, ann_t, &s_ann);
+                    if (err)
+                        return err;
+                    *subst = compose(s_ann, *subst);
+                }
                 fxsh_type_apply_subst(*subst, &vt);
                 type_env_bind(env, ast->data.let.name, generalize(vt, env));
             }
@@ -1060,13 +1076,10 @@ static fxsh_error_t infer_expr(fxsh_ast_node_t *ast, fxsh_type_env_t *env,
             sp_dyn_array_for(ast->data.let_in.bindings, i) {
                 fxsh_ast_node_t *b = ast->data.let_in.bindings[i];
                 if (b->kind == AST_LET || b->kind == AST_DECL_LET) {
-                    fxsh_type_t *vt = NULL;
-                    fxsh_error_t err =
-                        infer_expr(b->data.let.value, &new_env, constr_env, subst, &vt);
+                    fxsh_type_t *tmp = NULL;
+                    fxsh_error_t err = infer_expr(b, &new_env, constr_env, subst, &tmp);
                     if (err)
                         return err;
-                    fxsh_type_apply_subst(*subst, &vt);
-                    type_env_bind(&new_env, b->data.let.name, generalize(vt, &new_env));
                 }
             }
             return infer_expr(ast->data.let_in.body, &new_env, constr_env, subst, out_type);

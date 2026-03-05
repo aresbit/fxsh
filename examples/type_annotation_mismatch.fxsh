@@ -1,0 +1,3 @@
+# Type annotation mismatch should fail in type inference
+
+let bad : int = "oops"

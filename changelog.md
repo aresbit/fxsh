@@ -89,4 +89,12 @@
       `examples/closure_codegen_letin_alias_chain.fxsh`.
   - added `make test-native-codegen` smoke suite (`tests/integration/native_codegen.sh`)
     to guard direct native-codegen path on supported subset.
+  - added let type annotations for declarations and let-in bindings:
+    - parser now accepts `let x : T = ...`
+    - type inference now enforces annotation/type consistency on let bindings
+      (including `let rec` and `let-in` local bindings).
+  - added type-annotation integration tests:
+    - success: `examples/type_annotation_ok.fxsh`, `examples/type_annotation_letin_ok.fxsh`
+    - failure: `examples/type_annotation_mismatch.fxsh`
+    - `make test-type-annotations` target.
 - Added `tests/unit/smoke.c` so `make test` has a baseline executable test target.

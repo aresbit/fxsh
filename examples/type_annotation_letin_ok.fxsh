@@ -1,0 +1,5 @@
+# Let type annotations inside let-in scope
+
+let out = let base : int = 40 in
+  let add2 : int -> int = fn x -> x + 2 in
+  add2 base

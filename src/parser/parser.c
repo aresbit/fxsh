@@ -297,6 +297,7 @@ static fxsh_ast_node_t *parse_expr(fxsh_parser_t *parser);
 static fxsh_ast_node_t *parse_pattern(fxsh_parser_t *parser);
 static fxsh_ast_node_t *parse_decl(fxsh_parser_t *parser);
 static fxsh_ast_node_t *parse_primary(fxsh_parser_t *parser);
+static fxsh_ast_node_t *parse_type_expr(fxsh_parser_t *parser);
 
 /*=============================================================================
  * Pattern Parsing
@@ -306,6 +307,45 @@ static bool is_pattern_start(fxsh_token_kind_t kind) {
     return kind == TOK_IDENT || kind == TOK_TYPE_IDENT || kind == TOK_INT || kind == TOK_FLOAT ||
            kind == TOK_STRING || kind == TOK_TRUE || kind == TOK_FALSE || kind == TOK_LPAREN ||
            kind == TOK_LBRACKET || kind == TOK_LBRACE;
+}
+
+static fxsh_ast_node_t *parse_type_atom(fxsh_parser_t *parser) {
+    fxsh_token_t *tok = current(parser);
+    if (tok->kind == TOK_LPAREN) {
+        advance(parser); /* consume '(' */
+        fxsh_ast_node_t *inner = parse_type_expr(parser);
+        consume(parser, TOK_RPAREN, "')'");
+        return inner;
+    }
+
+    if (tok->kind == TOK_IDENT || tok->kind == TOK_TYPE_IDENT) {
+        advance(parser);
+        if (tok->data.ident.len > 0 && tok->data.ident.data[0] == '\'') {
+            fxsh_ast_node_t *n = alloc_node(AST_TYPE_VAR, tok->loc);
+            n->data.ident = tok->data.ident;
+            return n;
+        }
+        return fxsh_ast_ident(tok->data.ident, tok->loc);
+    }
+
+    consume_name_token(parser, "type");
+    return NULL;
+}
+
+static fxsh_ast_node_t *parse_type_expr(fxsh_parser_t *parser) {
+    fxsh_ast_node_t *lhs = parse_type_atom(parser);
+    if (!lhs)
+        return NULL;
+
+    skip_newlines(parser);
+    if (match(parser, TOK_ARROW)) {
+        fxsh_ast_node_t *rhs = parse_type_expr(parser); /* right-associative */
+        fxsh_ast_node_t *n = alloc_node(AST_TYPE_ARROW, lhs->loc);
+        n->data.type_arrow.param = lhs;
+        n->data.type_arrow.ret = rhs;
+        return n;
+    }
+    return lhs;
 }
 
 static fxsh_ast_node_t *parse_pattern(fxsh_parser_t *parser) {
@@ -707,7 +747,11 @@ static fxsh_ast_node_t *parse_primary(fxsh_parser_t *parser) {
                     skip_newlines(parser);
                 }
 
-                /* TODO: Parse type annotation if present */
+                fxsh_ast_node_t *type_ann = NULL;
+                if (match(parser, TOK_COLON)) {
+                    skip_newlines(parser);
+                    type_ann = parse_type_expr(parser);
+                }
 
                 consume(parser, TOK_ASSIGN, "'='");
 
@@ -724,6 +768,7 @@ static fxsh_ast_node_t *parse_primary(fxsh_parser_t *parser) {
 
                 fxsh_ast_node_t *binding =
                     fxsh_ast_let(name_tok->data.ident, value, is_comptime, is_rec, name_tok->loc);
+                binding->data.let.type = type_ann;
                 sp_dyn_array_push(bindings, binding);
 
                 skip_newlines(parser);
@@ -1103,7 +1148,11 @@ static fxsh_ast_node_t *parse_let_decl(fxsh_parser_t *parser) {
         skip_newlines(parser);
     }
 
-    /* TODO: Parse type annotation if present */
+    fxsh_ast_node_t *type_ann = NULL;
+    if (match(parser, TOK_COLON)) {
+        skip_newlines(parser);
+        type_ann = parse_type_expr(parser);
+    }
 
     consume(parser, TOK_ASSIGN, "'='");
 
@@ -1118,7 +1167,10 @@ static fxsh_ast_node_t *parse_let_decl(fxsh_parser_t *parser) {
         }
     }
 
-    return fxsh_ast_let(name_tok->data.ident, value, is_comptime, is_rec, name_tok->loc);
+    fxsh_ast_node_t *n =
+        fxsh_ast_let(name_tok->data.ident, value, is_comptime, is_rec, name_tok->loc);
+    n->data.let.type = type_ann;
+    return n;
 }
 
 /*=============================================================================

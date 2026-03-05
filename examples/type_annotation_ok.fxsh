@@ -1,0 +1,4 @@
+# Let type annotations: top-level and function type
+
+let inc : int -> int = fn x -> x + 1
+let out : int = inc 41

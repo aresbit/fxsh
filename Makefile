@@ -113,6 +113,11 @@ test-native-codegen: $(NAME)
 	@echo "Running native-codegen smoke tests..."
 	@sh $(TESTS_DIR)/integration/native_codegen.sh ./$(BIN_DIR)/$(NAME)
 
+.PHONY: test-type-annotations
+test-type-annotations: $(NAME)
+	@echo "Running type annotation integration tests..."
+	@sh $(TESTS_DIR)/integration/type_annotations.sh ./$(BIN_DIR)/$(NAME)
+
 # Run linter
 .PHONY: lint
 lint:
@@ -179,6 +184,7 @@ help:
 	@echo "  make test-closure - Run closure integration tests (interpreter)"
 	@echo "  make test-closure-native - Run closure consistency tests in native mode"
 	@echo "  make test-native-codegen - Run native-codegen smoke tests"
+	@echo "  make test-type-annotations - Run type annotation integration tests"
 	@echo "  make lint         - Run static analysis"
 	@echo "  make format       - Format code"
 	@echo "  make check        - Run memory checks"
