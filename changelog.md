@@ -85,6 +85,8 @@
   - extended closure alias/stage propagation into non-top-level `let-in` scope:
     - local closure aliases inside `let-in` preserve closure stage metadata
     - local stage advancement (`let s2 = s1 arg`) is tracked for downstream calls.
+    - chained local alias/stage propagation is now covered by regression example:
+      `examples/closure_codegen_letin_alias_chain.fxsh`.
   - added `make test-native-codegen` smoke suite (`tests/integration/native_codegen.sh`)
     to guard direct native-codegen path on supported subset.
 - Added `tests/unit/smoke.c` so `make test` has a baseline executable test target.

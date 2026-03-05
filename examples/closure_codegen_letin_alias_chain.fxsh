@@ -1,0 +1,9 @@
+# Native-codegen closure smoke: let-in alias/stage propagation across nested chain
+
+let mk3 = fn a -> fn b -> fn c -> a + b + c
+
+let out = let s1 = mk3 1 in
+  let s1_alias = s1 in
+  let s2 = s1_alias 2 in
+  let s2_alias = s2 in
+  s2_alias 3
