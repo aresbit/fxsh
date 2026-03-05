@@ -7,192 +7,28 @@
 #include <stdio.h>
 #include <string.h>
 
-typedef enum {
-    RV_UNIT,
-    RV_BOOL,
-    RV_INT,
-    RV_FLOAT,
-    RV_STRING,
-    RV_FUNCTION,
-    RV_CONSTR,
-} rv_kind_t;
+typedef fxsh_rt_value_t rv_value_t;
+typedef fxsh_rt_env_t rv_env_t;
 
-typedef struct rv_value rv_value_t;
-typedef struct rv_env rv_env_t;
+#define RV_UNIT     FXSH_RT_UNIT
+#define RV_BOOL     FXSH_RT_BOOL
+#define RV_INT      FXSH_RT_INT
+#define RV_FLOAT    FXSH_RT_FLOAT
+#define RV_STRING   FXSH_RT_STRING
+#define RV_FUNCTION FXSH_RT_FUNCTION
+#define RV_CONSTR   FXSH_RT_CONSTR
 
-typedef struct {
-    fxsh_ast_list_t params;
-    fxsh_ast_node_t *body;
-    rv_env_t *env;
-    sp_dyn_array(rv_value_t *) bound_args;
-} rv_func_t;
-
-typedef struct {
-    sp_str_t tag;
-    sp_dyn_array(rv_value_t *) args;
-} rv_constr_t;
-
-struct rv_value {
-    rv_kind_t kind;
-    union {
-        bool b;
-        s64 i;
-        f64 f;
-        sp_str_t s;
-        rv_func_t fn;
-        rv_constr_t constr;
-    } as;
-};
-
-struct rv_env {
-    sp_str_t name;
-    rv_value_t *value;
-    rv_env_t *next;
-};
-
-static rv_value_t *rv_new(rv_kind_t k) {
-    rv_value_t *v = (rv_value_t *)fxsh_alloc0(sizeof(rv_value_t));
-    v->kind = k;
-    return v;
-}
-
-static rv_value_t *rv_unit(void) {
-    return rv_new(RV_UNIT);
-}
-
-static rv_value_t *rv_bool(bool b) {
-    rv_value_t *v = rv_new(RV_BOOL);
-    v->as.b = b;
-    return v;
-}
-
-static rv_value_t *rv_int(s64 i) {
-    rv_value_t *v = rv_new(RV_INT);
-    v->as.i = i;
-    return v;
-}
-
-static rv_value_t *rv_float(f64 f) {
-    rv_value_t *v = rv_new(RV_FLOAT);
-    v->as.f = f;
-    return v;
-}
-
-static rv_value_t *rv_string(sp_str_t s) {
-    rv_value_t *v = rv_new(RV_STRING);
-    v->as.s = s;
-    return v;
-}
-
-static rv_value_t *rv_function(fxsh_ast_list_t params, fxsh_ast_node_t *body, rv_env_t *env) {
-    rv_value_t *v = rv_new(RV_FUNCTION);
-    v->as.fn.params = params;
-    v->as.fn.body = body;
-    v->as.fn.env = env;
-    v->as.fn.bound_args = SP_NULLPTR;
-    return v;
-}
-
-static rv_value_t *rv_constr(sp_str_t tag, sp_dyn_array(rv_value_t *) args) {
-    rv_value_t *v = rv_new(RV_CONSTR);
-    v->as.constr.tag = tag;
-    v->as.constr.args = args;
-    return v;
-}
-
-static rv_env_t *env_bind(rv_env_t *env, sp_str_t name, rv_value_t *value) {
-    rv_env_t *n = (rv_env_t *)fxsh_alloc0(sizeof(rv_env_t));
-    n->name = name;
-    n->value = value;
-    n->next = env;
-    return n;
-}
-
-static rv_value_t *env_lookup(rv_env_t *env, sp_str_t name) {
-    for (rv_env_t *n = env; n; n = n->next) {
-        if (sp_str_equal(n->name, name))
-            return n->value;
-    }
-    return NULL;
-}
-
-static bool rv_equal(rv_value_t *a, rv_value_t *b) {
-    if (!a || !b)
-        return a == b;
-    if (a->kind != b->kind)
-        return false;
-
-    switch (a->kind) {
-        case RV_UNIT:
-            return true;
-        case RV_BOOL:
-            return a->as.b == b->as.b;
-        case RV_INT:
-            return a->as.i == b->as.i;
-        case RV_FLOAT:
-            return a->as.f == b->as.f;
-        case RV_STRING:
-            return sp_str_equal(a->as.s, b->as.s);
-        case RV_CONSTR: {
-            if (!sp_str_equal(a->as.constr.tag, b->as.constr.tag))
-                return false;
-            if (sp_dyn_array_size(a->as.constr.args) != sp_dyn_array_size(b->as.constr.args))
-                return false;
-            sp_dyn_array_for(a->as.constr.args, i) {
-                if (!rv_equal(a->as.constr.args[i], b->as.constr.args[i]))
-                    return false;
-            }
-            return true;
-        }
-        case RV_FUNCTION:
-            return a == b;
-    }
-    return false;
-}
-
-static sp_str_t rv_to_string(rv_value_t *v) {
-    if (!v)
-        return sp_str_lit("<null>");
-
-    switch (v->kind) {
-        case RV_UNIT:
-            return sp_str_lit("()");
-        case RV_BOOL:
-            return v->as.b ? sp_str_lit("true") : sp_str_lit("false");
-        case RV_INT: {
-            char *buf = (char *)fxsh_alloc0(32);
-            snprintf(buf, 32, "%ld", v->as.i);
-            return sp_str_view(buf);
-        }
-        case RV_FLOAT: {
-            char *buf = (char *)fxsh_alloc0(64);
-            snprintf(buf, 64, "%g", v->as.f);
-            return sp_str_view(buf);
-        }
-        case RV_STRING:
-            return v->as.s;
-        case RV_FUNCTION:
-            return sp_str_lit("<function>");
-        case RV_CONSTR: {
-            if (sp_dyn_array_size(v->as.constr.args) == 0)
-                return v->as.constr.tag;
-            char *buf = (char *)fxsh_alloc0(256);
-            size_t off = 0;
-            off += (size_t)snprintf(buf + off, 256 - off, "%.*s(", v->as.constr.tag.len,
-                                    v->as.constr.tag.data);
-            sp_dyn_array_for(v->as.constr.args, i) {
-                sp_str_t s = rv_to_string(v->as.constr.args[i]);
-                off += (size_t)snprintf(buf + off, 256 - off, "%.*s%s", s.len, s.data,
-                                        i + 1 < sp_dyn_array_size(v->as.constr.args) ? ", " : "");
-                if (off >= 252)
-                    break;
-            }
-            snprintf(buf + off, 256 - off, ")");
-            return sp_str_view(buf);
-        }
-    }
-    return sp_str_lit("<unknown>");
-}
+#define rv_unit      fxsh_rt_unit
+#define rv_bool      fxsh_rt_bool
+#define rv_int       fxsh_rt_int
+#define rv_float     fxsh_rt_float
+#define rv_string    fxsh_rt_string
+#define rv_function  fxsh_rt_function
+#define rv_constr    fxsh_rt_constr
+#define env_bind     fxsh_rt_env_bind
+#define env_lookup   fxsh_rt_env_lookup
+#define rv_equal     fxsh_rt_equal
+#define rv_to_string fxsh_rt_to_string
 
 static rv_value_t *eval_expr(fxsh_ast_node_t *ast, rv_env_t *env, fxsh_error_t *err);
 
@@ -251,10 +87,7 @@ static rv_value_t *apply_one(rv_value_t *fn, rv_value_t *arg, fxsh_error_t *err)
 
     u32 arity = (u32)sp_dyn_array_size(fn->as.fn.params);
     if (sp_dyn_array_size(bound) < arity) {
-        rv_value_t *partial = rv_new(RV_FUNCTION);
-        partial->as.fn.params = fn->as.fn.params;
-        partial->as.fn.body = fn->as.fn.body;
-        partial->as.fn.env = fn->as.fn.env;
+        rv_value_t *partial = rv_function(fn->as.fn.params, fn->as.fn.body, fn->as.fn.env);
         partial->as.fn.bound_args = bound;
         return partial;
     }

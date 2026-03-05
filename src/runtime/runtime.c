@@ -1,0 +1,153 @@
+/*
+ * runtime.c - shared runtime value model for interpreter/native backends
+ */
+
+#include "fxsh.h"
+
+#include <stdio.h>
+#include <string.h>
+
+static fxsh_rt_value_t *rt_new(fxsh_rt_kind_t k) {
+    fxsh_rt_value_t *v = (fxsh_rt_value_t *)fxsh_alloc0(sizeof(fxsh_rt_value_t));
+    v->kind = k;
+    return v;
+}
+
+fxsh_rt_value_t *fxsh_rt_unit(void) {
+    return rt_new(FXSH_RT_UNIT);
+}
+
+fxsh_rt_value_t *fxsh_rt_bool(bool b) {
+    fxsh_rt_value_t *v = rt_new(FXSH_RT_BOOL);
+    v->as.b = b;
+    return v;
+}
+
+fxsh_rt_value_t *fxsh_rt_int(s64 i) {
+    fxsh_rt_value_t *v = rt_new(FXSH_RT_INT);
+    v->as.i = i;
+    return v;
+}
+
+fxsh_rt_value_t *fxsh_rt_float(f64 f) {
+    fxsh_rt_value_t *v = rt_new(FXSH_RT_FLOAT);
+    v->as.f = f;
+    return v;
+}
+
+fxsh_rt_value_t *fxsh_rt_string(sp_str_t s) {
+    fxsh_rt_value_t *v = rt_new(FXSH_RT_STRING);
+    v->as.s = s;
+    return v;
+}
+
+fxsh_rt_value_t *fxsh_rt_function(fxsh_ast_list_t params, fxsh_ast_node_t *body,
+                                  fxsh_rt_env_t *env) {
+    fxsh_rt_value_t *v = rt_new(FXSH_RT_FUNCTION);
+    v->as.fn.params = params;
+    v->as.fn.body = body;
+    v->as.fn.env = env;
+    v->as.fn.bound_args = SP_NULLPTR;
+    return v;
+}
+
+fxsh_rt_value_t *fxsh_rt_constr(sp_str_t tag, sp_dyn_array(fxsh_rt_value_t *) args) {
+    fxsh_rt_value_t *v = rt_new(FXSH_RT_CONSTR);
+    v->as.constr.tag = tag;
+    v->as.constr.args = args;
+    return v;
+}
+
+fxsh_rt_env_t *fxsh_rt_env_bind(fxsh_rt_env_t *env, sp_str_t name, fxsh_rt_value_t *value) {
+    fxsh_rt_env_t *n = (fxsh_rt_env_t *)fxsh_alloc0(sizeof(fxsh_rt_env_t));
+    n->name = name;
+    n->value = value;
+    n->next = env;
+    return n;
+}
+
+fxsh_rt_value_t *fxsh_rt_env_lookup(fxsh_rt_env_t *env, sp_str_t name) {
+    for (fxsh_rt_env_t *n = env; n; n = n->next) {
+        if (sp_str_equal(n->name, name))
+            return n->value;
+    }
+    return NULL;
+}
+
+bool fxsh_rt_equal(fxsh_rt_value_t *a, fxsh_rt_value_t *b) {
+    if (!a || !b)
+        return a == b;
+    if (a->kind != b->kind)
+        return false;
+
+    switch (a->kind) {
+        case FXSH_RT_UNIT:
+            return true;
+        case FXSH_RT_BOOL:
+            return a->as.b == b->as.b;
+        case FXSH_RT_INT:
+            return a->as.i == b->as.i;
+        case FXSH_RT_FLOAT:
+            return a->as.f == b->as.f;
+        case FXSH_RT_STRING:
+            return sp_str_equal(a->as.s, b->as.s);
+        case FXSH_RT_CONSTR: {
+            if (!sp_str_equal(a->as.constr.tag, b->as.constr.tag))
+                return false;
+            if (sp_dyn_array_size(a->as.constr.args) != sp_dyn_array_size(b->as.constr.args))
+                return false;
+            sp_dyn_array_for(a->as.constr.args, i) {
+                if (!fxsh_rt_equal(a->as.constr.args[i], b->as.constr.args[i]))
+                    return false;
+            }
+            return true;
+        }
+        case FXSH_RT_FUNCTION:
+            return a == b;
+    }
+    return false;
+}
+
+sp_str_t fxsh_rt_to_string(fxsh_rt_value_t *v) {
+    if (!v)
+        return sp_str_lit("<null>");
+
+    switch (v->kind) {
+        case FXSH_RT_UNIT:
+            return sp_str_lit("()");
+        case FXSH_RT_BOOL:
+            return v->as.b ? sp_str_lit("true") : sp_str_lit("false");
+        case FXSH_RT_INT: {
+            char *buf = (char *)fxsh_alloc0(32);
+            snprintf(buf, 32, "%ld", v->as.i);
+            return sp_str_view(buf);
+        }
+        case FXSH_RT_FLOAT: {
+            char *buf = (char *)fxsh_alloc0(64);
+            snprintf(buf, 64, "%g", v->as.f);
+            return sp_str_view(buf);
+        }
+        case FXSH_RT_STRING:
+            return v->as.s;
+        case FXSH_RT_FUNCTION:
+            return sp_str_lit("<function>");
+        case FXSH_RT_CONSTR: {
+            if (sp_dyn_array_size(v->as.constr.args) == 0)
+                return v->as.constr.tag;
+            char *buf = (char *)fxsh_alloc0(256);
+            size_t off = 0;
+            off += (size_t)snprintf(buf + off, 256 - off, "%.*s(", v->as.constr.tag.len,
+                                    v->as.constr.tag.data);
+            sp_dyn_array_for(v->as.constr.args, i) {
+                sp_str_t s = fxsh_rt_to_string(v->as.constr.args[i]);
+                off += (size_t)snprintf(buf + off, 256 - off, "%.*s%s", s.len, s.data,
+                                        i + 1 < sp_dyn_array_size(v->as.constr.args) ? ", " : "");
+                if (off >= 252)
+                    break;
+            }
+            snprintf(buf + off, 256 - off, ")");
+            return sp_str_view(buf);
+        }
+    }
+    return sp_str_lit("<unknown>");
+}

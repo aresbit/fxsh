@@ -14,6 +14,8 @@
   - executes AST directly after type inference
   - supports `let`/`let rec`/`let-in`, `fn`/call/pipe, ADT constructors and `match`
   - reports runtime non-exhaustive match as execution error
+- Extracted shared runtime value model (`fxsh_rt_*`) into `src/runtime/runtime.c`
+  so interpreter/native/bytecode backends can converge on one value representation.
 - Added function application by juxtaposition syntax: `f x y`.
 - Added parser support for string concat operator token `++` in additive precedence.
 - Added type inference rule for `++` (`string ++ string -> string`).

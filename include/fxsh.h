@@ -748,6 +748,62 @@ fxsh_ct_value_t *fxsh_ct_make_vector(fxsh_ct_value_t *elem_type);
  * Forward Declarations - Interpreter
  *=============================================================================*/
 
+typedef enum {
+    FXSH_RT_UNIT,
+    FXSH_RT_BOOL,
+    FXSH_RT_INT,
+    FXSH_RT_FLOAT,
+    FXSH_RT_STRING,
+    FXSH_RT_FUNCTION,
+    FXSH_RT_CONSTR,
+} fxsh_rt_kind_t;
+
+typedef struct fxsh_rt_value fxsh_rt_value_t;
+typedef struct fxsh_rt_env fxsh_rt_env_t;
+
+typedef struct {
+    fxsh_ast_list_t params;
+    fxsh_ast_node_t *body;
+    fxsh_rt_env_t *env;
+    sp_dyn_array(fxsh_rt_value_t *) bound_args;
+} fxsh_rt_func_t;
+
+typedef struct {
+    sp_str_t tag;
+    sp_dyn_array(fxsh_rt_value_t *) args;
+} fxsh_rt_constr_t;
+
+struct fxsh_rt_value {
+    fxsh_rt_kind_t kind;
+    union {
+        bool b;
+        s64 i;
+        f64 f;
+        sp_str_t s;
+        fxsh_rt_func_t fn;
+        fxsh_rt_constr_t constr;
+    } as;
+};
+
+struct fxsh_rt_env {
+    sp_str_t name;
+    fxsh_rt_value_t *value;
+    fxsh_rt_env_t *next;
+};
+
+fxsh_rt_value_t *fxsh_rt_unit(void);
+fxsh_rt_value_t *fxsh_rt_bool(bool b);
+fxsh_rt_value_t *fxsh_rt_int(s64 i);
+fxsh_rt_value_t *fxsh_rt_float(f64 f);
+fxsh_rt_value_t *fxsh_rt_string(sp_str_t s);
+fxsh_rt_value_t *fxsh_rt_function(fxsh_ast_list_t params, fxsh_ast_node_t *body,
+                                  fxsh_rt_env_t *env);
+fxsh_rt_value_t *fxsh_rt_constr(sp_str_t tag, sp_dyn_array(fxsh_rt_value_t *) args);
+fxsh_rt_env_t *fxsh_rt_env_bind(fxsh_rt_env_t *env, sp_str_t name, fxsh_rt_value_t *value);
+fxsh_rt_value_t *fxsh_rt_env_lookup(fxsh_rt_env_t *env, sp_str_t name);
+bool fxsh_rt_equal(fxsh_rt_value_t *a, fxsh_rt_value_t *b);
+sp_str_t fxsh_rt_to_string(fxsh_rt_value_t *v);
+
 fxsh_error_t fxsh_interp_eval(fxsh_ast_node_t *ast, sp_str_t *out_value_str);
 
 /*=============================================================================

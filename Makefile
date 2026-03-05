@@ -19,6 +19,7 @@ SRCS := $(wildcard $(SRC_DIR)/*.c) \
         $(wildcard $(SRC_DIR)/comptime/*.c) \
         $(wildcard $(SRC_DIR)/codegen/*.c) \
         $(wildcard $(SRC_DIR)/interp/*.c) \
+        $(wildcard $(SRC_DIR)/runtime/*.c) \
         $(wildcard $(SRC_DIR)/modules/*.c)
 
 # Generate object file paths
@@ -128,6 +129,7 @@ setup:
 dir:
 	@mkdir -p $(BUILD_DIR)/{lexer,parser,types,comptime,codegen,modules}
 	@mkdir -p $(BUILD_DIR)/interp
+	@mkdir -p $(BUILD_DIR)/runtime
 	@mkdir -p $(BIN_DIR)
 
 # Clean build artifacts
