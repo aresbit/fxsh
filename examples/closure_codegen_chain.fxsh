@@ -1,0 +1,6 @@
+# Native-codegen closure smoke: multi-level closure chain
+
+let mk3 = fn a -> fn b -> fn c -> a + b + c
+let s1 = mk3 1
+let s2 = s1 2
+let out = s2 3

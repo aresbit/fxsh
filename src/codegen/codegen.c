@@ -148,10 +148,18 @@ static u32 g_top_let_counter = 0;
 
 typedef struct {
     sp_str_t name;
+    sp_str_t c_base;
     u32 outer_arity;
-    u32 inner_arity;
+    sp_dyn_array(u32) stage_arities; /* stages after outer application */
 } closure_info_t;
 static sp_dyn_array(closure_info_t) g_closure_infos = SP_NULLPTR;
+
+typedef struct {
+    sp_str_t name;
+    sp_str_t root_fn;
+    u32 stage; /* 1..N for closure stages */
+} closure_value_info_t;
+static sp_dyn_array(closure_value_info_t) g_closure_values = SP_NULLPTR;
 
 typedef struct {
     sp_str_t src_name;
@@ -208,6 +216,14 @@ static closure_info_t *closure_info_lookup(sp_str_t name) {
     sp_dyn_array_for(g_closure_infos, i) {
         if (sp_str_equal(g_closure_infos[i].name, name))
             return &g_closure_infos[i];
+    }
+    return NULL;
+}
+
+static closure_value_info_t *closure_value_lookup(sp_str_t name) {
+    for (s32 i = (s32)sp_dyn_array_size(g_closure_values) - 1; i >= 0; i--) {
+        if (sp_str_equal(g_closure_values[i].name, name))
+            return &g_closure_values[i];
     }
     return NULL;
 }
@@ -715,33 +731,126 @@ static void gen_call(codegen_ctx_t *ctx, fxsh_ast_node_t *ast) {
                 sp_dyn_array_free(flat_args);
                 return;
             }
-            if (nargs == ci->outer_arity) {
-                gen_expr(ctx, func);
-                emit_raw(ctx, "(");
-                for (u32 i = 0; i < ci->outer_arity; i++) {
-                    if (i > 0)
-                        emit_raw(ctx, ", ");
-                    gen_expr(ctx, flat_args[(s32)nargs - 1 - (s32)i]);
-                }
-                emit_raw(ctx, ")");
-            } else if (nargs == ci->outer_arity + ci->inner_arity) {
-                emit_raw(ctx, "({ __auto_type _c = ");
-                gen_expr(ctx, func);
-                emit_raw(ctx, "(");
-                for (u32 i = 0; i < ci->outer_arity; i++) {
-                    if (i > 0)
-                        emit_raw(ctx, ", ");
-                    gen_expr(ctx, flat_args[(s32)nargs - 1 - (s32)i]);
-                }
-                emit_raw(ctx, "); _c.call(_c.env");
-                for (u32 i = 0; i < ci->inner_arity; i++) {
-                    emit_raw(ctx, ", ");
-                    gen_expr(ctx, flat_args[(s32)nargs - 1 - (s32)(ci->outer_arity + i)]);
-                }
-                emit_raw(ctx, "); })");
-            } else {
+            if (nargs < ci->outer_arity) {
                 emit_raw(ctx, "0 /* unsupported closure arity */");
+                sp_dyn_array_free(flat_args);
+                return;
             }
+
+            u32 consumed = 0;
+            emit_raw(ctx, "({ __auto_type _c1 = ");
+            gen_expr(ctx, func);
+            emit_raw(ctx, "(");
+            for (u32 i = 0; i < ci->outer_arity; i++) {
+                if (i > 0)
+                    emit_raw(ctx, ", ");
+                gen_expr(ctx, flat_args[(s32)nargs - 1 - (s32)i]);
+            }
+            consumed += ci->outer_arity;
+            emit_raw(ctx, "); ");
+
+            u32 stage = 1;
+            u32 var_idx = 1;
+            bool ok = true;
+            bool emitted_value = false;
+            while (consumed < nargs) {
+                if (stage == 0 || stage > sp_dyn_array_size(ci->stage_arities)) {
+                    ok = false;
+                    break;
+                }
+                u32 ar = ci->stage_arities[stage - 1];
+                if (consumed + ar > nargs) {
+                    ok = false;
+                    break;
+                }
+                if (stage == sp_dyn_array_size(ci->stage_arities) && consumed + ar == nargs) {
+                    emit_fmt(ctx, "_c%u.call(_c%u.env", var_idx, var_idx);
+                    for (u32 j = 0; j < ar; j++) {
+                        emit_raw(ctx, ", ");
+                        gen_expr(ctx, flat_args[(s32)nargs - 1 - (s32)(consumed + j)]);
+                    }
+                    emit_raw(ctx, "); ");
+                    consumed += ar;
+                    emitted_value = true;
+                    break;
+                }
+                emit_fmt(ctx, "__auto_type _c%u = _c%u.call(_c%u.env", var_idx + 1, var_idx,
+                         var_idx);
+                for (u32 j = 0; j < ar; j++) {
+                    emit_raw(ctx, ", ");
+                    gen_expr(ctx, flat_args[(s32)nargs - 1 - (s32)(consumed + j)]);
+                }
+                emit_raw(ctx, "); ");
+                consumed += ar;
+                var_idx++;
+                stage++;
+            }
+            if (!ok || consumed != nargs) {
+                emit_raw(ctx, "0 /* unsupported closure arity */; ");
+            } else if (!emitted_value) {
+                emit_fmt(ctx, "_c%u; ", var_idx);
+            }
+            emit_raw(ctx, "})");
+            sp_dyn_array_free(flat_args);
+            return;
+        }
+
+        closure_value_info_t *cv = closure_value_lookup(fname);
+        if (cv) {
+            closure_info_t *ci = closure_info_lookup(cv->root_fn);
+            u32 nargs = (u32)sp_dyn_array_size(flat_args);
+            if (!ci) {
+                emit_raw(ctx, "0 /* missing closure root info */");
+                sp_dyn_array_free(flat_args);
+                return;
+            }
+            emit_raw(ctx, "({ __auto_type _c1 = ");
+            gen_expr(ctx, func);
+            emit_raw(ctx, "; ");
+
+            u32 consumed = 0;
+            u32 stage = cv->stage;
+            u32 var_idx = 1;
+            bool ok = true;
+            bool emitted_value = false;
+            while (consumed < nargs) {
+                if (stage == 0 || stage > sp_dyn_array_size(ci->stage_arities)) {
+                    ok = false;
+                    break;
+                }
+                u32 ar = ci->stage_arities[stage - 1];
+                if (consumed + ar > nargs) {
+                    ok = false;
+                    break;
+                }
+                if (stage == sp_dyn_array_size(ci->stage_arities) && consumed + ar == nargs) {
+                    emit_fmt(ctx, "_c%u.call(_c%u.env", var_idx, var_idx);
+                    for (u32 j = 0; j < ar; j++) {
+                        emit_raw(ctx, ", ");
+                        gen_expr(ctx, flat_args[(s32)nargs - 1 - (s32)(consumed + j)]);
+                    }
+                    emit_raw(ctx, "); ");
+                    consumed += ar;
+                    emitted_value = true;
+                    break;
+                }
+                emit_fmt(ctx, "__auto_type _c%u = _c%u.call(_c%u.env", var_idx + 1, var_idx,
+                         var_idx);
+                for (u32 j = 0; j < ar; j++) {
+                    emit_raw(ctx, ", ");
+                    gen_expr(ctx, flat_args[(s32)nargs - 1 - (s32)(consumed + j)]);
+                }
+                emit_raw(ctx, "); ");
+                consumed += ar;
+                var_idx++;
+                stage++;
+            }
+            if (!ok || consumed != nargs) {
+                emit_raw(ctx, "0 /* unsupported closure value arity */; ");
+            } else if (!emitted_value) {
+                emit_fmt(ctx, "_c%u; ", var_idx);
+            }
+            emit_raw(ctx, "})");
             sp_dyn_array_free(flat_args);
             return;
         }
@@ -1119,6 +1228,76 @@ static sp_str_t gen_expr_to_owned_string(codegen_ctx_t *ctx, fxsh_ast_node_t *ex
     return s;
 }
 
+static bool flatten_call_head_ident(fxsh_ast_node_t *expr, sp_str_t *out_head, u32 *out_argc) {
+    if (!expr || expr->kind != AST_CALL)
+        return false;
+    fxsh_ast_node_t *cur = expr;
+    u32 argc = 0;
+    while (cur && cur->kind == AST_CALL) {
+        argc += (u32)sp_dyn_array_size(cur->data.call.args);
+        cur = cur->data.call.func;
+    }
+    if (!cur || cur->kind != AST_IDENT)
+        return false;
+    if (out_head)
+        *out_head = cur->data.ident;
+    if (out_argc)
+        *out_argc = argc;
+    return true;
+}
+
+static void emit_closure_type_name(codegen_ctx_t *ctx, sp_str_t root_fn, u32 stage) {
+    emit_raw(ctx, "fxsh_clo_");
+    emit_mangled(ctx, root_fn);
+    emit_fmt(ctx, "_%u_t", (unsigned)stage);
+}
+
+static bool closure_expr_stage_of(fxsh_ast_node_t *expr, sp_str_t *out_root, u32 *out_stage) {
+    if (!expr)
+        return false;
+    if (expr->kind == AST_IDENT) {
+        closure_value_info_t *cv = closure_value_lookup(expr->data.ident);
+        if (!cv)
+            return false;
+        if (out_root)
+            *out_root = cv->root_fn;
+        if (out_stage)
+            *out_stage = cv->stage;
+        return true;
+    }
+    if (expr->kind == AST_CALL) {
+        sp_str_t head = {0};
+        u32 argc = 0;
+        if (!flatten_call_head_ident(expr, &head, &argc))
+            return false;
+        closure_info_t *ci = closure_info_lookup(head);
+        if (ci && argc == ci->outer_arity) {
+            if (out_root)
+                *out_root = head;
+            if (out_stage)
+                *out_stage = 1;
+            return true;
+        }
+        closure_value_info_t *cv = closure_value_lookup(head);
+        if (cv) {
+            closure_info_t *rci = closure_info_lookup(cv->root_fn);
+            if (!rci)
+                return false;
+            if (cv->stage == 0 || cv->stage > sp_dyn_array_size(rci->stage_arities))
+                return false;
+            if (argc == rci->stage_arities[cv->stage - 1] &&
+                cv->stage < sp_dyn_array_size(rci->stage_arities)) {
+                if (out_root)
+                    *out_root = cv->root_fn;
+                if (out_stage)
+                    *out_stage = cv->stage + 1;
+                return true;
+            }
+        }
+    }
+    return false;
+}
+
 static bool top_let_value_is_closure_ctor(fxsh_ast_node_t *v, sp_str_t *out_fn_name) {
     if (!v || v->kind != AST_CALL)
         return false;
@@ -1141,160 +1320,228 @@ static bool gen_decl_let_closure_generic(codegen_ctx_t *ctx, fxsh_ast_node_t *as
     fxsh_ast_node_t *lam = ast->data.let.value;
     if (!lam || lam->kind != AST_LAMBDA)
         return false;
-    if (!lam->data.lambda.params || sp_dyn_array_size(lam->data.lambda.params) == 0)
-        return false;
-    if (!lam->data.lambda.body || lam->data.lambda.body->kind != AST_LAMBDA)
-        return false;
-
-    fxsh_ast_node_t *inner = lam->data.lambda.body;
-    if (!inner->data.lambda.params || sp_dyn_array_size(inner->data.lambda.params) == 0)
-        return false;
-
     fxsh_type_t *fn_t = lookup_symbol_type(ast->data.let.name);
     if (!fn_t || fn_t->kind != TYPE_ARROW)
         return false;
 
-    u32 outer_arity = (u32)sp_dyn_array_size(lam->data.lambda.params);
-    u32 inner_arity = (u32)sp_dyn_array_size(inner->data.lambda.params);
-
-    sp_dyn_array(fxsh_type_t *) outer_types = SP_NULLPTR;
-    sp_dyn_array(fxsh_type_t *) inner_types = SP_NULLPTR;
-
-    fxsh_type_t *cur = fn_t;
-    for (u32 i = 0; i < outer_arity; i++) {
-        if (!cur || cur->kind != TYPE_ARROW)
+    sp_dyn_array(fxsh_ast_list_t) groups = SP_NULLPTR;
+    fxsh_ast_node_t *final_body = NULL;
+    fxsh_ast_node_t *cur_lam = lam;
+    while (cur_lam && cur_lam->kind == AST_LAMBDA) {
+        if (!cur_lam->data.lambda.params || sp_dyn_array_size(cur_lam->data.lambda.params) == 0)
             return false;
-        sp_dyn_array_push(outer_types, cur->data.arrow.param);
-        cur = cur->data.arrow.ret;
+        sp_dyn_array_push(groups, cur_lam->data.lambda.params);
+        if (cur_lam->data.lambda.body && cur_lam->data.lambda.body->kind == AST_LAMBDA) {
+            cur_lam = cur_lam->data.lambda.body;
+        } else {
+            final_body = cur_lam->data.lambda.body;
+            break;
+        }
     }
-    for (u32 i = 0; i < inner_arity; i++) {
-        if (!cur || cur->kind != TYPE_ARROW)
+    if (sp_dyn_array_size(groups) < 2 || !final_body)
+        return false;
+
+    u32 group_count = (u32)sp_dyn_array_size(groups);
+    u32 outer_arity = (u32)sp_dyn_array_size(groups[0]);
+    u32 num_stages = group_count - 1;
+
+    sp_dyn_array(u32) group_offsets = SP_NULLPTR;
+    u32 total_params = 0;
+    sp_dyn_array_for(groups, gi) {
+        sp_dyn_array_push(group_offsets, total_params);
+        total_params += (u32)sp_dyn_array_size(groups[gi]);
+    }
+
+    sp_dyn_array(fxsh_type_t *) param_types = SP_NULLPTR;
+    fxsh_type_t *cur_t = fn_t;
+    for (u32 i = 0; i < total_params; i++) {
+        if (!cur_t || cur_t->kind != TYPE_ARROW)
             return false;
-        sp_dyn_array_push(inner_types, cur->data.arrow.param);
-        cur = cur->data.arrow.ret;
+        sp_dyn_array_push(param_types, cur_t->data.arrow.param);
+        cur_t = cur_t->data.arrow.ret;
     }
-    fxsh_type_t *ret_type = cur;
+    fxsh_type_t *ret_type = cur_t;
 
     char base[128];
     mangle_into(ast->data.let.name, base, sizeof(base));
 
-    sp_dyn_array(sp_str_t) outer_param_names = SP_NULLPTR;
-    sp_dyn_array_for(lam->data.lambda.params, i) {
-        fxsh_ast_node_t *p = lam->data.lambda.params[i];
-        if (!p || (p->kind != AST_PAT_VAR && p->kind != AST_IDENT))
-            return false;
-        sp_dyn_array_push(outer_param_names, p->data.ident);
-    }
-    sp_dyn_array(sp_str_t) inner_param_names = SP_NULLPTR;
-    sp_dyn_array_for(inner->data.lambda.params, i) {
-        fxsh_ast_node_t *p = inner->data.lambda.params[i];
-        if (!p || (p->kind != AST_PAT_VAR && p->kind != AST_IDENT))
-            return false;
-        sp_dyn_array_push(inner_param_names, p->data.ident);
+    for (u32 s = 1; s <= num_stages; s++) {
+        emit_raw(ctx, "typedef struct fxsh_clo_");
+        emit_raw(ctx, base);
+        emit_fmt(ctx, "_%u_s fxsh_clo_%s_%u_t;\n", s, base, s);
     }
 
-    sp_dyn_array(sp_str_t) bound = SP_NULLPTR;
-    sp_dyn_array(sp_str_t) free_ids = SP_NULLPTR;
-    sp_dyn_array_for(inner_param_names, i) sp_dyn_array_push(bound, inner_param_names[i]);
-    collect_free_idents(inner->data.lambda.body, &bound, &free_ids);
+    for (u32 s = 1; s <= num_stages; s++) {
+        emit_raw(ctx, "struct fxsh_clo_");
+        emit_raw(ctx, base);
+        emit_fmt(ctx, "_%u_s { ", s);
+        if (s == num_stages) {
+            emit_c_type_for_type(ctx, ret_type);
+        } else {
+            emit_raw(ctx, "fxsh_clo_");
+            emit_raw(ctx, base);
+            emit_fmt(ctx, "_%u_t", s + 1);
+        }
+        emit_raw(ctx, " (*call)(void *env");
+        fxsh_ast_list_t stage_params = groups[s];
+        u32 off = group_offsets[s];
+        sp_dyn_array_for(stage_params, i) {
+            fxsh_ast_node_t *p = stage_params[i];
+            if (!p || (p->kind != AST_PAT_VAR && p->kind != AST_IDENT))
+                return false;
+            emit_raw(ctx, ", ");
+            emit_c_type_for_type(ctx, param_types[off + (u32)i]);
+            emit_raw(ctx, " ");
+            emit_mangled(ctx, p->data.ident);
+        }
+        emit_raw(ctx, "); void *env; };\n");
+    }
 
-    sp_dyn_array(sp_str_t) captures = SP_NULLPTR;
-    sp_dyn_array(u32) capture_outer_idx = SP_NULLPTR;
-    sp_dyn_array_for(free_ids, i) {
-        sp_str_t id = free_ids[i];
-        sp_dyn_array_for(outer_param_names, j) {
-            if (sp_str_equal(id, outer_param_names[j])) {
-                sp_dyn_array_push(captures, id);
-                sp_dyn_array_push(capture_outer_idx, (u32)j);
+    for (u32 s = 1; s <= num_stages; s++) {
+        emit_fmt(ctx, "typedef struct { ");
+        for (u32 g = 0; g < s; g++) {
+            fxsh_ast_list_t ps = groups[g];
+            u32 off = group_offsets[g];
+            sp_dyn_array_for(ps, pi) {
+                fxsh_ast_node_t *p = ps[pi];
+                emit_c_type_for_type(ctx, param_types[off + (u32)pi]);
+                emit_raw(ctx, " ");
+                emit_mangled(ctx, p->data.ident);
+                emit_raw(ctx, "; ");
             }
         }
+        emit_fmt(ctx, "} fxsh_env_%s_%u_t;\n", base, s);
     }
 
-    emit_fmt(ctx, "typedef struct fxsh_clo_%s_s { ", base);
-    emit_c_type_for_type(ctx, ret_type);
-    emit_raw(ctx, " (*call)(void *env");
-    sp_dyn_array_for(inner_param_names, i) {
-        emit_raw(ctx, ", ");
-        emit_c_type_for_type(ctx, inner_types[i]);
-        emit_raw(ctx, " ");
-        emit_mangled(ctx, inner_param_names[i]);
-    }
-    emit_fmt(ctx, "); void *env; } fxsh_clo_%s_t;\n", base);
+    for (s32 s = (s32)num_stages; s >= 1; s--) {
+        emit_raw(ctx, "static ");
+        if ((u32)s == num_stages) {
+            emit_c_type_for_type(ctx, ret_type);
+        } else {
+            emit_raw(ctx, "fxsh_clo_");
+            emit_raw(ctx, base);
+            emit_fmt(ctx, "_%u_t", (unsigned)(s + 1));
+        }
+        emit_raw(ctx, " fxsh_clo_");
+        emit_raw(ctx, base);
+        emit_fmt(ctx, "_%u(void *env", (unsigned)s);
 
-    emit_fmt(ctx, "typedef struct { ");
-    sp_dyn_array_for(captures, i) {
-        emit_c_type_for_type(ctx, outer_types[capture_outer_idx[i]]);
-        emit_raw(ctx, " ");
-        emit_mangled(ctx, captures[i]);
-        emit_raw(ctx, "; ");
-    }
-    emit_fmt(ctx, "} fxsh_env_%s_0_t;\n", base);
+        fxsh_ast_list_t stage_params = groups[(u32)s];
+        u32 stage_off = group_offsets[(u32)s];
+        sp_dyn_array_for(stage_params, i) {
+            fxsh_ast_node_t *p = stage_params[i];
+            emit_raw(ctx, ", ");
+            emit_c_type_for_type(ctx, param_types[stage_off + (u32)i]);
+            emit_raw(ctx, " ");
+            emit_mangled(ctx, p->data.ident);
+        }
+        emit_raw(ctx, ") {\n");
+        ctx->indent_level++;
+        emit_indent(ctx);
+        emit_fmt(ctx, "fxsh_env_%s_%u_t *e = (fxsh_env_%s_%u_t *)env;\n", base, (unsigned)s, base,
+                 (unsigned)s);
 
-    emit_fmt(ctx, "static ");
-    emit_c_type_for_type(ctx, ret_type);
-    emit_fmt(ctx, " fxsh_clo_%s_0(void *env", base);
-    sp_dyn_array_for(inner_param_names, i) {
-        emit_raw(ctx, ", ");
-        emit_c_type_for_type(ctx, inner_types[i]);
-        emit_raw(ctx, " ");
-        emit_mangled(ctx, inner_param_names[i]);
-    }
-    emit_raw(ctx, ") {\n");
-    ctx->indent_level++;
-    emit_indent(ctx);
-    emit_fmt(ctx, "fxsh_env_%s_0_t *e = (fxsh_env_%s_0_t *)env;\n", base, base);
+        u32 mark = sym_mark();
+        for (u32 g = 0; g < (u32)s; g++) {
+            fxsh_ast_list_t ps = groups[g];
+            sp_dyn_array_for(ps, pi) {
+                fxsh_ast_node_t *p = ps[pi];
+                char buf[256];
+                char tmp[128];
+                mangle_into(p->data.ident, tmp, sizeof(tmp));
+                snprintf(buf, sizeof(buf), "e->%s", tmp);
+                sym_push_expr(p->data.ident, make_owned_str(buf));
+            }
+        }
 
-    u32 mark = sym_mark();
-    sp_dyn_array_for(captures, i) {
-        char buf[256];
-        char tmp[128];
-        mangle_into(captures[i], tmp, sizeof(tmp));
-        snprintf(buf, sizeof(buf), "e->%s", tmp);
-        char *owned = (char *)fxsh_alloc0(strlen(buf) + 1);
-        strcpy(owned, buf);
-        sym_push_expr(captures[i], sp_str_view(owned));
+        if ((u32)s == num_stages) {
+            emit_indent(ctx);
+            emit_raw(ctx, "return ");
+            gen_expr(ctx, final_body);
+            emit_raw(ctx, ";\n");
+        } else {
+            emit_indent(ctx);
+            emit_fmt(
+                ctx,
+                "fxsh_env_%s_%u_t *e2 = (fxsh_env_%s_%u_t *)malloc(sizeof(fxsh_env_%s_%u_t));\n",
+                base, (unsigned)(s + 1), base, (unsigned)(s + 1), base, (unsigned)(s + 1));
+            for (u32 g = 0; g < (u32)s; g++) {
+                fxsh_ast_list_t ps = groups[g];
+                sp_dyn_array_for(ps, pi) {
+                    fxsh_ast_node_t *p = ps[pi];
+                    emit_indent(ctx);
+                    emit_raw(ctx, "e2->");
+                    emit_mangled(ctx, p->data.ident);
+                    emit_raw(ctx, " = e->");
+                    emit_mangled(ctx, p->data.ident);
+                    emit_raw(ctx, ";\n");
+                }
+            }
+            sp_dyn_array_for(stage_params, i) {
+                fxsh_ast_node_t *p = stage_params[i];
+                emit_indent(ctx);
+                emit_raw(ctx, "e2->");
+                emit_mangled(ctx, p->data.ident);
+                emit_raw(ctx, " = ");
+                emit_mangled(ctx, p->data.ident);
+                emit_raw(ctx, ";\n");
+            }
+            emit_indent(ctx);
+            emit_raw(ctx, "return (fxsh_clo_");
+            emit_raw(ctx, base);
+            emit_fmt(ctx, "_%u_t){ .call = fxsh_clo_%s_%u, .env = e2 };\n", (unsigned)(s + 1), base,
+                     (unsigned)(s + 1));
+        }
+        sym_pop_to(mark);
+        ctx->indent_level--;
+        emit_line(ctx, "}");
     }
-    emit_indent(ctx);
-    emit_raw(ctx, "return ");
-    gen_expr(ctx, inner->data.lambda.body);
-    emit_raw(ctx, ";\n");
-    sym_pop_to(mark);
-    ctx->indent_level--;
-    emit_line(ctx, "}");
 
     sp_dyn_array_push(g_lambda_fn_names, ast->data.let.name);
     sp_dyn_array_push(g_closure_fn_names, ast->data.let.name);
     closure_info_t ci = {
-        .name = ast->data.let.name, .outer_arity = outer_arity, .inner_arity = inner_arity};
+        .name = ast->data.let.name, .c_base = ast->data.let.name, .outer_arity = outer_arity};
+    ci.stage_arities = SP_NULLPTR;
+    for (u32 s = 1; s <= num_stages; s++) {
+        sp_dyn_array_push(ci.stage_arities, (u32)sp_dyn_array_size(groups[s]));
+    }
     sp_dyn_array_push(g_closure_infos, ci);
 
     emit_raw(ctx, "static fxsh_clo_");
     emit_raw(ctx, base);
-    emit_raw(ctx, "_t fxsh_fn_");
+    emit_raw(ctx, "_1_t fxsh_fn_");
     emit_mangled(ctx, ast->data.let.name);
     emit_raw(ctx, "(");
-    sp_dyn_array_for(outer_param_names, i) {
+    fxsh_ast_list_t outer_params = groups[0];
+    u32 outer_off = group_offsets[0];
+    sp_dyn_array_for(outer_params, i) {
+        fxsh_ast_node_t *p = outer_params[i];
         if (i > 0)
             emit_raw(ctx, ", ");
-        emit_c_type_for_type(ctx, outer_types[i]);
+        emit_c_type_for_type(ctx, param_types[outer_off + (u32)i]);
         emit_raw(ctx, " ");
-        emit_mangled(ctx, outer_param_names[i]);
+        emit_mangled(ctx, p->data.ident);
     }
     emit_raw(ctx, ") {\n");
     ctx->indent_level++;
     emit_indent(ctx);
-    emit_fmt(ctx, "fxsh_env_%s_0_t *e = (fxsh_env_%s_0_t *)malloc(sizeof(fxsh_env_%s_0_t));\n",
+    emit_fmt(ctx, "fxsh_env_%s_1_t *e = (fxsh_env_%s_1_t *)malloc(sizeof(fxsh_env_%s_1_t));\n",
              base, base, base);
-    sp_dyn_array_for(captures, i) {
+    sp_dyn_array_for(outer_params, i) {
+        fxsh_ast_node_t *p = outer_params[i];
         emit_indent(ctx);
         emit_raw(ctx, "e->");
-        emit_mangled(ctx, captures[i]);
+        emit_mangled(ctx, p->data.ident);
         emit_raw(ctx, " = ");
-        emit_mangled(ctx, captures[i]);
+        emit_mangled(ctx, p->data.ident);
         emit_raw(ctx, ";\n");
     }
     emit_indent(ctx);
-    emit_fmt(ctx, "return (fxsh_clo_%s_t){ .call = fxsh_clo_%s_0, .env = e };\n", base, base);
+    emit_raw(ctx, "return (fxsh_clo_");
+    emit_raw(ctx, base);
+    emit_raw(ctx, "_1_t){ .call = fxsh_clo_");
+    emit_raw(ctx, base);
+    emit_raw(ctx, "_1, .env = e };\n");
     ctx->indent_level--;
     emit_line(ctx, "}");
     emit_raw(ctx, "\n");
@@ -1363,14 +1610,14 @@ static void gen_decl_let(codegen_ctx_t *ctx, fxsh_ast_node_t *ast) {
 
     sp_str_t rhs = gen_expr_to_owned_string(ctx, ast->data.let.value);
     fxsh_type_t *vt = lookup_symbol_type(ast->data.let.name);
-    sp_str_t clo_fn = (sp_str_t){0};
+    sp_str_t clo_root = (sp_str_t){0};
+    u32 clo_stage = 0;
+    bool is_closure_value = closure_expr_stage_of(ast->data.let.value, &clo_root, &clo_stage);
 
     emit_indent(ctx);
     emit_raw(ctx, "static ");
-    if (top_let_value_is_closure_ctor(ast->data.let.value, &clo_fn)) {
-        emit_raw(ctx, "fxsh_clo_");
-        emit_mangled(ctx, clo_fn);
-        emit_raw(ctx, "_t");
+    if (is_closure_value) {
+        emit_closure_type_name(ctx, clo_root, clo_stage);
     } else {
         emit_c_type_for_type(ctx, vt);
     }
@@ -1381,6 +1628,11 @@ static void gen_decl_let(codegen_ctx_t *ctx, fxsh_ast_node_t *ast) {
     global_init_t gi = {.c_name = cname, .rhs_expr = rhs};
     sp_dyn_array_push(g_global_inits, gi);
     sym_push_expr(ast->data.let.name, cname);
+    if (is_closure_value) {
+        closure_value_info_t cvi = {
+            .name = ast->data.let.name, .root_fn = clo_root, .stage = clo_stage};
+        sp_dyn_array_push(g_closure_values, cvi);
+    }
 }
 
 /*=============================================================================
@@ -1472,6 +1724,7 @@ char *fxsh_codegen(fxsh_ast_node_t *ast) {
     g_lambda_fn_names = SP_NULLPTR;
     g_closure_fn_names = SP_NULLPTR;
     g_closure_infos = SP_NULLPTR;
+    g_closure_values = SP_NULLPTR;
     g_decl_fn_names = SP_NULLPTR;
     g_sym_stack = SP_NULLPTR;
     g_top_let_counter = 0;

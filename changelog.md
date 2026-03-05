@@ -74,9 +74,14 @@
   - generalized nested-lambda lowering to inferred signatures:
     - supports multi-parameter inner lambda calls
     - supports non-`int` closure signatures (e.g. `string -> string`)
+    - supports multi-level closure-return chains (e.g. `fn a -> fn b -> fn c -> ...`)
+      with staged generated closure structs/functions.
   - added free-identifier collection for closure body capture analysis.
   - fixed top-level shadowing in native codegen by assigning unique static symbols and
     freezing RHS generation at declaration order.
+  - added closure value propagation for top-level `let`:
+    - alias propagation (`let g2 = g1`) retains closure type information
+    - stage propagation (`let g2 = g1 arg`) advances to next closure stage type.
   - added `make test-native-codegen` smoke suite (`tests/integration/native_codegen.sh`)
     to guard direct native-codegen path on supported subset.
 - Added `tests/unit/smoke.c` so `make test` has a baseline executable test target.

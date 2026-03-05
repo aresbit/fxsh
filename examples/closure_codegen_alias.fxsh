@@ -1,0 +1,6 @@
+# Native-codegen closure smoke: closure alias propagation
+
+let mk = fn x -> fn y -> x + y
+let g1 = mk 10
+let g2 = g1
+let out = g2 5
