@@ -112,4 +112,8 @@
     - supports record type annotations such as `{ age: int }` and open rows
       `{ age: int; .. 'r }`
     - supports simple type application in annotations (`'a list`).
+  - native-codegen now lowers record literal/projection in let-in subset to real C:
+    - record literal emits local C struct expression
+    - field access emits direct C projection (`obj.field`)
+    - covered by `examples/record_codegen_letin*.fxsh` and `make test-native-codegen`.
 - Added `tests/unit/smoke.c` so `make test` has a baseline executable test target.

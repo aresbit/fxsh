@@ -1,0 +1,5 @@
+# Native-codegen record smoke: let-in record alias then projection
+
+let out = let p = { age = 40, bonus = 2 } in
+  let q = p in
+  q.age + q.bonus

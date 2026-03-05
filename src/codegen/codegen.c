@@ -129,6 +129,7 @@ static void gen_type_def(codegen_ctx_t *ctx, fxsh_ast_node_t *ast);
 static void emit_c_type_for_fxsh_type(codegen_ctx_t *ctx, sp_str_t name);
 static void emit_closure_type_name(codegen_ctx_t *ctx, sp_str_t root_fn, u32 stage);
 static bool closure_expr_stage_of(fxsh_ast_node_t *expr, sp_str_t *out_root, u32 *out_stage);
+static void emit_c_type_guess_for_expr(codegen_ctx_t *ctx, fxsh_ast_node_t *expr);
 
 /*=============================================================================
  * ADT Type Tracking
@@ -913,6 +914,102 @@ static void gen_pipe(codegen_ctx_t *ctx, fxsh_ast_node_t *ast) {
     sp_dyn_array_push(*ctx->output, ')');
 }
 
+static void emit_c_type_guess_for_expr(codegen_ctx_t *ctx, fxsh_ast_node_t *expr) {
+    if (!expr) {
+        emit_raw(ctx, "s64");
+        return;
+    }
+    switch (expr->kind) {
+        case AST_LIT_INT:
+            emit_raw(ctx, "s64");
+            return;
+        case AST_LIT_FLOAT:
+            emit_raw(ctx, "double");
+            return;
+        case AST_LIT_BOOL:
+            emit_raw(ctx, "bool");
+            return;
+        case AST_LIT_STRING:
+            emit_raw(ctx, "sp_str_t");
+            return;
+        case AST_BINARY:
+            if (expr->data.binary.op == TOK_CONCAT) {
+                emit_raw(ctx, "sp_str_t");
+                return;
+            }
+            if (expr->data.binary.op == TOK_EQ || expr->data.binary.op == TOK_NEQ ||
+                expr->data.binary.op == TOK_LT || expr->data.binary.op == TOK_GT ||
+                expr->data.binary.op == TOK_LEQ || expr->data.binary.op == TOK_GEQ ||
+                expr->data.binary.op == TOK_AND || expr->data.binary.op == TOK_OR) {
+                emit_raw(ctx, "bool");
+                return;
+            }
+            emit_raw(ctx, "s64");
+            return;
+        case AST_UNARY:
+            if (expr->data.unary.op == TOK_NOT) {
+                emit_raw(ctx, "bool");
+                return;
+            }
+            emit_raw(ctx, "s64");
+            return;
+        case AST_IDENT: {
+            fxsh_type_t *t = lookup_symbol_type(expr->data.ident);
+            emit_c_type_for_type(ctx, t);
+            return;
+        }
+        case AST_CALL: {
+            fxsh_ast_node_t *f = expr->data.call.func;
+            if (f && f->kind == AST_IDENT) {
+                fxsh_type_t *ft = lookup_symbol_type(f->data.ident);
+                emit_c_type_for_type(ctx, return_type_of_fn(ft));
+                return;
+            }
+            emit_raw(ctx, "s64");
+            return;
+        }
+        case AST_FIELD_ACCESS:
+            emit_raw(ctx, "s64");
+            return;
+        default:
+            emit_raw(ctx, "s64");
+            return;
+    }
+}
+
+static void gen_record(codegen_ctx_t *ctx, fxsh_ast_node_t *ast) {
+    emit_raw(ctx, "({ ");
+    emit_fmt(ctx, "struct fxsh_rec_%u { ", ctx->temp_var_counter++);
+    sp_dyn_array_for(ast->data.elements, i) {
+        fxsh_ast_node_t *f = ast->data.elements[i];
+        if (!f || f->kind != AST_FIELD_ACCESS)
+            continue;
+        emit_c_type_guess_for_expr(ctx, f->data.field.object);
+        emit_raw(ctx, " ");
+        emit_mangled(ctx, f->data.field.field);
+        emit_raw(ctx, "; ");
+    }
+    emit_raw(ctx, "} _r = { ");
+    sp_dyn_array_for(ast->data.elements, i) {
+        fxsh_ast_node_t *f = ast->data.elements[i];
+        if (!f || f->kind != AST_FIELD_ACCESS)
+            continue;
+        emit_raw(ctx, ".");
+        emit_mangled(ctx, f->data.field.field);
+        emit_raw(ctx, " = ");
+        gen_expr(ctx, f->data.field.object);
+        emit_raw(ctx, ", ");
+    }
+    emit_raw(ctx, "}; _r; })");
+}
+
+static void gen_field_access(codegen_ctx_t *ctx, fxsh_ast_node_t *ast) {
+    emit_raw(ctx, "(");
+    gen_expr(ctx, ast->data.field.object);
+    emit_raw(ctx, ").");
+    emit_mangled(ctx, ast->data.field.field);
+}
+
 static void gen_let_in(codegen_ctx_t *ctx, fxsh_ast_node_t *ast) {
     /* Use GCC statement expression ({ ... }) */
     emit_raw(ctx, "({\n");
@@ -1180,6 +1277,12 @@ static void gen_expr(codegen_ctx_t *ctx, fxsh_ast_node_t *ast) {
             break;
         case AST_PIPE:
             gen_pipe(ctx, ast);
+            break;
+        case AST_RECORD:
+            gen_record(ctx, ast);
+            break;
+        case AST_FIELD_ACCESS:
+            gen_field_access(ctx, ast);
             break;
         case AST_CONSTR_APPL:
             gen_constr_appl(ctx, ast);

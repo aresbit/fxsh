@@ -1,0 +1,4 @@
+# Native-codegen record smoke: let-in record literal and projection
+
+let out = let p = { age = 41 } in
+  p.age + 1
