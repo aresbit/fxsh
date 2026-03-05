@@ -1,0 +1,8 @@
+# Literal match smoke
+
+let x = 2
+let out = match x with
+  | 1 -> 10
+  | 2 -> 20
+  | _ -> 0
+end

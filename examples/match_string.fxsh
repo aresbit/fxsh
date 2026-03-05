@@ -1,0 +1,7 @@
+# String literal match smoke
+
+let s = "ok"
+let out = match s with
+  | "ok" -> 1
+  | _ -> 0
+end

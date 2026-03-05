@@ -1190,6 +1190,81 @@ static void gen_pattern_bindings(codegen_ctx_t *ctx, fxsh_ast_node_t *pat, const
     }
 }
 
+static bool match_uses_switch_on_tag(fxsh_ast_node_t *ast) {
+    if (!ast || ast->kind != AST_MATCH)
+        return false;
+    if (!ast->data.match_expr.arms || sp_dyn_array_size(ast->data.match_expr.arms) == 0)
+        return false;
+    sp_dyn_array_for(ast->data.match_expr.arms, i) {
+        fxsh_ast_node_t *arm = ast->data.match_expr.arms[i];
+        if (!arm || arm->kind != AST_MATCH_ARM)
+            continue;
+        fxsh_ast_node_t *pat = arm->data.match_arm.pattern;
+        if (!pat)
+            continue;
+        if (pat->kind == AST_PAT_WILD || pat->kind == AST_PAT_VAR || pat->kind == AST_PAT_CONSTR)
+            continue;
+        return false;
+    }
+    return true;
+}
+
+static void gen_pattern_condition(codegen_ctx_t *ctx, fxsh_ast_node_t *pat, const char *val_name) {
+    if (!pat) {
+        emit_raw(ctx, "true");
+        return;
+    }
+    switch (pat->kind) {
+        case AST_PAT_WILD:
+        case AST_PAT_VAR:
+            emit_raw(ctx, "true");
+            return;
+        case AST_LIT_INT:
+            emit_fmt(ctx, "(%s == %lldLL)", val_name, (long long)pat->data.lit_int);
+            return;
+        case AST_LIT_FLOAT:
+            emit_fmt(ctx, "(%s == %.17g)", val_name, pat->data.lit_float);
+            return;
+        case AST_LIT_BOOL:
+            emit_fmt(ctx, "(%s == %s)", val_name, pat->data.lit_bool ? "true" : "false");
+            return;
+        case AST_LIT_STRING: {
+            emit_raw(ctx, "(");
+            emit_fmt(ctx, "%s.len == %u && strncmp(%s.data, \"", val_name,
+                     (unsigned)pat->data.lit_string.len, val_name);
+            for (u32 i = 0; i < pat->data.lit_string.len; i++) {
+                c8 c = pat->data.lit_string.data[i];
+                if (c == '"' || c == '\\')
+                    sp_dyn_array_push(*ctx->output, '\\');
+                sp_dyn_array_push(*ctx->output, c);
+            }
+            emit_fmt(ctx, "\", %u) == 0)", (unsigned)pat->data.lit_string.len);
+            return;
+        }
+        case AST_LIT_UNIT:
+            emit_raw(ctx, "true");
+            return;
+        case AST_PAT_CONSTR: {
+            sp_str_t tname = adt_type_of_constructor(pat->data.constr_appl.constr_name);
+            if (tname.len == 0) {
+                emit_raw(ctx, "false");
+                return;
+            }
+            emit_raw(ctx, "(");
+            emit_string(ctx, (sp_str_t){.data = val_name, .len = (u32)strlen(val_name)});
+            emit_raw(ctx, ".tag == fxsh_tag_");
+            emit_mangled(ctx, tname);
+            emit_raw(ctx, "_");
+            emit_mangled(ctx, pat->data.constr_appl.constr_name);
+            emit_raw(ctx, ")");
+            return;
+        }
+        default:
+            emit_raw(ctx, "false");
+            return;
+    }
+}
+
 static void gen_match(codegen_ctx_t *ctx, fxsh_ast_node_t *ast) {
     /* Generate:
      *   ({ __auto_type _m = <expr>;
@@ -1212,89 +1287,127 @@ static void gen_match(codegen_ctx_t *ctx, fxsh_ast_node_t *ast) {
     emit_indent(ctx);
     emit_raw(ctx, "__auto_type _match_res = 0; /* placeholder */\n");
     emit_indent(ctx);
-    emit_raw(ctx, "switch (_match_val.tag) {\n");
-    ctx->indent_level++;
-    bool emitted_default = false;
+    emit_raw(ctx, "bool _match_done = false;\n");
+
     sp_dyn_array(sp_str_t) emitted_ctors = SP_NULLPTR;
-
-    sp_dyn_array_for(ast->data.match_expr.arms, i) {
-        fxsh_ast_node_t *arm = ast->data.match_expr.arms[i];
-        if (arm->kind != AST_MATCH_ARM)
-            continue;
-
-        fxsh_ast_node_t *pat = arm->data.match_arm.pattern;
+    if (match_uses_switch_on_tag(ast)) {
         emit_indent(ctx);
-
-        if (pat->kind == AST_PAT_WILD || pat->kind == AST_PAT_VAR) {
-            if (emitted_default)
-                continue;
-            emit_raw(ctx, "default: {\n");
-            emitted_default = true;
-        } else if (pat->kind == AST_PAT_CONSTR) {
-            bool seen_ctor = false;
-            sp_dyn_array_for(emitted_ctors, k) {
-                if (sp_str_equal(emitted_ctors[k], pat->data.constr_appl.constr_name)) {
-                    seen_ctor = true;
-                    break;
-                }
-            }
-            if (seen_ctor)
+        emit_raw(ctx, "switch (_match_val.tag) {\n");
+        ctx->indent_level++;
+        bool emitted_default = false;
+        sp_dyn_array_for(ast->data.match_expr.arms, i) {
+            fxsh_ast_node_t *arm = ast->data.match_expr.arms[i];
+            if (arm->kind != AST_MATCH_ARM)
                 continue;
 
-            sp_str_t tname = adt_type_of_constructor(pat->data.constr_appl.constr_name);
-            if (tname.len == 0) {
+            fxsh_ast_node_t *pat = arm->data.match_arm.pattern;
+            emit_indent(ctx);
+
+            if (pat->kind == AST_PAT_WILD || pat->kind == AST_PAT_VAR) {
                 if (emitted_default)
                     continue;
                 emit_raw(ctx, "default: {\n");
                 emitted_default = true;
+            } else if (pat->kind == AST_PAT_CONSTR) {
+                bool seen_ctor = false;
+                sp_dyn_array_for(emitted_ctors, k) {
+                    if (sp_str_equal(emitted_ctors[k], pat->data.constr_appl.constr_name)) {
+                        seen_ctor = true;
+                        break;
+                    }
+                }
+                if (seen_ctor)
+                    continue;
+
+                sp_str_t tname = adt_type_of_constructor(pat->data.constr_appl.constr_name);
+                if (tname.len == 0) {
+                    if (emitted_default)
+                        continue;
+                    emit_raw(ctx, "default: {\n");
+                    emitted_default = true;
+                } else {
+                    sp_dyn_array_push(emitted_ctors, pat->data.constr_appl.constr_name);
+                    emit_raw(ctx, "case fxsh_tag_");
+                    emit_mangled(ctx, tname);
+                    emit_raw(ctx, "_");
+                    emit_mangled(ctx, pat->data.constr_appl.constr_name);
+                    emit_raw(ctx, ": {\n");
+                }
             } else {
-                sp_dyn_array_push(emitted_ctors, pat->data.constr_appl.constr_name);
-                emit_raw(ctx, "case fxsh_tag_");
-                emit_mangled(ctx, tname);
-                emit_raw(ctx, "_");
-                emit_mangled(ctx, pat->data.constr_appl.constr_name);
-                emit_raw(ctx, ": {\n");
+                if (emitted_default)
+                    continue;
+                emit_raw(ctx, "default: {\n");
+                emitted_default = true;
             }
-        } else if (pat->kind == AST_PAT_LIT) {
-            if (emitted_default)
-                continue;
-            emit_raw(ctx, "default: {\n");
-            emitted_default = true;
-        } else {
-            if (emitted_default)
-                continue;
-            emit_raw(ctx, "default: {\n");
-            emitted_default = true;
-        }
-        ctx->indent_level++;
+            ctx->indent_level++;
 
-        /* Bind pattern variables */
-        gen_pattern_bindings(ctx, pat, "_match_val");
+            gen_pattern_bindings(ctx, pat, "_match_val");
 
-        /* Guard */
-        if (arm->data.match_arm.guard) {
+            if (arm->data.match_arm.guard) {
+                emit_indent(ctx);
+                emit_raw(ctx, "if (!(");
+                gen_expr(ctx, arm->data.match_arm.guard);
+                emit_raw(ctx, ")) break;\n");
+            }
+
             emit_indent(ctx);
-            emit_raw(ctx, "if (!(");
-            gen_expr(ctx, arm->data.match_arm.guard);
-            emit_raw(ctx, ")) break;\n");
-        }
+            emit_raw(ctx, "_match_res = ");
+            gen_expr(ctx, arm->data.match_arm.body);
+            emit_raw(ctx, ";\n");
+            emit_indent(ctx);
+            emit_raw(ctx, "_match_done = true;\n");
+            emit_indent(ctx);
+            emit_raw(ctx, "break;\n");
 
-        /* Body */
-        emit_indent(ctx);
-        emit_raw(ctx, "_match_res = ");
-        gen_expr(ctx, arm->data.match_arm.body);
-        emit_raw(ctx, ";\n");
-        emit_indent(ctx);
-        emit_raw(ctx, "break;\n");
+            ctx->indent_level--;
+            emit_indent(ctx);
+            emit_raw(ctx, "}\n");
+        }
 
         ctx->indent_level--;
         emit_indent(ctx);
         emit_raw(ctx, "}\n");
-    }
+    } else {
+        sp_dyn_array_for(ast->data.match_expr.arms, i) {
+            fxsh_ast_node_t *arm = ast->data.match_expr.arms[i];
+            if (!arm || arm->kind != AST_MATCH_ARM)
+                continue;
+            fxsh_ast_node_t *pat = arm->data.match_arm.pattern;
 
-    ctx->indent_level--;
-    emit_indent(ctx);
-    emit_raw(ctx, "}\n");
+            emit_indent(ctx);
+            emit_raw(ctx, "if (!_match_done && (");
+            gen_pattern_condition(ctx, pat, "_match_val");
+            emit_raw(ctx, ")) {\n");
+            ctx->indent_level++;
+
+            gen_pattern_bindings(ctx, pat, "_match_val");
+
+            if (arm->data.match_arm.guard) {
+                emit_indent(ctx);
+                emit_raw(ctx, "if (");
+                gen_expr(ctx, arm->data.match_arm.guard);
+                emit_raw(ctx, ") {\n");
+                ctx->indent_level++;
+            }
+
+            emit_indent(ctx);
+            emit_raw(ctx, "_match_res = ");
+            gen_expr(ctx, arm->data.match_arm.body);
+            emit_raw(ctx, ";\n");
+            emit_indent(ctx);
+            emit_raw(ctx, "_match_done = true;\n");
+
+            if (arm->data.match_arm.guard) {
+                ctx->indent_level--;
+                emit_indent(ctx);
+                emit_raw(ctx, "}\n");
+            }
+
+            ctx->indent_level--;
+            emit_indent(ctx);
+            emit_raw(ctx, "}\n");
+        }
+    }
     emit_indent(ctx);
     emit_raw(ctx, "_match_res;\n");
     ctx->indent_level--;

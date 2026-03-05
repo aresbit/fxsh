@@ -437,10 +437,7 @@ static fxsh_ast_node_t *parse_pattern(fxsh_parser_t *parser) {
     /* Literal patterns: integers, floats, strings, booleans */
     if (tok->kind == TOK_INT || tok->kind == TOK_FLOAT || tok->kind == TOK_STRING ||
         tok->kind == TOK_TRUE || tok->kind == TOK_FALSE) {
-        fxsh_ast_node_t *lit = parse_primary(parser); /* parse_primary handles literals */
-        /* Convert literal expression to pattern node by changing its kind */
-        lit->kind = AST_PAT_LIT;
-        return lit;
+        return parse_primary(parser); /* keep concrete literal kind for pattern typing/codegen */
     }
 
     /* Constructor pattern: uppercase identifier (type ident) */

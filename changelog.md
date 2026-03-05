@@ -120,4 +120,10 @@
       - top-level `let` record binding (`examples/record_codegen_top_let.fxsh`)
       - record-as-parameter flow (`examples/record_codegen_param.fxsh`)
     - covered by `examples/record_codegen_*.fxsh` and `make test-native-codegen`.
+  - pattern matching increment:
+    - parser now keeps concrete literal pattern kinds (`AST_LIT_*`) instead of retagging to
+      `AST_PAT_LIT`.
+    - native-codegen match now supports non-ADT pattern fallback via condition chain, including
+      int/string literal pattern checks and guards.
+    - added regression examples: `examples/match_literal.fxsh`, `examples/match_string.fxsh`.
 - Added `tests/unit/smoke.c` so `make test` has a baseline executable test target.
