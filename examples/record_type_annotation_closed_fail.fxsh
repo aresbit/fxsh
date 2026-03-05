@@ -1,0 +1,4 @@
+# Closed record type should reject extra fields
+
+let get_age : { age: int } -> int = fn r -> r.age
+let out = get_age { age = 41, name = "Alice" }

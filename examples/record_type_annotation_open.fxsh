@@ -1,0 +1,4 @@
+# Open-row record type annotation
+
+let get_age : { age: int; .. 'r } -> int = fn r -> r.age
+let out = get_age { age = 41, name = "Alice" }

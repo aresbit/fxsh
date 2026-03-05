@@ -108,4 +108,8 @@
     - success: `examples/record_basic.fxsh`, `examples/record_row_poly.fxsh`
     - failure: `examples/record_missing_field.fxsh`
     - `make test-records` target.
+  - extended type annotation parser/type lowering for record types:
+    - supports record type annotations such as `{ age: int }` and open rows
+      `{ age: int; .. 'r }`
+    - supports simple type application in annotations (`'a list`).
 - Added `tests/unit/smoke.c` so `make test` has a baseline executable test target.

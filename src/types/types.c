@@ -643,10 +643,29 @@ fxsh_error_t fxsh_type_unify(fxsh_type_t *t1, fxsh_type_t *t2, fxsh_subst_t *out
         }
 
         if (sp_dyn_array_size(extra1) == 0 && sp_dyn_array_size(extra2) == 0 &&
-            t1->data.record.row_var >= 0 && t2->data.record.row_var >= 0 &&
-            t1->data.record.row_var != t2->data.record.row_var) {
+            t1->data.record.row_var >= 0 && t2->data.record.row_var >= 0) {
+            if (t1->data.record.row_var != t2->data.record.row_var) {
+                fxsh_subst_entry_t e = {.var = t1->data.record.row_var,
+                                        .type = fxsh_type_var(t2->data.record.row_var)};
+                fxsh_subst_t sr = SP_NULLPTR;
+                sp_dyn_array_push(sr, e);
+                s_total = compose(sr, s_total);
+            }
+        }
+
+        if (sp_dyn_array_size(extra1) == 0 && sp_dyn_array_size(extra2) == 0 &&
+            t1->data.record.row_var >= 0 && t2->data.record.row_var < 0) {
             fxsh_subst_entry_t e = {.var = t1->data.record.row_var,
-                                    .type = fxsh_type_var(t2->data.record.row_var)};
+                                    .type = make_record_type(SP_NULLPTR, -1)};
+            fxsh_subst_t sr = SP_NULLPTR;
+            sp_dyn_array_push(sr, e);
+            s_total = compose(sr, s_total);
+        }
+
+        if (sp_dyn_array_size(extra1) == 0 && sp_dyn_array_size(extra2) == 0 &&
+            t2->data.record.row_var >= 0 && t1->data.record.row_var < 0) {
+            fxsh_subst_entry_t e = {.var = t2->data.record.row_var,
+                                    .type = make_record_type(SP_NULLPTR, -1)};
             fxsh_subst_t sr = SP_NULLPTR;
             sp_dyn_array_push(sr, e);
             s_total = compose(sr, s_total);
@@ -800,9 +819,33 @@ static fxsh_type_t *ast_to_type(fxsh_ast_node_t *ast) {
         }
         case AST_TYPE_VAR:
             return fxsh_type_var(fxsh_fresh_var());
+        case AST_TYPE_APP: {
+            if (!ast->data.type_con.args || sp_dyn_array_size(ast->data.type_con.args) != 2)
+                return fxsh_type_var(fxsh_fresh_var());
+            fxsh_type_t *lhs = ast_to_type(ast->data.type_con.args[0]);
+            fxsh_type_t *rhs = ast_to_type(ast->data.type_con.args[1]);
+            return fxsh_type_apply(rhs, lhs);
+        }
         case AST_TYPE_ARROW:
             return fxsh_type_arrow(ast_to_type(ast->data.type_arrow.param),
                                    ast_to_type(ast->data.type_arrow.ret));
+        case AST_TYPE_RECORD: {
+            sp_dyn_array(fxsh_field_t) fields = SP_NULLPTR;
+            fxsh_type_var_t row_var = -1;
+            sp_dyn_array_for(ast->data.elements, i) {
+                fxsh_ast_node_t *e = ast->data.elements[i];
+                if (!e)
+                    continue;
+                if (e->kind == AST_FIELD_ACCESS) {
+                    fxsh_field_t f = {.name = e->data.field.field,
+                                      .type = ast_to_type(e->data.field.object)};
+                    sp_dyn_array_push(fields, f);
+                } else if (e->kind == AST_TYPE_VAR) {
+                    row_var = fxsh_fresh_var();
+                }
+            }
+            return make_record_type(fields, row_var);
+        }
         default:
             return fxsh_type_var(fxsh_fresh_var());
     }
@@ -1289,6 +1332,7 @@ static fxsh_error_t infer_expr(fxsh_ast_node_t *ast, fxsh_type_env_t *env,
                 fxsh_error_t err = infer_expr(ast->data.let.value, env, constr_env, subst, &vt);
                 if (err)
                     return err;
+                fxsh_type_apply_subst(*subst, &vt);
                 if (ast->data.let.type) {
                     fxsh_type_t *ann_t = ast_to_type(ast->data.let.type);
                     fxsh_subst_t s_ann = SP_NULLPTR;
