@@ -132,4 +132,8 @@
     - type inference now infers record pattern type as open-row constraint
     - added regression examples: `examples/match_record.fxsh`,
       `examples/match_record_literal.fxsh`.
+  - native-codegen pattern matching increment:
+    - record patterns now participate in direct native match fallback chain
+      (field presence + field literal checks + variable binding support)
+    - native-codegen smoke now includes `match_record` and `match_record_literal`.
 - Added `tests/unit/smoke.c` so `make test` has a baseline executable test target.
