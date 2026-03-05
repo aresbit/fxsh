@@ -17,7 +17,8 @@ static void print_usage(const char *program) {
     printf("Options:\n");
     printf("  -e, --eval <expr>    Evaluate expression\n");
     printf("  -c, --codegen        Generate C code\n");
-    printf("  -n, --native         Generate C, compile and run native binary\n");
+    printf("  -n, --native         Run closure-safe native runtime binary\n");
+    printf("      --native-codegen Generate C, compile and run native codegen binary\n");
     printf("  -t, --tokens         Print tokens (debug)\n");
     printf("  -a, --ast            Print AST (debug)\n");
     printf("  -h, --help           Show this help\n");
@@ -53,6 +54,7 @@ typedef enum {
     MODE_AST,
     MODE_CODEGEN,
     MODE_NATIVE,
+    MODE_NATIVE_CODEGEN,
 } run_mode_t;
 
 static fxsh_error_t run_native_interp_harness(sp_str_t source) {
@@ -107,7 +109,7 @@ static fxsh_error_t run_native_interp_harness(sp_str_t source) {
     return ERR_OK;
 }
 
-static fxsh_error_t run_native(fxsh_ast_node_t *ast, sp_str_t source) {
+static fxsh_error_t run_native_codegen(fxsh_ast_node_t *ast) {
     char *code = fxsh_codegen(ast);
     if (!code)
         return ERR_OUT_OF_MEMORY;
@@ -119,11 +121,11 @@ static fxsh_error_t run_native(fxsh_ast_node_t *ast, sp_str_t source) {
     if (err != ERR_OK)
         return err;
 
-    int cc =
-        system("clang -std=gnu17 -O2 -Wall -Wextra build/fxsh_native_tmp.c -o bin/fxsh_native_tmp");
+    int cc = system("clang -std=gnu17 -O2 -Wall -Wextra build/fxsh_native_tmp.c -o "
+                    "bin/fxsh_native_tmp");
     if (cc != 0) {
-        fprintf(stderr, "Native compile failed, retrying with closure-safe native fallback...\n");
-        return run_native_interp_harness(source);
+        fprintf(stderr, "Native codegen compile failed\n");
+        return ERR_INTERNAL;
     }
 
     int rc = system("./bin/fxsh_native_tmp");
@@ -181,6 +183,10 @@ int main(int argc, char **argv) {
         }
         if (strcmp(argv[i], "-n") == 0 || strcmp(argv[i], "--native") == 0) {
             mode = MODE_NATIVE;
+            continue;
+        }
+        if (strcmp(argv[i], "--native-codegen") == 0) {
+            mode = MODE_NATIVE_CODEGEN;
             continue;
         }
         if (argv[i][0] != '-') {
@@ -273,9 +279,13 @@ int main(int argc, char **argv) {
 
     printf("Type: %s\n", fxsh_type_to_string(type));
 
-    if (mode == MODE_NATIVE) {
+    if (mode == MODE_NATIVE || mode == MODE_NATIVE_CODEGEN) {
         printf("\nNative:\n");
-        err = run_native(ast, source);
+        if (mode == MODE_NATIVE) {
+            err = run_native_interp_harness(source);
+        } else {
+            err = run_native_codegen(ast);
+        }
         if (err != ERR_OK) {
             fxsh_ast_free(ast);
             fxsh_token_array_free(tokens);
@@ -285,7 +295,7 @@ int main(int argc, char **argv) {
     }
 
     /* Interpreter execution (MVP runtime path) */
-    if (mode != MODE_CODEGEN && mode != MODE_NATIVE) {
+    if (mode != MODE_CODEGEN && mode != MODE_NATIVE && mode != MODE_NATIVE_CODEGEN) {
         sp_str_t interp_result = {0};
         err = fxsh_interp_eval(ast, &interp_result);
         if (err != ERR_OK) {

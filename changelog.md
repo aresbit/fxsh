@@ -66,4 +66,8 @@
     preserving closure semantics under `--native`.
 - Added `make test-closure-native` (`tests/integration/closure_native.sh`) to verify
   closure examples keep interpreter/native exit-code consistency.
+- Native mode routing updated:
+  - `--native` now always uses closure-safe native runtime runner by default.
+  - `--native-codegen` added for direct C codegen native execution path.
+- `test-consistency` now includes closure regression examples.
 - Added `tests/unit/smoke.c` so `make test` has a baseline executable test target.
