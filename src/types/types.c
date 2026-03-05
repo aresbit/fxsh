@@ -984,6 +984,23 @@ static fxsh_error_t infer_pattern(fxsh_ast_node_t *pattern, fxsh_type_env_t *env
             return ERR_OK;
         }
 
+        case AST_PAT_RECORD: {
+            sp_dyn_array(fxsh_field_t) fields = SP_NULLPTR;
+            sp_dyn_array_for(pattern->data.elements, i) {
+                fxsh_ast_node_t *f = pattern->data.elements[i];
+                if (!f || f->kind != AST_FIELD_ACCESS || !f->data.field.object)
+                    continue;
+                fxsh_type_t *ft = NULL;
+                fxsh_error_t err = infer_pattern(f->data.field.object, env, constr_env, subst, &ft);
+                if (err)
+                    return err;
+                fxsh_field_t rf = {.name = f->data.field.field, .type = ft};
+                sp_dyn_array_push(fields, rf);
+            }
+            *out_type = make_record_type(fields, fxsh_fresh_var());
+            return ERR_OK;
+        }
+
         case AST_PAT_CONSTR: {
             fxsh_constr_info_t *ci =
                 constr_env_lookup(*constr_env, pattern->data.constr_appl.constr_name);

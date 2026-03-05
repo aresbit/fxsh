@@ -1,0 +1,7 @@
+# Record pattern with literal field smoke
+
+let p = { age = 41, name = "Alice" }
+let out = match p with
+  | { age = 41 } -> 1
+  | _ -> 0
+end

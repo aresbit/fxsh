@@ -1,0 +1,7 @@
+# Record pattern match smoke
+
+let p = { age = 41, name = "Alice" }
+let out = match p with
+  | { age = x } -> x + 1
+  | _ -> 0
+end

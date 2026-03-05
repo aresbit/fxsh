@@ -268,6 +268,8 @@ void fxsh_ast_free(fxsh_ast_node_t *node) {
             break;
         case AST_TUPLE:
         case AST_LIST:
+        case AST_PAT_TUPLE:
+        case AST_PAT_RECORD:
         case AST_TYPE_RECORD:
             sp_dyn_array_for(node->data.elements, i) {
                 fxsh_ast_free(node->data.elements[i]);
@@ -519,7 +521,31 @@ static fxsh_ast_node_t *parse_pattern(fxsh_parser_t *parser) {
     /* TODO: implement later */
 
     /* Record pattern: {field1 = p1, field2 = p2} */
-    /* TODO: implement later */
+    if (tok->kind == TOK_LBRACE) {
+        advance(parser); /* consume { */
+        skip_newlines(parser);
+
+        fxsh_ast_list_t fields = SP_NULLPTR;
+        while (!check(parser, TOK_RBRACE) && !check(parser, TOK_EOF)) {
+            fxsh_token_t *field_tok = consume_name_token(parser, "field name");
+            if (!field_tok)
+                return NULL;
+            consume(parser, TOK_ASSIGN, "'='");
+            fxsh_ast_node_t *subpat = parse_pattern(parser);
+            fxsh_ast_node_t *field = alloc_node(AST_FIELD_ACCESS, field_tok->loc);
+            field->data.field.field = field_tok->data.ident;
+            field->data.field.object = subpat; /* stores sub-pattern */
+            sp_dyn_array_push(fields, field);
+            skip_newlines(parser);
+            if (!match(parser, TOK_COMMA) && !match(parser, TOK_SEMICOLON))
+                break;
+            skip_newlines(parser);
+        }
+        consume(parser, TOK_RBRACE, "'}'");
+        fxsh_ast_node_t *node = alloc_node(AST_PAT_RECORD, tok->loc);
+        node->data.elements = fields;
+        return node;
+    }
 
     /* Fallback: parse as expression (for now) */
     return parse_primary(parser);

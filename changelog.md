@@ -126,4 +126,10 @@
     - native-codegen match now supports non-ADT pattern fallback via condition chain, including
       int/string literal pattern checks and guards.
     - added regression examples: `examples/match_literal.fxsh`, `examples/match_string.fxsh`.
+  - record pattern matching increment:
+    - parser now supports record patterns: `{ field = pat, ... }`
+    - interpreter pattern binding now supports `AST_PAT_RECORD`
+    - type inference now infers record pattern type as open-row constraint
+    - added regression examples: `examples/match_record.fxsh`,
+      `examples/match_record_literal.fxsh`.
 - Added `tests/unit/smoke.c` so `make test` has a baseline executable test target.

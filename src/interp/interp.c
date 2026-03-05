@@ -60,6 +60,21 @@ static bool bind_pattern(fxsh_ast_node_t *pat, rv_value_t *val, rv_env_t **env) 
             }
             return true;
         }
+        case AST_PAT_RECORD: {
+            if (!val || val->kind != RV_RECORD)
+                return false;
+            sp_dyn_array_for(pat->data.elements, i) {
+                fxsh_ast_node_t *f = pat->data.elements[i];
+                if (!f || f->kind != AST_FIELD_ACCESS || !f->data.field.object)
+                    return false;
+                rv_value_t *fv = rv_record_get(val, f->data.field.field);
+                if (!fv)
+                    return false;
+                if (!bind_pattern(f->data.field.object, fv, env))
+                    return false;
+            }
+            return true;
+        }
         case AST_LIT_INT:
             return val && val->kind == RV_INT && pat->data.lit_int == val->as.i;
         case AST_LIT_FLOAT:
