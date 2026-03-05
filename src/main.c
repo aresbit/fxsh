@@ -55,7 +55,59 @@ typedef enum {
     MODE_NATIVE,
 } run_mode_t;
 
-static fxsh_error_t run_native(fxsh_ast_node_t *ast) {
+static fxsh_error_t run_native_interp_harness(sp_str_t source) {
+    FILE *f = fopen("build/fxsh_native_tmp.c", "wb");
+    if (!f)
+        return ERR_INTERNAL;
+
+    fprintf(f, "/* Generated fallback native runner (closure-safe) */\n");
+    fprintf(f, "#define SP_IMPLEMENTATION\n");
+    fprintf(f, "#include \"fxsh.h\"\n");
+    fprintf(f, "#include <stdio.h>\n\n");
+    fprintf(f, "static const unsigned char fxsh_src[] = {");
+    for (u32 i = 0; i < source.len; i++) {
+        fprintf(f, "%u,", (unsigned)(u8)source.data[i]);
+    }
+    fprintf(f, "0};\n\n");
+    fprintf(f, "int main(void) {\n");
+    fprintf(f, "  fxsh_arena_t *arena = arena_create(NULL, 64 * 1024);\n");
+    fprintf(f, "  fxsh_current_arena = arena;\n");
+    fprintf(f, "  sp_str_t src = { .data = (const char *)fxsh_src, .len = %u };\n", source.len);
+    fprintf(f, "  sp_str_t filename = sp_str_lit(\"<native>\");\n");
+    fprintf(f, "  fxsh_token_array_t tokens = SP_NULLPTR;\n");
+    fprintf(f, "  if (fxsh_lex(src, filename, &tokens) != ERR_OK) return 1;\n");
+    fprintf(f, "  fxsh_parser_t parser;\n");
+    fprintf(f, "  fxsh_parser_init(&parser, tokens);\n");
+    fprintf(f, "  fxsh_ast_node_t *ast = fxsh_parse_program(&parser);\n");
+    fprintf(f, "  fxsh_type_env_t tenv = SP_NULLPTR;\n");
+    fprintf(f, "  fxsh_constr_env_t cenv = SP_NULLPTR;\n");
+    fprintf(f, "  fxsh_type_t *type = NULL;\n");
+    fprintf(f, "  if (fxsh_type_infer(ast, &tenv, &cenv, &type) != ERR_OK) return 1;\n");
+    fprintf(f, "  sp_str_t out = {0};\n");
+    fprintf(f, "  if (fxsh_interp_eval(ast, &out) != ERR_OK) return 1;\n");
+    fprintf(f, "  return 0;\n");
+    fprintf(f, "}\n");
+    fclose(f);
+
+    int cc = system("clang -std=gnu17 -D _GNU_SOURCE -Wall -Wextra -Wno-strict-prototypes "
+                    "-pedantic -Iinclude -Ilib -DSP_PS_DISABLE -Oz -DNDEBUG "
+                    "build/fxsh_native_tmp.c src/utils.c src/lexer/lexer.c src/parser/parser.c "
+                    "src/types/types.c src/comptime/comptime.c src/interp/interp.c "
+                    "src/runtime/runtime.c -lm -o bin/fxsh_native_tmp");
+    if (cc != 0) {
+        fprintf(stderr, "Native fallback compile failed\n");
+        return ERR_INTERNAL;
+    }
+
+    int rc = system("./bin/fxsh_native_tmp");
+    if (rc != 0) {
+        fprintf(stderr, "Native fallback run failed (exit=%d)\n", rc);
+        return ERR_INTERNAL;
+    }
+    return ERR_OK;
+}
+
+static fxsh_error_t run_native(fxsh_ast_node_t *ast, sp_str_t source) {
     char *code = fxsh_codegen(ast);
     if (!code)
         return ERR_OUT_OF_MEMORY;
@@ -70,8 +122,8 @@ static fxsh_error_t run_native(fxsh_ast_node_t *ast) {
     int cc =
         system("clang -std=gnu17 -O2 -Wall -Wextra build/fxsh_native_tmp.c -o bin/fxsh_native_tmp");
     if (cc != 0) {
-        fprintf(stderr, "Native compile failed\n");
-        return ERR_INTERNAL;
+        fprintf(stderr, "Native compile failed, retrying with closure-safe native fallback...\n");
+        return run_native_interp_harness(source);
     }
 
     int rc = system("./bin/fxsh_native_tmp");
@@ -223,7 +275,7 @@ int main(int argc, char **argv) {
 
     if (mode == MODE_NATIVE) {
         printf("\nNative:\n");
-        err = run_native(ast);
+        err = run_native(ast, source);
         if (err != ERR_OK) {
             fxsh_ast_free(ast);
             fxsh_token_array_free(tokens);

@@ -60,4 +60,10 @@
   - `examples/closure_recursion.fxsh` (`let rec` function value recursion)
 - Added `make test-closure` (`tests/integration/closure.sh`) to assert closure behavior in
   interpreter output.
+- Native execution now includes a closure-safe fallback runner:
+  - if direct C codegen compile fails, native mode regenerates a runner that
+    executes through lexer/parser/type-infer/interpreter inside a compiled binary,
+    preserving closure semantics under `--native`.
+- Added `make test-closure-native` (`tests/integration/closure_native.sh`) to verify
+  closure examples keep interpreter/native exit-code consistency.
 - Added `tests/unit/smoke.c` so `make test` has a baseline executable test target.
