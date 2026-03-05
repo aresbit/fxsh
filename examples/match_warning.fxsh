@@ -1,0 +1,9 @@
+# Match warning demo: non-exhaustive + duplicate constructor
+
+type option = None | Some of int
+
+let bad = fn x ->
+  match x with
+  | Some n -> n
+  | Some m -> m
+  end

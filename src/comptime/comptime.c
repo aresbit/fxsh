@@ -17,55 +17,55 @@
  *=============================================================================*/
 
 fxsh_ct_value_t *fxsh_ct_unit(void) {
-    fxsh_ct_value_t *val = sp_alloc(sizeof(fxsh_ct_value_t));
+    fxsh_ct_value_t *val = fxsh_alloc0(sizeof(fxsh_ct_value_t));
     val->kind = CT_UNIT;
     return val;
 }
 
 fxsh_ct_value_t *fxsh_ct_bool(bool b) {
-    fxsh_ct_value_t *val = sp_alloc(sizeof(fxsh_ct_value_t));
+    fxsh_ct_value_t *val = fxsh_alloc0(sizeof(fxsh_ct_value_t));
     val->kind = CT_BOOL;
     val->data.bool_val = b;
     return val;
 }
 
 fxsh_ct_value_t *fxsh_ct_int(s64 n) {
-    fxsh_ct_value_t *val = sp_alloc(sizeof(fxsh_ct_value_t));
+    fxsh_ct_value_t *val = fxsh_alloc0(sizeof(fxsh_ct_value_t));
     val->kind = CT_INT;
     val->data.int_val = n;
     return val;
 }
 
 fxsh_ct_value_t *fxsh_ct_float(f64 f) {
-    fxsh_ct_value_t *val = sp_alloc(sizeof(fxsh_ct_value_t));
+    fxsh_ct_value_t *val = fxsh_alloc0(sizeof(fxsh_ct_value_t));
     val->kind = CT_FLOAT;
     val->data.float_val = f;
     return val;
 }
 
 fxsh_ct_value_t *fxsh_ct_string(sp_str_t s) {
-    fxsh_ct_value_t *val = sp_alloc(sizeof(fxsh_ct_value_t));
+    fxsh_ct_value_t *val = fxsh_alloc0(sizeof(fxsh_ct_value_t));
     val->kind = CT_STRING;
     val->data.string_val = s;
     return val;
 }
 
 fxsh_ct_value_t *fxsh_ct_type(fxsh_type_t *t) {
-    fxsh_ct_value_t *val = sp_alloc(sizeof(fxsh_ct_value_t));
+    fxsh_ct_value_t *val = fxsh_alloc0(sizeof(fxsh_ct_value_t));
     val->kind = CT_TYPE;
     val->data.type_val = t;
     return val;
 }
 
 fxsh_ct_value_t *fxsh_ct_ast(fxsh_ast_node_t *ast) {
-    fxsh_ct_value_t *val = sp_alloc(sizeof(fxsh_ct_value_t));
+    fxsh_ct_value_t *val = fxsh_alloc0(sizeof(fxsh_ct_value_t));
     val->kind = CT_AST;
     val->data.ast_val = ast;
     return val;
 }
 
 fxsh_ct_value_t *fxsh_ct_list(fxsh_ct_value_t **items, u32 len) {
-    fxsh_ct_value_t *val = sp_alloc(sizeof(fxsh_ct_value_t));
+    fxsh_ct_value_t *val = fxsh_alloc0(sizeof(fxsh_ct_value_t));
     val->kind = CT_LIST;
     val->data.list_val.items = items;
     val->data.list_val.len = len;
@@ -94,7 +94,7 @@ static fxsh_ct_value_t *lookup_var(fxsh_comptime_ctx_t *ctx, sp_str_t name) {
 
 static void bind_var(fxsh_comptime_ctx_t *ctx, sp_str_t name, fxsh_ct_value_t *val) {
     if (!ctx->env) {
-        ctx->env = sp_alloc(sizeof(fxsh_ct_env_t));
+        ctx->env = fxsh_alloc0(sizeof(fxsh_ct_env_t));
         *ctx->env = SP_NULLPTR;
     }
     sp_ht_insert(*ctx->env, name, *val);
@@ -120,6 +120,16 @@ static fxsh_ct_value_t *eval_binary(fxsh_ast_node_t *ast, fxsh_comptime_ctx_t *c
             }
             if (left->kind == CT_FLOAT && right->kind == CT_FLOAT) {
                 return fxsh_ct_float(left->data.float_val + right->data.float_val);
+            }
+            break;
+        case TOK_CONCAT:
+            if (left->kind == CT_STRING && right->kind == CT_STRING) {
+                u32 len = left->data.string_val.len + right->data.string_val.len;
+                c8 *buf = (c8 *)fxsh_alloc0(len + 1);
+                memcpy(buf, left->data.string_val.data, left->data.string_val.len);
+                memcpy(buf + left->data.string_val.len, right->data.string_val.data,
+                       right->data.string_val.len);
+                return fxsh_ct_string((sp_str_t){.data = buf, .len = len});
             }
             break;
         case TOK_MINUS:
@@ -218,7 +228,7 @@ static fxsh_ct_value_t *eval_let_in(fxsh_ast_node_t *ast, fxsh_comptime_ctx_t *c
     /* Evaluate each binding and add to environment */
     sp_dyn_array_for(ast->data.let_in.bindings, i) {
         fxsh_ast_node_t *binding = ast->data.let_in.bindings[i];
-        if (binding->kind == AST_DECL_LET) {
+        if (binding->kind == AST_DECL_LET || binding->kind == AST_LET) {
             fxsh_ct_value_t *val = eval_expr(binding->data.let.value, ctx);
             if (val) {
                 bind_var(ctx, binding->data.let.name, val);
@@ -236,7 +246,7 @@ static fxsh_ct_value_t *eval_call(fxsh_ast_node_t *ast, fxsh_comptime_ctx_t *ctx
 
     /* Create new context with parameter bindings */
     fxsh_comptime_ctx_t new_ctx = *ctx;
-    new_ctx.env = sp_alloc(sizeof(fxsh_ct_env_t));
+    new_ctx.env = fxsh_alloc0(sizeof(fxsh_ct_env_t));
     *new_ctx.env = SP_NULLPTR;
 
     /* Copy existing bindings */
@@ -262,7 +272,7 @@ static fxsh_ct_value_t *eval_call(fxsh_ast_node_t *ast, fxsh_comptime_ctx_t *ctx
 }
 
 static fxsh_ct_value_t *eval_lambda(fxsh_ast_node_t *ast, fxsh_comptime_ctx_t *ctx) {
-    fxsh_ct_value_t *val = sp_alloc(sizeof(fxsh_ct_value_t));
+    fxsh_ct_value_t *val = fxsh_alloc0(sizeof(fxsh_ct_value_t));
     val->kind = CT_FUNCTION;
     val->data.func_val.params = ast->data.lambda.params;
     val->data.func_val.body = ast->data.lambda.body;
@@ -332,7 +342,7 @@ static fxsh_ct_value_t *eval_expr(fxsh_ast_node_t *ast, fxsh_comptime_ctx_t *ctx
         }
         case AST_CT_SIZE_OF: {
             /* Evaluate operand to get type */
-            fxsh_ct_value_t *type_val = eval_expr(ast->data.ct_type_op.type_val, ctx);
+            fxsh_ct_value_t *type_val = eval_expr(ast->data.ct_type_op.type_expr, ctx);
             if (!type_val) {
                 /* Try to get type from expression */
                 type_val = fxsh_ct_op_type_of(ast, ctx);
@@ -340,7 +350,7 @@ static fxsh_ct_value_t *eval_expr(fxsh_ast_node_t *ast, fxsh_comptime_ctx_t *ctx
             return fxsh_ct_op_size_of(type_val);
         }
         case AST_CT_ALIGN_OF: {
-            fxsh_ct_value_t *type_val = eval_expr(ast->data.ct_type_op.type_val, ctx);
+            fxsh_ct_value_t *type_val = eval_expr(ast->data.ct_type_op.type_expr, ctx);
             return fxsh_ct_op_align_of(type_val);
         }
         default:
@@ -422,7 +432,7 @@ fxsh_type_info_t *fxsh_ct_type_info(fxsh_type_t *type) {
     if (!type)
         return NULL;
 
-    fxsh_type_info_t *info = sp_alloc(sizeof(fxsh_type_info_t));
+    fxsh_type_info_t *info = fxsh_alloc0(sizeof(fxsh_type_info_t));
     info->kind = type->kind;
 
     switch (type->kind) {
@@ -480,7 +490,7 @@ fxsh_ct_value_t *fxsh_ct_size_of(fxsh_ct_value_t *type_val) {
 
 fxsh_ast_node_t *fxsh_ct_quote(fxsh_ast_node_t *ast) {
     /* Quote returns the AST as a compile-time value */
-    fxsh_ast_node_t *node = sp_alloc(sizeof(fxsh_ast_node_t));
+    fxsh_ast_node_t *node = fxsh_alloc0(sizeof(fxsh_ast_node_t));
     node->kind = AST_LIT_STRING; /* Placeholder - should wrap AST */
     node->loc = ast->loc;
     node->data.lit_string = (sp_str_t){.data = "<quoted>", .len = 8};
@@ -504,7 +514,7 @@ fxsh_ast_node_t *fxsh_ct_derive_show(fxsh_type_t *type) {
         return NULL;
 
     /* Create: fn show(x: T) -> string = ... */
-    fxsh_ast_node_t *func = sp_alloc(sizeof(fxsh_ast_node_t));
+    fxsh_ast_node_t *func = fxsh_alloc0(sizeof(fxsh_ast_node_t));
     func->kind = AST_LAMBDA;
     func->loc = (fxsh_loc_t){0};
 
@@ -514,7 +524,7 @@ fxsh_ast_node_t *fxsh_ct_derive_show(fxsh_type_t *type) {
     func->data.lambda.params = params;
 
     /* Body: generate based on type */
-    fxsh_ast_node_t *body = sp_alloc(sizeof(fxsh_ast_node_t));
+    fxsh_ast_node_t *body = fxsh_alloc0(sizeof(fxsh_ast_node_t));
     body->kind = AST_LIT_STRING;
     body->loc = (fxsh_loc_t){0};
     body->data.lit_string = (sp_str_t){.data = "<derived show>", .len = 14};
@@ -528,7 +538,7 @@ fxsh_ast_node_t *fxsh_ct_derive_eq(fxsh_type_t *type) {
     if (!type)
         return NULL;
 
-    fxsh_ast_node_t *func = sp_alloc(sizeof(fxsh_ast_node_t));
+    fxsh_ast_node_t *func = fxsh_alloc0(sizeof(fxsh_ast_node_t));
     func->kind = AST_LAMBDA;
     func->loc = (fxsh_loc_t){0};
 
@@ -537,7 +547,7 @@ fxsh_ast_node_t *fxsh_ct_derive_eq(fxsh_type_t *type) {
     sp_dyn_array_push(params, fxsh_ast_ident((sp_str_t){.data = "b", .len = 1}, (fxsh_loc_t){0}));
     func->data.lambda.params = params;
 
-    fxsh_ast_node_t *body = sp_alloc(sizeof(fxsh_ast_node_t));
+    fxsh_ast_node_t *body = fxsh_alloc0(sizeof(fxsh_ast_node_t));
     body->kind = AST_LIT_BOOL;
     body->loc = (fxsh_loc_t){0};
     body->data.lit_bool = true;
@@ -591,7 +601,7 @@ const c8 *fxsh_ct_value_to_string(fxsh_ct_value_t *val) {
  *=============================================================================*/
 
 fxsh_ct_value_t *fxsh_ct_make_record_type(sp_str_t name) {
-    fxsh_ct_value_t *val = sp_alloc(sizeof(fxsh_ct_value_t));
+    fxsh_ct_value_t *val = fxsh_alloc0(sizeof(fxsh_ct_value_t));
     val->kind = CT_STRUCT;
     val->data.struct_val.fields = SP_NULLPTR;
     val->data.struct_val.num_fields = 0;
@@ -607,7 +617,7 @@ fxsh_ct_value_t *fxsh_ct_record_add_field(fxsh_ct_value_t *record, sp_str_t fiel
 
     /* Extend fields array */
     u32 new_count = record->data.struct_val.num_fields + 1;
-    fxsh_ct_field_t *new_fields = sp_alloc(sizeof(fxsh_ct_field_t) * new_count);
+    fxsh_ct_field_t *new_fields = fxsh_alloc0(sizeof(fxsh_ct_field_t) * new_count);
 
     /* Copy old fields */
     for (u32 i = 0; i < record->data.struct_val.num_fields; i++) {
@@ -742,7 +752,7 @@ fxsh_type_t *fxsh_ct_instantiate_generic(fxsh_type_constructor_t *ctor,
         return NULL;
 
     /* Create a new concrete type from the constructor */
-    fxsh_type_t *instance = sp_alloc(sizeof(fxsh_type_t));
+    fxsh_type_t *instance = fxsh_alloc0(sizeof(fxsh_type_t));
     instance->kind = ctor->kind;
 
     /* TODO: Substitute type parameters with arguments */
@@ -755,7 +765,7 @@ fxsh_type_t *fxsh_ct_instantiate_generic(fxsh_type_constructor_t *ctor,
  *=============================================================================*/
 
 fxsh_type_constructor_t *fxsh_ct_make_vector_ctor(void) {
-    fxsh_type_constructor_t *ctor = sp_alloc(sizeof(fxsh_type_constructor_t));
+    fxsh_type_constructor_t *ctor = fxsh_alloc0(sizeof(fxsh_type_constructor_t));
     ctor->name = (sp_str_t){.data = "Vector", .len = 6};
     ctor->kind = TYPE_RECORD;
     ctor->fields = SP_NULLPTR;

@@ -69,9 +69,50 @@ static inline fxsh_token_t *consume(fxsh_parser_t *parser, fxsh_token_kind_t kin
     return NULL;
 }
 
+static inline fxsh_token_t *consume_name_token(fxsh_parser_t *parser, const char *msg) {
+    if (check(parser, TOK_IDENT) || check(parser, TOK_TYPE_IDENT)) {
+        return advance(parser);
+    }
+    fprintf(stderr, "Parse error at %d:%d: expected %s, got %s\n", current(parser)->loc.line,
+            current(parser)->loc.column, msg, fxsh_token_kind_name(current(parser)->kind));
+    return NULL;
+}
+
 static inline void skip_newlines(fxsh_parser_t *parser) {
     while (check(parser, TOK_NEWLINE)) {
         advance(parser);
+    }
+}
+
+/* Simple panic-mode recovery:
+ * skip to newline, or to a likely declaration boundary. */
+static void synchronize(fxsh_parser_t *parser) {
+    while (!check(parser, TOK_EOF)) {
+        if (check(parser, TOK_NEWLINE)) {
+            advance(parser);
+            return;
+        }
+        if (check(parser, TOK_LET) || check(parser, TOK_TYPE) || check(parser, TOK_MODULE) ||
+            check(parser, TOK_IMPORT)) {
+            return;
+        }
+        advance(parser);
+    }
+}
+
+/* Consume optional block terminator without stealing next declaration line.
+ * Accepts:
+ *   - end
+ *   - NEWLINE end
+ */
+static inline void maybe_consume_block_end(fxsh_parser_t *parser) {
+    if (check(parser, TOK_END)) {
+        advance(parser);
+        return;
+    }
+    if (check(parser, TOK_NEWLINE) && peek(parser, 1)->kind == TOK_END) {
+        advance(parser); /* newline */
+        advance(parser); /* end */
     }
 }
 
@@ -312,7 +353,16 @@ static fxsh_ast_node_t *parse_pattern(fxsh_parser_t *parser) {
             fxsh_ast_node_t *arg = parse_pattern(parser);
             if (!arg)
                 break;
-            sp_dyn_array_push(args, arg);
+            /* Constructor tuple sugar in patterns:
+             *   Cons(x, xs)  => args [x, xs] */
+            if (arg->kind == AST_PAT_TUPLE) {
+                sp_dyn_array_for(arg->data.elements, i) {
+                    sp_dyn_array_push(args, arg->data.elements[i]);
+                }
+                sp_free(arg);
+            } else {
+                sp_dyn_array_push(args, arg);
+            }
         }
 
         fxsh_ast_node_t *node = alloc_node(AST_PAT_CONSTR, tok->loc);
@@ -369,6 +419,29 @@ static fxsh_ast_node_t *parse_pattern(fxsh_parser_t *parser) {
 
     /* Fallback: parse as expression (for now) */
     return parse_primary(parser);
+}
+
+static bool is_app_arg_start(fxsh_token_kind_t kind) {
+    switch (kind) {
+        case TOK_INT:
+        case TOK_FLOAT:
+        case TOK_STRING:
+        case TOK_TRUE:
+        case TOK_FALSE:
+        case TOK_IDENT:
+        case TOK_TYPE_IDENT:
+        case TOK_LPAREN:
+        case TOK_LBRACKET:
+        case TOK_LBRACE:
+        case TOK_IF:
+        case TOK_LET:
+        case TOK_MATCH:
+        case TOK_FN:
+        case TOK_AT:
+            return true;
+        default:
+            return false;
+    }
 }
 
 /*=============================================================================
@@ -457,12 +530,11 @@ static fxsh_ast_node_t *parse_primary(fxsh_parser_t *parser) {
                 return node;
             } else if (sp_str_equal(op_name, (sp_str_t){.data = "sizeOf", .len = 6})) {
                 consume(parser, TOK_LPAREN, "'('");
-                /* For now, parse as expression and convert to type */
                 fxsh_ast_node_t *type_expr = parse_expr(parser);
                 consume(parser, TOK_RPAREN, "')'");
 
                 fxsh_ast_node_t *node = alloc_node(AST_CT_SIZE_OF, tok->loc);
-                node->data.ct_type_op.type_val = NULL; /* Will be filled during type checking */
+                node->data.ct_type_op.type_expr = type_expr;
                 return node;
             } else if (sp_str_equal(op_name, (sp_str_t){.data = "alignOf", .len = 7})) {
                 consume(parser, TOK_LPAREN, "'('");
@@ -470,7 +542,7 @@ static fxsh_ast_node_t *parse_primary(fxsh_parser_t *parser) {
                 consume(parser, TOK_RPAREN, "')'");
 
                 fxsh_ast_node_t *node = alloc_node(AST_CT_ALIGN_OF, tok->loc);
-                node->data.ct_type_op.type_val = NULL;
+                node->data.ct_type_op.type_expr = type_expr;
                 return node;
             } else {
                 fprintf(stderr, "Unknown compile-time operator: %.*s\n", op_name.len, op_name.data);
@@ -607,6 +679,7 @@ static fxsh_ast_node_t *parse_primary(fxsh_parser_t *parser) {
             if (match(parser, TOK_ELSE)) {
                 else_branch = parse_expr(parser);
             }
+            maybe_consume_block_end(parser);
 
             return fxsh_ast_if(cond, then_branch, else_branch, tok->loc);
         }
@@ -620,13 +693,14 @@ static fxsh_ast_node_t *parse_primary(fxsh_parser_t *parser) {
                 bool is_comptime = match(parser, TOK_COMPTIME);
                 bool is_rec = match(parser, TOK_REC);
 
-                fxsh_token_t *name_tok = consume(parser, TOK_IDENT, "identifier");
+                fxsh_token_t *name_tok = consume_name_token(parser, "identifier");
                 if (!name_tok)
                     return NULL;
 
-                /* Parse function parameters if present (function definition sugar: let f x y = ...) */
+                /* Parse function parameters if present (function definition sugar: let f x y = ...)
+                 */
                 fxsh_ast_list_t params = SP_NULLPTR;
-                while (check(parser, TOK_IDENT)) {
+                while (check(parser, TOK_IDENT) || check(parser, TOK_TYPE_IDENT)) {
                     fxsh_token_t *param_tok = advance(parser);
                     fxsh_ast_node_t *pat = fxsh_ast_ident(param_tok->data.ident, param_tok->loc);
                     sp_dyn_array_push(params, pat);
@@ -658,6 +732,7 @@ static fxsh_ast_node_t *parse_primary(fxsh_parser_t *parser) {
             consume(parser, TOK_IN, "'in'");
 
             fxsh_ast_node_t *body = parse_expr(parser);
+            maybe_consume_block_end(parser);
 
             fxsh_ast_node_t *node = alloc_node(AST_LET_IN, tok->loc);
             node->data.let_in.bindings = bindings;
@@ -697,6 +772,7 @@ static fxsh_ast_node_t *parse_primary(fxsh_parser_t *parser) {
                 sp_dyn_array_push(arms, arm);
                 skip_newlines(parser);
             }
+            maybe_consume_block_end(parser);
 
             fxsh_ast_node_t *node = alloc_node(AST_MATCH, tok->loc);
             node->data.match_expr.expr = expr;
@@ -706,6 +782,8 @@ static fxsh_ast_node_t *parse_primary(fxsh_parser_t *parser) {
         default:
             fprintf(stderr, "Parse error at %d:%d: unexpected %s\n", tok->loc.line, tok->loc.column,
                     fxsh_token_kind_name(tok->kind));
+            if (!check(parser, TOK_EOF))
+                advance(parser);
             return NULL;
     }
 }
@@ -750,6 +828,15 @@ static fxsh_ast_node_t *parse_postfix(fxsh_parser_t *parser) {
             node->data.field.object = expr;
             node->data.field.field = field->data.ident;
             expr = node;
+        } else if (is_app_arg_start(current(parser)->kind)) {
+            /* Function application by juxtaposition: f x y */
+            fxsh_loc_t loc = current(parser)->loc;
+            fxsh_ast_node_t *arg = parse_primary(parser);
+            if (!arg)
+                return expr;
+            fxsh_ast_list_t args = SP_NULLPTR;
+            sp_dyn_array_push(args, arg);
+            expr = fxsh_ast_call(expr, args, loc);
         } else {
             break;
         }
@@ -803,7 +890,7 @@ static fxsh_ast_node_t *parse_additive(fxsh_parser_t *parser) {
     if (!left)
         return NULL;
 
-    while (check(parser, TOK_PLUS) || check(parser, TOK_MINUS)) {
+    while (check(parser, TOK_PLUS) || check(parser, TOK_MINUS) || check(parser, TOK_CONCAT)) {
         fxsh_token_t *tok = advance(parser);
         fxsh_ast_node_t *right = parse_multiplicative(parser);
         left = fxsh_ast_binary(tok->kind, left, right, tok->loc);
@@ -877,6 +964,7 @@ static fxsh_ast_node_t *parse_pipe(fxsh_parser_t *parser) {
  *=============================================================================*/
 
 static fxsh_ast_node_t *parse_expr(fxsh_parser_t *parser) {
+    skip_newlines(parser);
     return parse_pipe(parser);
 }
 
@@ -980,7 +1068,14 @@ static fxsh_ast_node_t *parse_decl(fxsh_parser_t *parser) {
 
     /* Let declaration at top level */
     if (check(parser, TOK_LET)) {
-        return parse_let_decl(parser);
+        u32 saved_pos = parser->pos;
+        fxsh_ast_node_t *let_decl = parse_let_decl(parser);
+        if (let_decl && !check(parser, TOK_IN)) {
+            return let_decl;
+        }
+        /* It was likely a let-in expression: rollback and parse as expression. */
+        parser->pos = saved_pos;
+        return parse_expr(parser);
     }
 
     /* For now, just parse as expression */
@@ -995,13 +1090,13 @@ static fxsh_ast_node_t *parse_let_decl(fxsh_parser_t *parser) {
     bool is_comptime = match(parser, TOK_COMPTIME);
     bool is_rec = match(parser, TOK_REC);
 
-    fxsh_token_t *name_tok = consume(parser, TOK_IDENT, "identifier");
+    fxsh_token_t *name_tok = consume_name_token(parser, "identifier");
     if (!name_tok)
         return NULL;
 
     /* Parse function parameters if present (function definition sugar: let f x y = ...) */
     fxsh_ast_list_t params = SP_NULLPTR;
-    while (check(parser, TOK_IDENT)) {
+    while (check(parser, TOK_IDENT) || check(parser, TOK_TYPE_IDENT)) {
         fxsh_token_t *param_tok = advance(parser);
         fxsh_ast_node_t *pat = fxsh_ast_ident(param_tok->data.ident, param_tok->loc);
         sp_dyn_array_push(params, pat);
@@ -1036,9 +1131,13 @@ fxsh_ast_node_t *fxsh_parse_program(fxsh_parser_t *parser) {
     skip_newlines(parser);
 
     while (!check(parser, TOK_EOF)) {
+        u32 start_pos = parser->pos;
         fxsh_ast_node_t *decl = parse_decl(parser);
         if (decl) {
             sp_dyn_array_push(decls, decl);
+        }
+        if (parser->pos == start_pos) {
+            synchronize(parser);
         }
         skip_newlines(parser);
     }

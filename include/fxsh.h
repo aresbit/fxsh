@@ -6,8 +6,8 @@
 #ifndef FXSH_H
 #define FXSH_H
 
-#include "../lib/sp.h"
 #include "../lib/arena.h"
+#include "../lib/sp.h"
 
 /*=============================================================================
  * Version
@@ -280,9 +280,9 @@ typedef struct {
 /* Type environment - linked list (functional style, supports shadowing) */
 typedef struct fxsh_tenv_node fxsh_tenv_node_t;
 struct fxsh_tenv_node {
-    sp_str_t            name;
-    fxsh_scheme_t      *scheme;
-    fxsh_tenv_node_t  *next;
+    sp_str_t name;
+    fxsh_scheme_t *scheme;
+    fxsh_tenv_node_t *next;
 };
 typedef fxsh_tenv_node_t *fxsh_type_env_t;
 
@@ -300,9 +300,9 @@ typedef struct {
 /* Constructor environment - linked list */
 typedef struct fxsh_cenv_node fxsh_cenv_node_t;
 struct fxsh_cenv_node {
-    sp_str_t           name;
+    sp_str_t name;
     fxsh_constr_info_t info;
-    fxsh_cenv_node_t  *next;
+    fxsh_cenv_node_t *next;
 };
 typedef fxsh_cenv_node_t *fxsh_constr_env_t;
 
@@ -341,9 +341,9 @@ struct fxsh_ct_value {
         fxsh_type_t *type_val;    /* For CT_TYPE */
         fxsh_ast_node_t *ast_val; /* For CT_AST */
         struct {
-            fxsh_ct_value_t **params;
+            fxsh_ast_node_t **params;
             fxsh_ast_node_t *body;
-            fxsh_type_env_t *closure;
+            fxsh_type_env_t closure;
         } func_val;
         struct {
             fxsh_ct_value_t **items;
@@ -468,7 +468,7 @@ struct fxsh_ast_node {
         } ct_type_of;
 
         struct {
-            fxsh_ct_value_t *type_val; /* For @sizeOf, @alignOf, @fieldsOf */
+            fxsh_ast_node_t *type_expr; /* For @sizeOf, @alignOf, @fieldsOf */
         } ct_type_op;
 
         struct {
@@ -659,7 +659,7 @@ typedef sp_ht(sp_str_t, fxsh_ct_value_t) fxsh_ct_env_t;
 
 typedef struct {
     fxsh_ct_env_t *env;
-    fxsh_type_env_t *type_env;
+    fxsh_type_env_t type_env;
     bool in_comptime; /* Whether we're currently in compile-time context */
 } fxsh_comptime_ctx_t;
 

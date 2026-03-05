@@ -1,0 +1,7 @@
+# Regression for stage-2 parser usability
+
+let add = fn a b -> a + b
+let greet = fn name -> "hello, " ++ name
+
+let result = let x = 1 in add x 2
+let msg = greet "fxsh"

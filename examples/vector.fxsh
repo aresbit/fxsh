@@ -1,28 +1,9 @@
-# Generic vector using comptime type programming
+# Vector-like comptime helpers in supported subset
 
-# Create a specialized vector type at compile time
-let comptime Vector = fn T -> {
-  # Returns a record type structure
-  data = T,
-  len = 0,
-  cap = 0
-}
+let comptime vector_capacity = fn n -> n * 2
+let comptime DEFAULT_CAP = vector_capacity 8
 
-# Specialized vector types
-let comptime IntVector = Vector int
-let comptime StringVector = Vector string
-
-# Vector operations (simplified)
-let vec_new = fn () -> {
-  data = [],
-  len = 0,
-  cap = 0
-}
-
-let vec_push = fn vec item ->
-  vec
-
-# Usage
-let v = vec_new()
+let grow = fn len ->
+  if len < DEFAULT_CAP then DEFAULT_CAP else len * 2
 
 42

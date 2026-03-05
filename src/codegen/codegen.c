@@ -19,10 +19,10 @@
  *=============================================================================*/
 
 typedef struct {
-    sp_dyn_array(c8) *output;
-    u32               indent_level;
-    u32               temp_var_counter;
-    u32               lambda_counter;
+    sp_dyn_array(c8) * output;
+    u32 indent_level;
+    u32 temp_var_counter;
+    u32 lambda_counter;
 } codegen_ctx_t;
 
 /*=============================================================================
@@ -75,10 +75,18 @@ static void emit_mangled(codegen_ctx_t *ctx, sp_str_t name) {
     for (u32 i = 0; i < name.len; i++) {
         c8 c = name.data[i];
         switch (c) {
-            case '\'': emit_raw(ctx, "_prime"); break;
-            case '!':  emit_raw(ctx, "_bang");  break;
-            case '?':  emit_raw(ctx, "_q");     break;
-            default:   sp_dyn_array_push(*ctx->output, c); break;
+            case '\'':
+                emit_raw(ctx, "_prime");
+                break;
+            case '!':
+                emit_raw(ctx, "_bang");
+                break;
+            case '?':
+                emit_raw(ctx, "_q");
+                break;
+            default:
+                sp_dyn_array_push(*ctx->output, c);
+                break;
         }
     }
 }
@@ -89,9 +97,17 @@ static void mangle_into(sp_str_t name, char *buf, size_t buf_sz) {
     for (u32 i = 0; i < name.len && pos + 8 < buf_sz; i++) {
         c8 c = name.data[i];
         switch (c) {
-            case '\'': memcpy(buf + pos, "_prime", 6); pos += 6; break;
-            case '!':  memcpy(buf + pos, "_bang",  5); pos += 5; break;
-            default:   buf[pos++] = c; break;
+            case '\'':
+                memcpy(buf + pos, "_prime", 6);
+                pos += 6;
+                break;
+            case '!':
+                memcpy(buf + pos, "_bang", 5);
+                pos += 5;
+                break;
+            default:
+                buf[pos++] = c;
+                break;
         }
     }
     buf[pos] = '\0';
@@ -109,20 +125,20 @@ static void gen_type_def(codegen_ctx_t *ctx, fxsh_ast_node_t *ast);
  *=============================================================================*/
 
 /* Track registered ADT type names to resolve cross-references */
-static sp_dyn_array(sp_str_t)  g_adt_type_names = SP_NULLPTR;
+static sp_dyn_array(sp_str_t) g_adt_type_names = SP_NULLPTR;
 
 /* Track ADT-typed global let bindings that need runtime init */
 typedef struct {
-    sp_str_t        c_name;     /* mangled variable name */
-    sp_str_t        type_name;  /* mangled type name */
-    fxsh_ast_node_t *value;     /* initializer expression */
+    sp_str_t c_name;        /* mangled variable name */
+    sp_str_t type_name;     /* mangled type name */
+    fxsh_ast_node_t *value; /* initializer expression */
 } adt_init_t;
 static sp_dyn_array(adt_init_t) g_adt_inits = SP_NULLPTR;
 
 static bool is_known_adt(sp_str_t name) {
-    if (!g_adt_type_names) return false;
-    sp_dyn_array_for(g_adt_type_names, i)
-        if (sp_str_equal(g_adt_type_names[i], name)) return true;
+    if (!g_adt_type_names)
+        return false;
+    sp_dyn_array_for(g_adt_type_names, i) if (sp_str_equal(g_adt_type_names[i], name)) return true;
     return false;
 }
 
@@ -131,13 +147,30 @@ static bool is_known_adt(sp_str_t name) {
  *=============================================================================*/
 
 static void emit_c_type_for_fxsh_type(codegen_ctx_t *ctx, sp_str_t name) {
-    if (sp_str_equal(name, TYPE_INT))    { emit_raw(ctx, "s64");      return; }
-    if (sp_str_equal(name, TYPE_FLOAT))  { emit_raw(ctx, "double");   return; }
-    if (sp_str_equal(name, TYPE_BOOL))   { emit_raw(ctx, "bool");     return; }
-    if (sp_str_equal(name, TYPE_STRING)) { emit_raw(ctx, "sp_str_t"); return; }
-    if (sp_str_equal(name, TYPE_UNIT))   { emit_raw(ctx, "void");     return; }
+    if (sp_str_equal(name, TYPE_INT)) {
+        emit_raw(ctx, "s64");
+        return;
+    }
+    if (sp_str_equal(name, TYPE_FLOAT)) {
+        emit_raw(ctx, "double");
+        return;
+    }
+    if (sp_str_equal(name, TYPE_BOOL)) {
+        emit_raw(ctx, "bool");
+        return;
+    }
+    if (sp_str_equal(name, TYPE_STRING)) {
+        emit_raw(ctx, "sp_str_t");
+        return;
+    }
+    if (sp_str_equal(name, TYPE_UNIT)) {
+        emit_raw(ctx, "void");
+        return;
+    }
     /* ADT or user type */
-    emit_raw(ctx, "fxsh_"); emit_mangled(ctx, name); emit_raw(ctx, "_t");
+    emit_raw(ctx, "fxsh_");
+    emit_mangled(ctx, name);
+    emit_raw(ctx, "_t");
 }
 
 /*=============================================================================
@@ -145,42 +178,55 @@ static void emit_c_type_for_fxsh_type(codegen_ctx_t *ctx, sp_str_t name) {
  *=============================================================================*/
 
 static void gen_type_def_struct(codegen_ctx_t *ctx, fxsh_ast_node_t *ast) {
-    if (!ast || ast->kind != AST_TYPE_DEF) return;
+    if (!ast || ast->kind != AST_TYPE_DEF)
+        return;
 
-    sp_str_t        type_name  = ast->data.type_def.name;
-    fxsh_ast_list_t constrs    = ast->data.type_def.constructors;
-    u32             n          = (u32)sp_dyn_array_size(constrs);
-    if (n == 0) return;
+    sp_str_t type_name = ast->data.type_def.name;
+    fxsh_ast_list_t constrs = ast->data.type_def.constructors;
+    u32 n = (u32)sp_dyn_array_size(constrs);
+    if (n == 0)
+        return;
 
     /* Track this type */
     sp_dyn_array_push(g_adt_type_names, type_name);
 
     /* ── Tag enum ── */
     emit_line(ctx, "/* ADT: tag enum */");
-    emit_indent(ctx); emit_raw(ctx, "typedef enum {\n");
+    emit_indent(ctx);
+    emit_raw(ctx, "typedef enum {\n");
     ctx->indent_level++;
     sp_dyn_array_for(constrs, i) {
         fxsh_ast_node_t *c = constrs[i];
-        if (c->kind != AST_DATA_CONSTR) continue;
+        if (c->kind != AST_DATA_CONSTR)
+            continue;
         emit_indent(ctx);
-        emit_raw(ctx, "fxsh_tag_"); emit_mangled(ctx, type_name);
-        emit_raw(ctx, "_"); emit_mangled(ctx, c->data.data_constr.name);
+        emit_raw(ctx, "fxsh_tag_");
+        emit_mangled(ctx, type_name);
+        emit_raw(ctx, "_");
+        emit_mangled(ctx, c->data.data_constr.name);
         emit_raw(ctx, (i < n - 1) ? ",\n" : "\n");
     }
     ctx->indent_level--;
-    emit_indent(ctx); emit_raw(ctx, "} fxsh_tag_"); emit_mangled(ctx, type_name); emit_raw(ctx, "_t;\n\n");
+    emit_indent(ctx);
+    emit_raw(ctx, "} fxsh_tag_");
+    emit_mangled(ctx, type_name);
+    emit_raw(ctx, "_t;\n\n");
 
     /* ── Union of payloads ── */
     emit_line(ctx, "/* ADT: payload union */");
-    emit_indent(ctx); emit_raw(ctx, "typedef union {\n");
+    emit_indent(ctx);
+    emit_raw(ctx, "typedef union {\n");
     ctx->indent_level++;
     sp_dyn_array_for(constrs, i) {
-        fxsh_ast_node_t *c   = constrs[i];
-        if (c->kind != AST_DATA_CONSTR) continue;
+        fxsh_ast_node_t *c = constrs[i];
+        if (c->kind != AST_DATA_CONSTR)
+            continue;
         u32 nargs = (u32)sp_dyn_array_size(c->data.data_constr.arg_types);
-        if (nargs == 0) continue;
+        if (nargs == 0)
+            continue;
 
-        emit_indent(ctx); emit_raw(ctx, "struct {\n");
+        emit_indent(ctx);
+        emit_raw(ctx, "struct {\n");
         ctx->indent_level++;
         sp_dyn_array_for(c->data.data_constr.arg_types, j) {
             emit_indent(ctx);
@@ -188,7 +234,9 @@ static void gen_type_def_struct(codegen_ctx_t *ctx, fxsh_ast_node_t *ast) {
             if (arg_t->kind == AST_IDENT) {
                 /* Self-reference: use pointer to avoid incomplete type */
                 if (sp_str_equal(arg_t->data.ident, type_name)) {
-                    emit_raw(ctx, "struct fxsh_"); emit_mangled(ctx, type_name); emit_raw(ctx, "_s *");
+                    emit_raw(ctx, "struct fxsh_");
+                    emit_mangled(ctx, type_name);
+                    emit_raw(ctx, "_s *");
                 } else {
                     emit_c_type_for_fxsh_type(ctx, arg_t->data.ident);
                     emit_raw(ctx, " ");
@@ -199,49 +247,76 @@ static void gen_type_def_struct(codegen_ctx_t *ctx, fxsh_ast_node_t *ast) {
             emit_fmt(ctx, "_%u;\n", (unsigned)j);
         }
         ctx->indent_level--;
-        emit_indent(ctx); emit_raw(ctx, "} "); emit_mangled(ctx, c->data.data_constr.name); emit_raw(ctx, ";\n");
+        emit_indent(ctx);
+        emit_raw(ctx, "} ");
+        emit_mangled(ctx, c->data.data_constr.name);
+        emit_raw(ctx, ";\n");
     }
     ctx->indent_level--;
-    emit_indent(ctx); emit_raw(ctx, "} fxsh_data_"); emit_mangled(ctx, type_name); emit_raw(ctx, "_t;\n\n");
+    emit_indent(ctx);
+    emit_raw(ctx, "} fxsh_data_");
+    emit_mangled(ctx, type_name);
+    emit_raw(ctx, "_t;\n\n");
 
     /* ── Main struct ── */
     emit_line(ctx, "/* ADT: main struct */");
     /* Use tagged struct name for forward-reference support */
-    emit_indent(ctx); emit_raw(ctx, "typedef struct fxsh_"); emit_mangled(ctx, type_name); emit_raw(ctx, "_s {\n");
+    emit_indent(ctx);
+    emit_raw(ctx, "typedef struct fxsh_");
+    emit_mangled(ctx, type_name);
+    emit_raw(ctx, "_s {\n");
     ctx->indent_level++;
-    emit_indent(ctx); emit_raw(ctx, "fxsh_tag_"); emit_mangled(ctx, type_name); emit_raw(ctx, "_t tag;\n");
-    emit_indent(ctx); emit_raw(ctx, "fxsh_data_"); emit_mangled(ctx, type_name); emit_raw(ctx, "_t data;\n");
+    emit_indent(ctx);
+    emit_raw(ctx, "fxsh_tag_");
+    emit_mangled(ctx, type_name);
+    emit_raw(ctx, "_t tag;\n");
+    emit_indent(ctx);
+    emit_raw(ctx, "fxsh_data_");
+    emit_mangled(ctx, type_name);
+    emit_raw(ctx, "_t data;\n");
     ctx->indent_level--;
     emit_indent(ctx);
     /* FIX: was `embed_raw` — corrected to `emit_raw` */
-    emit_raw(ctx, "} fxsh_"); emit_mangled(ctx, type_name); emit_raw(ctx, "_t;\n\n");
+    emit_raw(ctx, "} fxsh_");
+    emit_mangled(ctx, type_name);
+    emit_raw(ctx, "_t;\n\n");
 }
 
 static void gen_type_def_constructors(codegen_ctx_t *ctx, fxsh_ast_node_t *ast) {
-    if (!ast || ast->kind != AST_TYPE_DEF) return;
-    sp_str_t        type_name = ast->data.type_def.name;
-    fxsh_ast_list_t constrs   = ast->data.type_def.constructors;
+    if (!ast || ast->kind != AST_TYPE_DEF)
+        return;
+    sp_str_t type_name = ast->data.type_def.name;
+    fxsh_ast_list_t constrs = ast->data.type_def.constructors;
 
     sp_dyn_array_for(constrs, i) {
         fxsh_ast_node_t *c = constrs[i];
-        if (c->kind != AST_DATA_CONSTR) continue;
+        if (c->kind != AST_DATA_CONSTR)
+            continue;
         sp_str_t constr_name = c->data.data_constr.name;
-        u32      nargs       = (u32)sp_dyn_array_size(c->data.data_constr.arg_types);
+        u32 nargs = (u32)sp_dyn_array_size(c->data.data_constr.arg_types);
 
         emit_indent(ctx);
-        emit_raw(ctx, "static inline fxsh_"); emit_mangled(ctx, type_name); emit_raw(ctx, "_t ");
-        emit_raw(ctx, "fxsh_constr_"); emit_mangled(ctx, constr_name); emit_raw(ctx, "(");
+        emit_raw(ctx, "static inline fxsh_");
+        emit_mangled(ctx, type_name);
+        emit_raw(ctx, "_t ");
+        emit_raw(ctx, "fxsh_constr_");
+        emit_mangled(ctx, constr_name);
+        emit_raw(ctx, "(");
         if (nargs == 0) {
             emit_raw(ctx, "void");
         } else {
             for (u32 j = 0; j < nargs; j++) {
-                if (j > 0) emit_raw(ctx, ", ");
+                if (j > 0)
+                    emit_raw(ctx, ", ");
                 fxsh_ast_node_t *at = c->data.data_constr.arg_types[j];
                 if (at->kind == AST_IDENT) {
                     if (sp_str_equal(at->data.ident, type_name)) {
-                        emit_raw(ctx, "struct fxsh_"); emit_mangled(ctx, type_name); emit_raw(ctx, "_s *");
+                        emit_raw(ctx, "struct fxsh_");
+                        emit_mangled(ctx, type_name);
+                        emit_raw(ctx, "_s *");
                     } else {
-                        emit_c_type_for_fxsh_type(ctx, at->data.ident); emit_raw(ctx, " ");
+                        emit_c_type_for_fxsh_type(ctx, at->data.ident);
+                        emit_raw(ctx, " ");
                     }
                 } else {
                     emit_raw(ctx, "s64 ");
@@ -252,15 +327,24 @@ static void gen_type_def_constructors(codegen_ctx_t *ctx, fxsh_ast_node_t *ast) 
         emit_raw(ctx, ") {\n");
         ctx->indent_level++;
 
-        emit_indent(ctx); emit_raw(ctx, "fxsh_"); emit_mangled(ctx, type_name); emit_raw(ctx, "_t _v;\n");
-        emit_indent(ctx); emit_raw(ctx, "_v.tag = fxsh_tag_"); emit_mangled(ctx, type_name);
-        emit_raw(ctx, "_"); emit_mangled(ctx, constr_name); emit_raw(ctx, ";\n");
+        emit_indent(ctx);
+        emit_raw(ctx, "fxsh_");
+        emit_mangled(ctx, type_name);
+        emit_raw(ctx, "_t _v;\n");
+        emit_indent(ctx);
+        emit_raw(ctx, "_v.tag = fxsh_tag_");
+        emit_mangled(ctx, type_name);
+        emit_raw(ctx, "_");
+        emit_mangled(ctx, constr_name);
+        emit_raw(ctx, ";\n");
         for (u32 j = 0; j < nargs; j++) {
             emit_indent(ctx);
-            emit_raw(ctx, "_v.data."); emit_mangled(ctx, constr_name);
+            emit_raw(ctx, "_v.data.");
+            emit_mangled(ctx, constr_name);
             emit_fmt(ctx, "._%u = arg%u;\n", j, j);
         }
-        emit_indent(ctx); emit_raw(ctx, "return _v;\n");
+        emit_indent(ctx);
+        emit_raw(ctx, "return _v;\n");
 
         ctx->indent_level--;
         emit_line(ctx, "}");
@@ -295,7 +379,8 @@ static void gen_literal(codegen_ctx_t *ctx, fxsh_ast_node_t *ast) {
             sp_dyn_array_push(*ctx->output, '"');
             for (u32 i = 0; i < ast->data.lit_string.len; i++) {
                 c8 c = ast->data.lit_string.data[i];
-                if (c == '"' || c == '\\') sp_dyn_array_push(*ctx->output, '\\');
+                if (c == '"' || c == '\\')
+                    sp_dyn_array_push(*ctx->output, '\\');
                 sp_dyn_array_push(*ctx->output, c);
             }
             sp_dyn_array_push(*ctx->output, '"');
@@ -314,16 +399,14 @@ static void gen_literal(codegen_ctx_t *ctx, fxsh_ast_node_t *ast) {
 
 static void gen_binary(codegen_ctx_t *ctx, fxsh_ast_node_t *ast) {
     static const char *ops[] = {
-        [TOK_PLUS]    = " + ",  [TOK_MINUS]   = " - ",
-        [TOK_STAR]    = " * ",  [TOK_SLASH]   = " / ",
-        [TOK_PERCENT] = " % ",  [TOK_EQ]      = " == ",
-        [TOK_NEQ]     = " != ", [TOK_LT]      = " < ",
-        [TOK_GT]      = " > ",  [TOK_LEQ]     = " <= ",
-        [TOK_GEQ]     = " >= ", [TOK_AND]     = " && ",
-        [TOK_OR]      = " || ",
+        [TOK_PLUS] = " + ",    [TOK_MINUS] = " - ", [TOK_STAR] = " * ", [TOK_SLASH] = " / ",
+        [TOK_PERCENT] = " % ", [TOK_EQ] = " == ",   [TOK_NEQ] = " != ", [TOK_LT] = " < ",
+        [TOK_GT] = " > ",      [TOK_LEQ] = " <= ",  [TOK_GEQ] = " >= ", [TOK_AND] = " && ",
+        [TOK_OR] = " || ",
     };
-    const char *op = (ast->data.binary.op < (int)(sizeof(ops)/sizeof(ops[0])))
-                     ? ops[ast->data.binary.op] : " /* ? */ ";
+    const char *op = (ast->data.binary.op < (int)(sizeof(ops) / sizeof(ops[0])))
+                         ? ops[ast->data.binary.op]
+                         : " /* ? */ ";
     sp_dyn_array_push(*ctx->output, '(');
     gen_expr(ctx, ast->data.binary.left);
     emit_raw(ctx, op ? op : " /* ? */ ");
@@ -333,9 +416,13 @@ static void gen_binary(codegen_ctx_t *ctx, fxsh_ast_node_t *ast) {
 
 static void gen_unary(codegen_ctx_t *ctx, fxsh_ast_node_t *ast) {
     if (ast->data.unary.op == TOK_MINUS) {
-        emit_raw(ctx, "-("); gen_expr(ctx, ast->data.unary.operand); sp_dyn_array_push(*ctx->output, ')');
+        emit_raw(ctx, "-(");
+        gen_expr(ctx, ast->data.unary.operand);
+        sp_dyn_array_push(*ctx->output, ')');
     } else if (ast->data.unary.op == TOK_NOT) {
-        emit_raw(ctx, "!("); gen_expr(ctx, ast->data.unary.operand); sp_dyn_array_push(*ctx->output, ')');
+        emit_raw(ctx, "!(");
+        gen_expr(ctx, ast->data.unary.operand);
+        sp_dyn_array_push(*ctx->output, ')');
     } else {
         gen_expr(ctx, ast->data.unary.operand);
     }
@@ -358,7 +445,8 @@ static void gen_call(codegen_ctx_t *ctx, fxsh_ast_node_t *ast) {
     gen_expr(ctx, ast->data.call.func);
     sp_dyn_array_push(*ctx->output, '(');
     sp_dyn_array_for(ast->data.call.args, i) {
-        if (i > 0) emit_raw(ctx, ", ");
+        if (i > 0)
+            emit_raw(ctx, ", ");
         gen_expr(ctx, ast->data.call.args[i]);
     }
     sp_dyn_array_push(*ctx->output, ')');
@@ -410,7 +498,8 @@ static void gen_constr_appl(codegen_ctx_t *ctx, fxsh_ast_node_t *ast) {
     emit_mangled(ctx, ast->data.constr_appl.constr_name);
     sp_dyn_array_push(*ctx->output, '(');
     sp_dyn_array_for(ast->data.constr_appl.args, i) {
-        if (i > 0) emit_raw(ctx, ", ");
+        if (i > 0)
+            emit_raw(ctx, ", ");
         gen_expr(ctx, ast->data.constr_appl.args[i]);
     }
     sp_dyn_array_push(*ctx->output, ')');
@@ -421,9 +510,9 @@ static void gen_constr_appl(codegen_ctx_t *ctx, fxsh_ast_node_t *ast) {
  *=============================================================================*/
 
 /* Generate code to bind pattern variables from `val_name` */
-static void gen_pattern_bindings(codegen_ctx_t *ctx, fxsh_ast_node_t *pat,
-                                  const char *val_name) {
-    if (!pat) return;
+static void gen_pattern_bindings(codegen_ctx_t *ctx, fxsh_ast_node_t *pat, const char *val_name) {
+    if (!pat)
+        return;
     switch (pat->kind) {
         case AST_PAT_VAR:
             /* __auto_type x = val_name; */
@@ -437,13 +526,13 @@ static void gen_pattern_bindings(codegen_ctx_t *ctx, fxsh_ast_node_t *pat,
             break;
         case AST_PAT_CONSTR: {
             sp_str_t cname = pat->data.constr_appl.constr_name;
-            char     cname_buf[128];
+            char cname_buf[128];
             mangle_into(cname, cname_buf, sizeof(cname_buf));
             /* Bind each sub-pattern to the corresponding field */
             sp_dyn_array_for(pat->data.constr_appl.args, j) {
                 char field_expr[256];
-                snprintf(field_expr, sizeof(field_expr), "%s.data.%s._%u",
-                         val_name, cname_buf, (unsigned)j);
+                snprintf(field_expr, sizeof(field_expr), "%s.data.%s._%u", val_name, cname_buf,
+                         (unsigned)j);
                 gen_pattern_bindings(ctx, pat->data.constr_appl.args[j], field_expr);
             }
             break;
@@ -464,20 +553,24 @@ static void gen_match(codegen_ctx_t *ctx, fxsh_ast_node_t *ast) {
      *      _r;
      *   })
      */
-    emit_raw(ctx, "__({\n");    /* GCC statement expression */
+    emit_raw(ctx, "__({\n"); /* GCC statement expression */
     ctx->indent_level++;
 
-    emit_indent(ctx); emit_raw(ctx, "__auto_type _match_val = ");
+    emit_indent(ctx);
+    emit_raw(ctx, "__auto_type _match_val = ");
     gen_expr(ctx, ast->data.match_expr.expr);
     emit_raw(ctx, ";\n");
 
-    emit_indent(ctx); emit_raw(ctx, "__auto_type _match_res = _match_val; /* placeholder */\n");
-    emit_indent(ctx); emit_raw(ctx, "switch (_match_val.tag) {\n");
+    emit_indent(ctx);
+    emit_raw(ctx, "__auto_type _match_res = _match_val; /* placeholder */\n");
+    emit_indent(ctx);
+    emit_raw(ctx, "switch (_match_val.tag) {\n");
     ctx->indent_level++;
 
     sp_dyn_array_for(ast->data.match_expr.arms, i) {
         fxsh_ast_node_t *arm = ast->data.match_expr.arms[i];
-        if (arm->kind != AST_MATCH_ARM) continue;
+        if (arm->kind != AST_MATCH_ARM)
+            continue;
 
         fxsh_ast_node_t *pat = arm->data.match_arm.pattern;
         emit_indent(ctx);
@@ -505,45 +598,78 @@ static void gen_match(codegen_ctx_t *ctx, fxsh_ast_node_t *ast) {
 
         /* Guard */
         if (arm->data.match_arm.guard) {
-            emit_indent(ctx); emit_raw(ctx, "if (!(");
+            emit_indent(ctx);
+            emit_raw(ctx, "if (!(");
             gen_expr(ctx, arm->data.match_arm.guard);
             emit_raw(ctx, ")) break;\n");
         }
 
         /* Body */
-        emit_indent(ctx); emit_raw(ctx, "_match_res = ");
+        emit_indent(ctx);
+        emit_raw(ctx, "_match_res = ");
         gen_expr(ctx, arm->data.match_arm.body);
         emit_raw(ctx, ";\n");
-        emit_indent(ctx); emit_raw(ctx, "break;\n");
+        emit_indent(ctx);
+        emit_raw(ctx, "break;\n");
 
         ctx->indent_level--;
-        emit_indent(ctx); emit_raw(ctx, "}\n");
+        emit_indent(ctx);
+        emit_raw(ctx, "}\n");
     }
 
     ctx->indent_level--;
-    emit_indent(ctx); emit_raw(ctx, "}\n");
-    emit_indent(ctx); emit_raw(ctx, "_match_res;\n");
+    emit_indent(ctx);
+    emit_raw(ctx, "}\n");
+    emit_indent(ctx);
+    emit_raw(ctx, "_match_res;\n");
     ctx->indent_level--;
-    emit_indent(ctx); emit_raw(ctx, "})");
+    emit_indent(ctx);
+    emit_raw(ctx, "})");
 }
 
 static void gen_expr(codegen_ctx_t *ctx, fxsh_ast_node_t *ast) {
-    if (!ast) { emit_raw(ctx, "0 /* null */"); return; }
+    if (!ast) {
+        emit_raw(ctx, "0 /* null */");
+        return;
+    }
     switch (ast->kind) {
-        case AST_LIT_INT: case AST_LIT_FLOAT: case AST_LIT_STRING:
-        case AST_LIT_BOOL: case AST_LIT_UNIT:
-            gen_literal(ctx, ast); break;
+        case AST_LIT_INT:
+        case AST_LIT_FLOAT:
+        case AST_LIT_STRING:
+        case AST_LIT_BOOL:
+        case AST_LIT_UNIT:
+            gen_literal(ctx, ast);
+            break;
         case AST_IDENT:
-            emit_mangled(ctx, ast->data.ident); break;
-        case AST_BINARY:    gen_binary(ctx, ast);     break;
-        case AST_UNARY:     gen_unary(ctx, ast);      break;
-        case AST_IF:        gen_if(ctx, ast);         break;
-        case AST_CALL:      gen_call(ctx, ast);       break;
-        case AST_LAMBDA:    gen_lambda(ctx, ast);     break;
-        case AST_LET_IN:    gen_let_in(ctx, ast);     break;
-        case AST_PIPE:      gen_pipe(ctx, ast);       break;
-        case AST_CONSTR_APPL: gen_constr_appl(ctx, ast); break;
-        case AST_MATCH:     gen_match(ctx, ast);      break;
+            emit_mangled(ctx, ast->data.ident);
+            break;
+        case AST_BINARY:
+            gen_binary(ctx, ast);
+            break;
+        case AST_UNARY:
+            gen_unary(ctx, ast);
+            break;
+        case AST_IF:
+            gen_if(ctx, ast);
+            break;
+        case AST_CALL:
+            gen_call(ctx, ast);
+            break;
+        case AST_LAMBDA:
+            gen_lambda(ctx, ast);
+            break;
+        case AST_LET_IN:
+            gen_let_in(ctx, ast);
+            break;
+        case AST_PIPE:
+            gen_pipe(ctx, ast);
+            break;
+        case AST_CONSTR_APPL:
+            gen_constr_appl(ctx, ast);
+            break;
+        case AST_MATCH:
+            gen_match(ctx, ast);
+            break;
         case AST_TUPLE:
             if (ast->data.elements && sp_dyn_array_size(ast->data.elements) > 0)
                 gen_expr(ctx, ast->data.elements[0]);
@@ -562,17 +688,19 @@ static void gen_expr(codegen_ctx_t *ctx, fxsh_ast_node_t *ast) {
 
 static void gen_decl_fn(codegen_ctx_t *ctx, fxsh_ast_node_t *ast) {
     emit_indent(ctx);
-    emit_raw(ctx, "s64 ");   /* TODO: use actual return type from TypeEnv */
+    emit_raw(ctx, "s64 "); /* TODO: use actual return type from TypeEnv */
     emit_mangled(ctx, ast->data.decl_fn.name);
     sp_dyn_array_push(*ctx->output, '(');
     if (sp_dyn_array_size(ast->data.decl_fn.params) == 0) {
         emit_raw(ctx, "void");
     } else {
         sp_dyn_array_for(ast->data.decl_fn.params, i) {
-            if (i > 0) emit_raw(ctx, ", ");
+            if (i > 0)
+                emit_raw(ctx, ", ");
             fxsh_ast_node_t *p = ast->data.decl_fn.params[i];
             if (p->kind == AST_PAT_VAR) {
-                emit_raw(ctx, "s64 "); emit_mangled(ctx, p->data.ident);
+                emit_raw(ctx, "s64 ");
+                emit_mangled(ctx, p->data.ident);
             } else {
                 emit_fmt(ctx, "s64 _arg%u", (unsigned)i);
             }
@@ -580,7 +708,8 @@ static void gen_decl_fn(codegen_ctx_t *ctx, fxsh_ast_node_t *ast) {
     }
     emit_raw(ctx, ") {\n");
     ctx->indent_level++;
-    emit_indent(ctx); emit_raw(ctx, "return ");
+    emit_indent(ctx);
+    emit_raw(ctx, "return ");
     gen_expr(ctx, ast->data.decl_fn.body);
     emit_raw(ctx, ";\n");
     ctx->indent_level--;
@@ -590,16 +719,18 @@ static void gen_decl_fn(codegen_ctx_t *ctx, fxsh_ast_node_t *ast) {
 
 /* Heuristic: determine if a value expression is an ADT constructor application */
 static sp_str_t constr_appl_type_name(fxsh_ast_node_t *v) {
-    if (!v || v->kind != AST_CONSTR_APPL) return (sp_str_t){0};
+    if (!v || v->kind != AST_CONSTR_APPL)
+        return (sp_str_t){0};
     sp_str_t cn = v->data.constr_appl.constr_name;
     /* Common constructor heuristics */
-    static const struct { const char *c; const char *t; } tbl[] = {
-        {"None","option"},{"Some","option"},
-        {"Nil","list"},{"Cons","list"},
-        {"Leaf","tree"},{"Node","tree"},
-        {"Ok","result"},{"Err","result"},
+    static const struct {
+        const char *c;
+        const char *t;
+    } tbl[] = {
+        {"None", "option"}, {"Some", "option"}, {"Nil", "list"},  {"Cons", "list"},
+        {"Leaf", "tree"},   {"Node", "tree"},   {"Ok", "result"}, {"Err", "result"},
     };
-    for (size_t i = 0; i < sizeof(tbl)/sizeof(tbl[0]); i++) {
+    for (size_t i = 0; i < sizeof(tbl) / sizeof(tbl[0]); i++) {
         if (cn.len == strlen(tbl[i].c) && memcmp(cn.data, tbl[i].c, cn.len) == 0) {
             return sp_str_view(tbl[i].t);
         }
@@ -613,16 +744,18 @@ static void gen_decl_let(codegen_ctx_t *ctx, fxsh_ast_node_t *ast) {
 
     emit_indent(ctx);
     if (type_hint.len > 0) {
-        emit_raw(ctx, "static fxsh_"); emit_mangled(ctx, type_hint); emit_raw(ctx, "_t ");
+        emit_raw(ctx, "static fxsh_");
+        emit_mangled(ctx, type_hint);
+        emit_raw(ctx, "_t ");
         emit_mangled(ctx, ast->data.let.name);
         emit_raw(ctx, "; /* init in fxsh_init() */\n");
         char cn[128], tn[128];
         mangle_into(ast->data.let.name, cn, sizeof(cn));
         mangle_into(type_hint, tn, sizeof(tn));
         adt_init_t entry = {
-            .c_name    = (sp_str_t){.data = cn, .len = (u32)strlen(cn)},
+            .c_name = (sp_str_t){.data = cn, .len = (u32)strlen(cn)},
             .type_name = (sp_str_t){.data = tn, .len = (u32)strlen(tn)},
-            .value     = ast->data.let.value,
+            .value = ast->data.let.value,
         };
         sp_dyn_array_push(g_adt_inits, entry);
     } else {
@@ -658,7 +791,8 @@ static void gen_prelude(codegen_ctx_t *ctx) {
 }
 
 static void gen_adt_init_fn(codegen_ctx_t *ctx) {
-    if (!g_adt_inits || sp_dyn_array_size(g_adt_inits) == 0) return;
+    if (!g_adt_inits || sp_dyn_array_size(g_adt_inits) == 0)
+        return;
     emit_line(ctx, "static void fxsh_init_globals(void) {");
     ctx->indent_level++;
     sp_dyn_array_for(g_adt_inits, i) {
@@ -691,13 +825,13 @@ static void gen_epilogue(codegen_ctx_t *ctx) {
 char *fxsh_codegen(fxsh_ast_node_t *ast) {
     sp_dyn_array(c8) out_arr = SP_NULLPTR;
     codegen_ctx_t ctx = {
-        .output          = &out_arr,
-        .indent_level    = 0,
+        .output = &out_arr,
+        .indent_level = 0,
         .temp_var_counter = 0,
-        .lambda_counter  = 0,
+        .lambda_counter = 0,
     };
     g_adt_type_names = SP_NULLPTR;
-    g_adt_inits      = SP_NULLPTR;
+    g_adt_inits = SP_NULLPTR;
 
     gen_prelude(&ctx);
 
@@ -711,18 +845,20 @@ char *fxsh_codegen(fxsh_ast_node_t *ast) {
         sp_dyn_array_for(ast->data.decls, i) {
             fxsh_ast_node_t *d = ast->data.decls[i];
             if (d->kind == AST_DECL_FN) {
-                emit_raw(&ctx, "static s64 "); emit_mangled(&ctx, d->data.decl_fn.name);
-                emit_raw(&ctx, sp_dyn_array_size(d->data.decl_fn.params) == 0
-                               ? "(void);\n" : "(...);\n");
+                emit_raw(&ctx, "static s64 ");
+                emit_mangled(&ctx, d->data.decl_fn.name);
+                emit_raw(&ctx,
+                         sp_dyn_array_size(d->data.decl_fn.params) == 0 ? "(void);\n" : "(...);\n");
             }
         }
         emit_raw(&ctx, "\n");
         /* Pass 3: function and variable definitions */
         sp_dyn_array_for(ast->data.decls, i) {
             fxsh_ast_node_t *d = ast->data.decls[i];
-            if (d->kind == AST_DECL_FN)       gen_decl_fn(&ctx, d);
-            else if (d->kind == AST_DECL_LET ||
-                     d->kind == AST_LET)       gen_decl_let(&ctx, d);
+            if (d->kind == AST_DECL_FN)
+                gen_decl_fn(&ctx, d);
+            else if (d->kind == AST_DECL_LET || d->kind == AST_LET)
+                gen_decl_let(&ctx, d);
             /* TYPE_DEF already handled */
         }
     }
@@ -730,7 +866,7 @@ char *fxsh_codegen(fxsh_ast_node_t *ast) {
     gen_epilogue(&ctx);
     sp_dyn_array_push(out_arr, '\0');
 
-    u32  len    = (u32)sp_dyn_array_size(out_arr);
+    u32 len = (u32)sp_dyn_array_size(out_arr);
     char *result = (char *)sp_alloc(len);
     memcpy(result, out_arr, len);
     sp_dyn_array_free(out_arr);
@@ -739,7 +875,8 @@ char *fxsh_codegen(fxsh_ast_node_t *ast) {
 
 fxsh_error_t fxsh_codegen_to_file(fxsh_ast_node_t *ast, sp_str_t path) {
     char *code = fxsh_codegen(ast);
-    if (!code) return ERR_OUT_OF_MEMORY;
+    if (!code)
+        return ERR_OUT_OF_MEMORY;
     sp_str_t content = {.data = code, .len = (u32)strlen(code)};
     fxsh_error_t err = fxsh_write_file(path, content);
     sp_free(code);

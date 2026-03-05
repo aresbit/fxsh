@@ -1,16 +1,13 @@
-# ADT example in supported subset
+# Match feature demo
 
 type option = None | Some of int
-
-let make_some = fn x -> Some x
+type ilist = Nil | Cons of int * ilist
 
 let get_or = fn opt d ->
   match opt with
   | Some x -> x
   | None -> d
   end
-
-type ilist = Nil | Cons of int * ilist
 
 let head_or = fn xs d ->
   match xs with
