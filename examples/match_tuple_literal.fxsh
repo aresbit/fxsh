@@ -1,0 +1,6 @@
+# Tuple literal pattern match smoke
+
+let out = match (1, 2) with
+  | (1, 2) -> 1
+  | _ -> 0
+end

@@ -305,6 +305,10 @@ static void emit_c_type_for_type(codegen_ctx_t *ctx, fxsh_type_t *t) {
         emit_raw(ctx, "fxsh_record_t");
         return;
     }
+    if (t->kind == TYPE_TUPLE) {
+        emit_raw(ctx, "fxsh_tuple_t");
+        return;
+    }
     if (t->kind == TYPE_ARROW) {
         emit_raw(ctx, "void*");
         return;
@@ -978,6 +982,9 @@ static void emit_c_type_guess_for_expr(codegen_ctx_t *ctx, fxsh_ast_node_t *expr
         case AST_RECORD:
             emit_raw(ctx, "fxsh_record_t");
             return;
+        case AST_TUPLE:
+            emit_raw(ctx, "fxsh_tuple_t");
+            return;
         default:
             emit_raw(ctx, "s64");
             return;
@@ -1015,9 +1022,26 @@ static void gen_boxed_expr(codegen_ctx_t *ctx, fxsh_ast_node_t *expr) {
             gen_expr(ctx, expr);
             emit_raw(ctx, ")");
             return;
+        case AST_TUPLE:
+            emit_raw(ctx, "fxsh_box_tuple(");
+            gen_expr(ctx, expr);
+            emit_raw(ctx, ")");
+            return;
         case AST_IDENT: {
             fxsh_type_t *t = lookup_symbol_type(expr->data.ident);
             t = normalize_codegen_type(t);
+            if (t && t->kind == TYPE_RECORD) {
+                emit_raw(ctx, "fxsh_box_ptr((void*)");
+                gen_expr(ctx, expr);
+                emit_raw(ctx, ")");
+                return;
+            }
+            if (t && t->kind == TYPE_TUPLE) {
+                emit_raw(ctx, "fxsh_box_tuple(");
+                gen_expr(ctx, expr);
+                emit_raw(ctx, ")");
+                return;
+            }
             if (t && t->kind == TYPE_CON) {
                 if (sp_str_equal(t->data.con, TYPE_STRING)) {
                     emit_raw(ctx, "fxsh_box_str(");
@@ -1049,6 +1073,21 @@ static void gen_boxed_expr(codegen_ctx_t *ctx, fxsh_ast_node_t *expr) {
             emit_raw(ctx, "))");
             return;
     }
+}
+
+static void gen_tuple(codegen_ctx_t *ctx, fxsh_ast_node_t *ast) {
+    emit_raw(ctx, "({ ");
+    emit_raw(ctx, "fxsh_tuple_t _t = fxsh_tuple_make(");
+    emit_fmt(ctx, "%u", (unsigned)sp_dyn_array_size(ast->data.elements));
+    emit_raw(ctx, "); ");
+    sp_dyn_array_for(ast->data.elements, i) {
+        emit_raw(ctx, "fxsh_tuple_set(&_t, ");
+        emit_fmt(ctx, "%u", (unsigned)i);
+        emit_raw(ctx, ", ");
+        gen_boxed_expr(ctx, ast->data.elements[i]);
+        emit_raw(ctx, "); ");
+    }
+    emit_raw(ctx, "_t; })");
 }
 
 static void gen_record(codegen_ctx_t *ctx, fxsh_ast_node_t *ast) {
@@ -1204,6 +1243,21 @@ static void gen_pattern_bindings(codegen_ctx_t *ctx, fxsh_ast_node_t *pat, const
             }
             break;
         }
+        case AST_PAT_TUPLE: {
+            sp_dyn_array_for(pat->data.elements, i) {
+                fxsh_ast_node_t *sub = pat->data.elements[i];
+                if (!sub)
+                    continue;
+                if (sub->kind == AST_PAT_VAR) {
+                    emit_indent(ctx);
+                    emit_raw(ctx, "__auto_type ");
+                    emit_mangled(ctx, sub->data.ident);
+                    emit_fmt(ctx, " = fxsh_unbox_i64(fxsh_tuple_get(%s, %u));\n", val_name,
+                             (unsigned)i);
+                }
+            }
+            break;
+        }
         default:
             break;
     }
@@ -1264,6 +1318,21 @@ static void gen_boxed_pattern_condition(codegen_ctx_t *ctx, fxsh_ast_node_t *pat
             }
             emit_fmt(ctx, "\", %u) == 0)", (unsigned)pat->data.lit_string.len);
             return;
+        case AST_PAT_TUPLE:
+            emit_fmt(ctx,
+                     "(%s.kind == FXSH_VAL_PTR && fxsh_ptr_is_tuple(%s.as.p) && "
+                     "((fxsh_tuple_t*)%s.as.p)->len == %u",
+                     boxed_expr, boxed_expr, boxed_expr,
+                     (unsigned)sp_dyn_array_size(pat->data.elements));
+            sp_dyn_array_for(pat->data.elements, i) {
+                char sub_box[256];
+                snprintf(sub_box, sizeof(sub_box), "fxsh_tuple_get(*((fxsh_tuple_t*)%s.as.p), %u)",
+                         boxed_expr, (unsigned)i);
+                emit_raw(ctx, " && ");
+                gen_boxed_pattern_condition(ctx, pat->data.elements[i], sub_box);
+            }
+            emit_raw(ctx, ")");
+            return;
         default:
             emit_raw(ctx, "false");
             return;
@@ -1320,6 +1389,17 @@ static void gen_pattern_condition(codegen_ctx_t *ctx, fxsh_ast_node_t *pat, cons
             emit_raw(ctx, ")");
             return;
         }
+        case AST_PAT_TUPLE:
+            emit_fmt(ctx, "(%s.len == %u", val_name,
+                     (unsigned)sp_dyn_array_size(pat->data.elements));
+            sp_dyn_array_for(pat->data.elements, i) {
+                char sub_box[256];
+                snprintf(sub_box, sizeof(sub_box), "fxsh_tuple_get(%s, %u)", val_name, (unsigned)i);
+                emit_raw(ctx, " && ");
+                gen_boxed_pattern_condition(ctx, pat->data.elements[i], sub_box);
+            }
+            emit_raw(ctx, ")");
+            return;
         case AST_PAT_RECORD: {
             emit_raw(ctx, "(true");
             sp_dyn_array_for(pat->data.elements, i) {
@@ -1548,6 +1628,9 @@ static void gen_expr(codegen_ctx_t *ctx, fxsh_ast_node_t *ast) {
         case AST_RECORD:
             gen_record(ctx, ast);
             break;
+        case AST_TUPLE:
+            gen_tuple(ctx, ast);
+            break;
         case AST_FIELD_ACCESS:
             gen_field_access(ctx, ast);
             break;
@@ -1556,12 +1639,6 @@ static void gen_expr(codegen_ctx_t *ctx, fxsh_ast_node_t *ast) {
             break;
         case AST_MATCH:
             gen_match(ctx, ast);
-            break;
-        case AST_TUPLE:
-            if (ast->data.elements && sp_dyn_array_size(ast->data.elements) > 0)
-                gen_expr(ctx, ast->data.elements[0]);
-            else
-                emit_raw(ctx, "0 /* empty tuple */");
             break;
         default:
             emit_fmt(ctx, "0 /* unimplemented node %d */", ast->kind);
@@ -2076,6 +2153,7 @@ static void gen_prelude(codegen_ctx_t *ctx) {
                    "FXSH_VAL_PTR } fxsh_val_kind_t;");
     emit_line(ctx, "typedef struct { fxsh_val_kind_t kind; union { s64 i; f64 f; bool b; sp_str_t "
                    "s; void *p; } as; } fxsh_value_t;");
+    emit_line(ctx, "typedef struct { u32 len; fxsh_value_t *items; } fxsh_tuple_t;");
     emit_line(ctx,
               "typedef struct { u32 len; const char **names; fxsh_value_t *vals; } fxsh_record_t;");
     emit_line(ctx, "");
@@ -2089,11 +2167,31 @@ static void gen_prelude(codegen_ctx_t *ctx) {
                    "FXSH_VAL_STR; x.as.s = v; return x; }");
     emit_line(ctx, "static inline fxsh_value_t fxsh_box_ptr(void *v) { fxsh_value_t x; x.kind = "
                    "FXSH_VAL_PTR; x.as.p = v; return x; }");
+    emit_line(ctx, "static inline fxsh_value_t fxsh_box_tuple(fxsh_tuple_t v) {");
+    emit_line(ctx, "  fxsh_tuple_t *p = (fxsh_tuple_t*)malloc(sizeof(fxsh_tuple_t));");
+    emit_line(ctx, "  if (!p) return fxsh_box_i64(0);");
+    emit_line(ctx, "  *p = v;");
+    emit_line(ctx, "  return fxsh_box_ptr((void*)p);");
+    emit_line(ctx, "}");
+    emit_line(ctx, "static inline bool fxsh_ptr_is_tuple(void *p) { (void)p; return true; }");
     emit_line(ctx, "static inline s64 fxsh_unbox_i64(fxsh_value_t v) {");
     emit_line(ctx, "  if (v.kind == FXSH_VAL_I64) return v.as.i;");
     emit_line(ctx, "  if (v.kind == FXSH_VAL_BOOL) return v.as.b ? 1 : 0;");
     emit_line(ctx, "  if (v.kind == FXSH_VAL_F64) return (s64)v.as.f;");
     emit_line(ctx, "  return 0;");
+    emit_line(ctx, "}");
+    emit_line(ctx, "static inline fxsh_tuple_t fxsh_tuple_make(u32 n) {");
+    emit_line(ctx, "  fxsh_tuple_t t; t.len = n;");
+    emit_line(ctx, "  t.items = (fxsh_value_t *)calloc((size_t)n, sizeof(fxsh_value_t));");
+    emit_line(ctx, "  return t;");
+    emit_line(ctx, "}");
+    emit_line(ctx, "static inline void fxsh_tuple_set(fxsh_tuple_t *t, u32 i, fxsh_value_t v) {");
+    emit_line(ctx, "  if (!t || i >= t->len) return;");
+    emit_line(ctx, "  t->items[i] = v;");
+    emit_line(ctx, "}");
+    emit_line(ctx, "static inline fxsh_value_t fxsh_tuple_get(fxsh_tuple_t t, u32 i) {");
+    emit_line(ctx, "  if (i >= t.len) return fxsh_box_i64(0);");
+    emit_line(ctx, "  return t.items[i];");
     emit_line(ctx, "}");
     emit_line(ctx, "static inline fxsh_record_t fxsh_record_make(u32 n) {");
     emit_line(ctx, "  fxsh_record_t r; r.len = n;");

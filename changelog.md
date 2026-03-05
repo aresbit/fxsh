@@ -136,4 +136,9 @@
     - record patterns now participate in direct native match fallback chain
       (field presence + field literal checks + variable binding support)
     - native-codegen smoke now includes `match_record` and `match_record_literal`.
+  - tuple pattern full-chain increment:
+    - type inference now handles tuple expressions (`AST_TUPLE -> TYPE_TUPLE`)
+    - interpreter/runtime now support tuple runtime values and tuple pattern binding
+    - native-codegen now lowers tuple values (`fxsh_tuple_t`) and tuple pattern checks/bindings
+      in match fallback chain.
 - Added `tests/unit/smoke.c` so `make test` has a baseline executable test target.

@@ -78,6 +78,20 @@ fxsh_rt_value_t *fxsh_rt_record_get(fxsh_rt_value_t *record, sp_str_t field_name
     return NULL;
 }
 
+fxsh_rt_value_t *fxsh_rt_tuple(sp_dyn_array(fxsh_rt_value_t *) items) {
+    fxsh_rt_value_t *v = rt_new(FXSH_RT_TUPLE);
+    v->as.tuple.items = items;
+    return v;
+}
+
+fxsh_rt_value_t *fxsh_rt_tuple_get(fxsh_rt_value_t *tuple, u32 idx) {
+    if (!tuple || tuple->kind != FXSH_RT_TUPLE)
+        return NULL;
+    if (!tuple->as.tuple.items || idx >= sp_dyn_array_size(tuple->as.tuple.items))
+        return NULL;
+    return tuple->as.tuple.items[idx];
+}
+
 fxsh_rt_env_t *fxsh_rt_env_bind(fxsh_rt_env_t *env, sp_str_t name, fxsh_rt_value_t *value) {
     fxsh_rt_env_t *n = (fxsh_rt_env_t *)fxsh_alloc0(sizeof(fxsh_rt_env_t));
     n->name = name;
@@ -129,6 +143,15 @@ bool fxsh_rt_equal(fxsh_rt_value_t *a, fxsh_rt_value_t *b) {
                 fxsh_rt_value_t *av = fxsh_rt_record_get(a, a->as.record.names[i]);
                 fxsh_rt_value_t *bv = fxsh_rt_record_get(b, a->as.record.names[i]);
                 if (!av || !bv || !fxsh_rt_equal(av, bv))
+                    return false;
+            }
+            return true;
+        }
+        case FXSH_RT_TUPLE: {
+            if (sp_dyn_array_size(a->as.tuple.items) != sp_dyn_array_size(b->as.tuple.items))
+                return false;
+            sp_dyn_array_for(a->as.tuple.items, i) {
+                if (!fxsh_rt_equal(a->as.tuple.items[i], b->as.tuple.items[i]))
                     return false;
             }
             return true;
@@ -194,6 +217,20 @@ sp_str_t fxsh_rt_to_string(fxsh_rt_value_t *v) {
                     break;
             }
             snprintf(buf + off, 512 - off, "}");
+            return sp_str_view(buf);
+        }
+        case FXSH_RT_TUPLE: {
+            char *buf = (char *)fxsh_alloc0(512);
+            size_t off = 0;
+            off += (size_t)snprintf(buf + off, 512 - off, "(");
+            sp_dyn_array_for(v->as.tuple.items, i) {
+                sp_str_t s = fxsh_rt_to_string(v->as.tuple.items[i]);
+                off += (size_t)snprintf(buf + off, 512 - off, "%.*s%s", s.len, s.data,
+                                        i + 1 < sp_dyn_array_size(v->as.tuple.items) ? ", " : "");
+                if (off >= 508)
+                    break;
+            }
+            snprintf(buf + off, 512 - off, ")");
             return sp_str_view(buf);
         }
     }

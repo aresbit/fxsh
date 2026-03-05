@@ -580,6 +580,29 @@ fxsh_error_t fxsh_type_unify(fxsh_type_t *t1, fxsh_type_t *t2, fxsh_subst_t *out
         return ERR_OK;
     }
 
+    if (t1->kind == TYPE_TUPLE && t2->kind == TYPE_TUPLE) {
+        if (sp_dyn_array_size(t1->data.tuple) != sp_dyn_array_size(t2->data.tuple)) {
+            fprintf(stderr, "Type error: tuple arity mismatch (%u vs %u)\n",
+                    (unsigned)sp_dyn_array_size(t1->data.tuple),
+                    (unsigned)sp_dyn_array_size(t2->data.tuple));
+            return ERR_TYPE_ERROR;
+        }
+        fxsh_subst_t s_total = SP_NULLPTR;
+        sp_dyn_array_for(t1->data.tuple, i) {
+            fxsh_type_t *a = t1->data.tuple[i];
+            fxsh_type_t *b = t2->data.tuple[i];
+            fxsh_type_apply_subst(s_total, &a);
+            fxsh_type_apply_subst(s_total, &b);
+            fxsh_subst_t se = SP_NULLPTR;
+            fxsh_error_t err = fxsh_type_unify(a, b, &se);
+            if (err != ERR_OK)
+                return err;
+            s_total = compose(se, s_total);
+        }
+        *out_subst = s_total;
+        return ERR_OK;
+    }
+
     if (t1->kind == TYPE_RECORD && t2->kind == TYPE_RECORD) {
         fxsh_subst_t s_total = SP_NULLPTR;
 
@@ -1246,6 +1269,22 @@ static fxsh_error_t infer_expr(fxsh_ast_node_t *ast, fxsh_type_env_t *env,
             *subst = compose(s, *subst);
             fxsh_type_apply_subst(s, &res);
             *out_type = res;
+            return ERR_OK;
+        }
+
+        case AST_TUPLE: {
+            sp_dyn_array(fxsh_type_t *) elems = SP_NULLPTR;
+            sp_dyn_array_for(ast->data.elements, i) {
+                fxsh_type_t *et = NULL;
+                fxsh_error_t err = infer_expr(ast->data.elements[i], env, constr_env, subst, &et);
+                if (err)
+                    return err;
+                sp_dyn_array_push(elems, et);
+            }
+            fxsh_type_t *tt = (fxsh_type_t *)fxsh_alloc0(sizeof(fxsh_type_t));
+            tt->kind = TYPE_TUPLE;
+            tt->data.tuple = elems;
+            *out_type = tt;
             return ERR_OK;
         }
 

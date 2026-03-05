@@ -1,0 +1,7 @@
+# Tuple pattern match smoke
+
+let t = (1, 2)
+let out = match t with
+  | (1, x) -> x + 1
+  | _ -> 0
+end

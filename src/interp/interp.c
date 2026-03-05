@@ -18,6 +18,7 @@ typedef fxsh_rt_env_t rv_env_t;
 #define RV_FUNCTION FXSH_RT_FUNCTION
 #define RV_CONSTR   FXSH_RT_CONSTR
 #define RV_RECORD   FXSH_RT_RECORD
+#define RV_TUPLE    FXSH_RT_TUPLE
 
 #define rv_unit       fxsh_rt_unit
 #define rv_bool       fxsh_rt_bool
@@ -28,6 +29,8 @@ typedef fxsh_rt_env_t rv_env_t;
 #define rv_constr     fxsh_rt_constr
 #define rv_record     fxsh_rt_record
 #define rv_record_get fxsh_rt_record_get
+#define rv_tuple      fxsh_rt_tuple
+#define rv_tuple_get  fxsh_rt_tuple_get
 #define env_bind      fxsh_rt_env_bind
 #define env_lookup    fxsh_rt_env_lookup
 #define rv_equal      fxsh_rt_equal
@@ -56,6 +59,18 @@ static bool bind_pattern(fxsh_ast_node_t *pat, rv_value_t *val, rv_env_t **env) 
                 return false;
             sp_dyn_array_for(pat->data.constr_appl.args, i) {
                 if (!bind_pattern(pat->data.constr_appl.args[i], val->as.constr.args[i], env))
+                    return false;
+            }
+            return true;
+        }
+        case AST_PAT_TUPLE: {
+            if (!val || val->kind != RV_TUPLE)
+                return false;
+            if (sp_dyn_array_size(pat->data.elements) != sp_dyn_array_size(val->as.tuple.items))
+                return false;
+            sp_dyn_array_for(pat->data.elements, i) {
+                rv_value_t *it = rv_tuple_get(val, i);
+                if (!it || !bind_pattern(pat->data.elements[i], it, env))
                     return false;
             }
             return true;
@@ -296,6 +311,16 @@ static rv_value_t *eval_expr(fxsh_ast_node_t *ast, rv_env_t *env, fxsh_error_t *
                 sp_dyn_array_push(args, arg);
             }
             return rv_constr(ast->data.constr_appl.constr_name, args);
+        }
+        case AST_TUPLE: {
+            sp_dyn_array(rv_value_t *) items = SP_NULLPTR;
+            sp_dyn_array_for(ast->data.elements, i) {
+                rv_value_t *it = eval_expr(ast->data.elements[i], env, err);
+                if (!it || *err != ERR_OK)
+                    return NULL;
+                sp_dyn_array_push(items, it);
+            }
+            return rv_tuple(items);
         }
         case AST_RECORD: {
             sp_dyn_array(sp_str_t) names = SP_NULLPTR;
