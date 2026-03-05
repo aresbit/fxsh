@@ -745,6 +745,12 @@ fxsh_type_constructor_t *fxsh_ct_make_vector_ctor(void);
 fxsh_ct_value_t *fxsh_ct_make_vector(fxsh_ct_value_t *elem_type);
 
 /*=============================================================================
+ * Forward Declarations - Interpreter
+ *=============================================================================*/
+
+fxsh_error_t fxsh_interp_eval(fxsh_ast_node_t *ast, sp_str_t *out_value_str);
+
+/*=============================================================================
  * Forward Declarations - Code Generation
  *=============================================================================*/
 

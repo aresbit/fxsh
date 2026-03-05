@@ -182,6 +182,20 @@ int main(int argc, char **argv) {
 
     printf("Type: %s\n", fxsh_type_to_string(type));
 
+    /* Interpreter execution (MVP runtime path) */
+    if (mode != MODE_CODEGEN) {
+        sp_str_t interp_result = {0};
+        err = fxsh_interp_eval(ast, &interp_result);
+        if (err != ERR_OK) {
+            fprintf(stderr, "Runtime error\n");
+            fxsh_ast_free(ast);
+            fxsh_token_array_free(tokens);
+            return 1;
+        }
+        printf("\nInterpreter:\n");
+        printf("  => %.*s\n", interp_result.len, interp_result.data);
+    }
+
     /* Comptime evaluation */
     printf("\nComptime evaluation:\n");
     fxsh_comptime_ctx_t ctx;
@@ -199,13 +213,6 @@ int main(int argc, char **argv) {
                 if (ct_result.error == ERR_OK && ct_result.value) {
                     printf("  comptime %.*s = %s\n", decl->data.let.name.len,
                            decl->data.let.name.data, fxsh_ct_value_to_string(ct_result.value));
-                }
-            }
-            /* Also evaluate regular expressions if they are compile-time computable */
-            else if (mode == MODE_EVAL) {
-                fxsh_ct_result_t ct_result = fxsh_ct_eval(decl, &ctx);
-                if (ct_result.error == ERR_OK && ct_result.value) {
-                    printf("  => %s\n", fxsh_ct_value_to_string(ct_result.value));
                 }
             }
         }

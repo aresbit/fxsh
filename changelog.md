@@ -10,6 +10,10 @@
 - Fixed constructor type instantiation path in type inference for ADT constructor application.
 
 ### Next-stage features (Phase 2 incremental)
+- Added tree-walking interpreter runtime path (MVP execution before native backend):
+  - executes AST directly after type inference
+  - supports `let`/`let rec`/`let-in`, `fn`/call/pipe, ADT constructors and `match`
+  - reports runtime non-exhaustive match as execution error
 - Added function application by juxtaposition syntax: `f x y`.
 - Added parser support for string concat operator token `++` in additive precedence.
 - Added type inference rule for `++` (`string ++ string -> string`).
