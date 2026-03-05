@@ -20,6 +20,7 @@
   - codegen now records constructor->type mapping during ADT generation
   - match codegen emits real `case fxsh_tag_<type>_<ctor>` when constructor can be resolved
   - avoids duplicate `default` labels in generated match switches
+  - added `--native` mode prototype: codegen -> clang compile -> execute generated binary
 - Added function application by juxtaposition syntax: `f x y`.
 - Added parser support for string concat operator token `++` in additive precedence.
 - Added type inference rule for `++` (`string ++ string -> string`).
