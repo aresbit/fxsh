@@ -5,7 +5,7 @@ BIN="${1:-./bin/fxsh}"
 ROOT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)
 cd "$ROOT_DIR"
 
-cases="examples/hello.fxsh examples/regression_stage2.fxsh examples/closure_make_adder.fxsh"
+cases="examples/hello.fxsh examples/regression_stage2.fxsh examples/closure_make_adder.fxsh examples/closure_lexical_scope.fxsh examples/closure_codegen_multi.fxsh examples/closure_codegen_string.fxsh"
 
 for f in $cases; do
   echo "[native-codegen] $f"

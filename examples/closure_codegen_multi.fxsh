@@ -1,0 +1,5 @@
+# Native-codegen closure smoke: multi-parameter inner lambda
+
+let make_calc = fn p -> fn a b -> a + b + p
+let calc = make_calc 3
+let out = calc 10 20

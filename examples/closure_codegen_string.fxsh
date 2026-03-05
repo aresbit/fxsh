@@ -1,0 +1,5 @@
+# Native-codegen closure smoke: non-int closure signature (string -> string)
+
+let mk_greet = fn prefix -> fn name -> prefix ++ name
+let greet = mk_greet "hi "
+let msg = greet "fxsh"
