@@ -127,6 +127,8 @@ static void mangle_into(sp_str_t name, char *buf, size_t buf_sz) {
 static void gen_expr(codegen_ctx_t *ctx, fxsh_ast_node_t *ast);
 static void gen_type_def(codegen_ctx_t *ctx, fxsh_ast_node_t *ast);
 static void emit_c_type_for_fxsh_type(codegen_ctx_t *ctx, sp_str_t name);
+static void emit_closure_type_name(codegen_ctx_t *ctx, sp_str_t root_fn, u32 stage);
+static bool closure_expr_stage_of(fxsh_ast_node_t *expr, sp_str_t *out_root, u32 *out_stage);
 
 /*=============================================================================
  * ADT Type Tracking
@@ -226,6 +228,15 @@ static closure_value_info_t *closure_value_lookup(sp_str_t name) {
             return &g_closure_values[i];
     }
     return NULL;
+}
+
+static u32 closure_values_mark(void) {
+    return (u32)sp_dyn_array_size(g_closure_values);
+}
+
+static void closure_values_pop_to(u32 mark) {
+    while (g_closure_values && sp_dyn_array_size(g_closure_values) > mark)
+        sp_dyn_array_pop(g_closure_values);
 }
 
 static bool is_decl_fn_name(sp_str_t name) {
@@ -906,20 +917,57 @@ static void gen_let_in(codegen_ctx_t *ctx, fxsh_ast_node_t *ast) {
     /* Use GCC statement expression ({ ... }) */
     emit_raw(ctx, "({\n");
     ctx->indent_level++;
+    u32 sym_m = sym_mark();
+    u32 clo_m = closure_values_mark();
     sp_dyn_array_for(ast->data.let_in.bindings, i) {
         fxsh_ast_node_t *b = ast->data.let_in.bindings[i];
         if (b->kind == AST_LET || b->kind == AST_DECL_LET) {
+            char name_buf[256];
+            char idx_buf[32];
+            snprintf(idx_buf, sizeof(idx_buf), "__li%u", ctx->temp_var_counter++);
+            size_t pos = 0;
+            for (u32 j = 0; j < b->data.let.name.len && pos + 2 < sizeof(name_buf); j++) {
+                c8 c = b->data.let.name.data[j];
+                if ((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') ||
+                    c == '_') {
+                    name_buf[pos++] = c;
+                } else {
+                    name_buf[pos++] = '_';
+                }
+            }
+            name_buf[pos] = '\0';
+            strncat(name_buf, idx_buf, sizeof(name_buf) - strlen(name_buf) - 1);
+            sp_str_t cname = make_owned_str(name_buf);
+
+            sp_str_t clo_root = {0};
+            u32 clo_stage = 0;
+            bool is_closure_value = closure_expr_stage_of(b->data.let.value, &clo_root, &clo_stage);
+
             emit_indent(ctx);
-            emit_raw(ctx, "__auto_type ");
-            emit_mangled(ctx, b->data.let.name);
+            if (is_closure_value) {
+                emit_closure_type_name(ctx, clo_root, clo_stage);
+                emit_raw(ctx, " ");
+            } else {
+                emit_raw(ctx, "__auto_type ");
+            }
+            emit_string(ctx, cname);
             emit_raw(ctx, " = ");
             gen_expr(ctx, b->data.let.value);
             emit_raw(ctx, ";\n");
+
+            sym_push_expr(b->data.let.name, cname);
+            if (is_closure_value) {
+                closure_value_info_t cvi = {
+                    .name = b->data.let.name, .root_fn = clo_root, .stage = clo_stage};
+                sp_dyn_array_push(g_closure_values, cvi);
+            }
         }
     }
     emit_indent(ctx);
     gen_expr(ctx, ast->data.let_in.body);
     emit_raw(ctx, ";\n");
+    closure_values_pop_to(clo_m);
+    sym_pop_to(sym_m);
     ctx->indent_level--;
     emit_indent(ctx);
     emit_raw(ctx, "})");

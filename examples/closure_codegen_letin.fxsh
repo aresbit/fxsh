@@ -1,0 +1,7 @@
+# Native-codegen closure smoke: let-in closure alias propagation
+
+let mk = fn x -> fn y -> x + y
+
+let out = let g1 = mk 7 in
+  let g2 = g1 in
+  g2 8

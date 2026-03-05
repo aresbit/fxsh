@@ -82,6 +82,9 @@
   - added closure value propagation for top-level `let`:
     - alias propagation (`let g2 = g1`) retains closure type information
     - stage propagation (`let g2 = g1 arg`) advances to next closure stage type.
+  - extended closure alias/stage propagation into non-top-level `let-in` scope:
+    - local closure aliases inside `let-in` preserve closure stage metadata
+    - local stage advancement (`let s2 = s1 arg`) is tracked for downstream calls.
   - added `make test-native-codegen` smoke suite (`tests/integration/native_codegen.sh`)
     to guard direct native-codegen path on supported subset.
 - Added `tests/unit/smoke.c` so `make test` has a baseline executable test target.
