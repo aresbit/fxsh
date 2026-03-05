@@ -54,4 +54,10 @@
   - string concatenation
 - Added `examples/match.fxsh` to cover constructor/wildcard match patterns and explicit `end`.
 - Added `examples/match_warning.fxsh` to demonstrate match diagnostics.
+- Added closure regression examples:
+  - `examples/closure_make_adder.fxsh` (returned closure captures parameter)
+  - `examples/closure_lexical_scope.fxsh` (lexical scope capture survives shadowing)
+  - `examples/closure_recursion.fxsh` (`let rec` function value recursion)
+- Added `make test-closure` (`tests/integration/closure.sh`) to assert closure behavior in
+  interpreter output.
 - Added `tests/unit/smoke.c` so `make test` has a baseline executable test target.

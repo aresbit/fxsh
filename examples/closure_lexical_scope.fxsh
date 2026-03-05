@@ -1,0 +1,7 @@
+# Closure: lexical scoping should keep the environment at definition site
+
+let base = 10
+let f = fn x -> x + base
+let base = 100
+
+f 5

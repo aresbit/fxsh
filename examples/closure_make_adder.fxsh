@@ -1,0 +1,6 @@
+# Closure: function returns function and captures outer param
+
+let make_adder = fn x -> fn y -> x + y
+let add2 = make_adder 2
+
+add2 40
