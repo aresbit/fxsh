@@ -113,7 +113,11 @@
       `{ age: int; .. 'r }`
     - supports simple type application in annotations (`'a list`).
   - native-codegen now lowers record literal/projection in let-in subset to real C:
-    - record literal emits local C struct expression
-    - field access emits direct C projection (`obj.field`)
-    - covered by `examples/record_codegen_letin*.fxsh` and `make test-native-codegen`.
+    - record literal lowers to `fxsh_record_t` runtime value
+    - field projection lowers via `fxsh_record_get` + unbox path
+    - now covers:
+      - let-in record flows
+      - top-level `let` record binding (`examples/record_codegen_top_let.fxsh`)
+      - record-as-parameter flow (`examples/record_codegen_param.fxsh`)
+    - covered by `examples/record_codegen_*.fxsh` and `make test-native-codegen`.
 - Added `tests/unit/smoke.c` so `make test` has a baseline executable test target.

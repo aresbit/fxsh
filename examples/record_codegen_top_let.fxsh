@@ -1,0 +1,4 @@
+# Native-codegen record smoke: top-level let binds record value
+
+let p = { age = 41, name = "Alice" }
+let out = p.age + 1

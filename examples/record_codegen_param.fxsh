@@ -1,0 +1,4 @@
+# Native-codegen record smoke: record as function parameter
+
+let get_age = fn r -> r.age
+let out = get_age { age = 41, name = "Alice" }

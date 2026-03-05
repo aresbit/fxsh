@@ -301,6 +301,10 @@ static void emit_c_type_for_type(codegen_ctx_t *ctx, fxsh_type_t *t) {
         emit_raw(ctx, "s64");
         return;
     }
+    if (t->kind == TYPE_RECORD) {
+        emit_raw(ctx, "fxsh_record_t");
+        return;
+    }
     if (t->kind == TYPE_ARROW) {
         emit_raw(ctx, "void*");
         return;
@@ -971,43 +975,110 @@ static void emit_c_type_guess_for_expr(codegen_ctx_t *ctx, fxsh_ast_node_t *expr
         case AST_FIELD_ACCESS:
             emit_raw(ctx, "s64");
             return;
+        case AST_RECORD:
+            emit_raw(ctx, "fxsh_record_t");
+            return;
         default:
             emit_raw(ctx, "s64");
             return;
     }
 }
 
+static void gen_boxed_expr(codegen_ctx_t *ctx, fxsh_ast_node_t *expr) {
+    if (!expr) {
+        emit_raw(ctx, "fxsh_box_i64(0)");
+        return;
+    }
+    switch (expr->kind) {
+        case AST_LIT_INT:
+            emit_raw(ctx, "fxsh_box_i64(");
+            gen_expr(ctx, expr);
+            emit_raw(ctx, ")");
+            return;
+        case AST_LIT_FLOAT:
+            emit_raw(ctx, "fxsh_box_f64(");
+            gen_expr(ctx, expr);
+            emit_raw(ctx, ")");
+            return;
+        case AST_LIT_BOOL:
+            emit_raw(ctx, "fxsh_box_bool(");
+            gen_expr(ctx, expr);
+            emit_raw(ctx, ")");
+            return;
+        case AST_LIT_STRING:
+            emit_raw(ctx, "fxsh_box_str(");
+            gen_expr(ctx, expr);
+            emit_raw(ctx, ")");
+            return;
+        case AST_RECORD:
+            emit_raw(ctx, "fxsh_box_ptr((void*)");
+            gen_expr(ctx, expr);
+            emit_raw(ctx, ")");
+            return;
+        case AST_IDENT: {
+            fxsh_type_t *t = lookup_symbol_type(expr->data.ident);
+            t = normalize_codegen_type(t);
+            if (t && t->kind == TYPE_CON) {
+                if (sp_str_equal(t->data.con, TYPE_STRING)) {
+                    emit_raw(ctx, "fxsh_box_str(");
+                    gen_expr(ctx, expr);
+                    emit_raw(ctx, ")");
+                    return;
+                }
+                if (sp_str_equal(t->data.con, TYPE_BOOL)) {
+                    emit_raw(ctx, "fxsh_box_bool(");
+                    gen_expr(ctx, expr);
+                    emit_raw(ctx, ")");
+                    return;
+                }
+                if (sp_str_equal(t->data.con, TYPE_FLOAT)) {
+                    emit_raw(ctx, "fxsh_box_f64(");
+                    gen_expr(ctx, expr);
+                    emit_raw(ctx, ")");
+                    return;
+                }
+            }
+            emit_raw(ctx, "fxsh_box_i64(");
+            gen_expr(ctx, expr);
+            emit_raw(ctx, ")");
+            return;
+        }
+        default:
+            emit_raw(ctx, "fxsh_box_i64((s64)(");
+            gen_expr(ctx, expr);
+            emit_raw(ctx, "))");
+            return;
+    }
+}
+
 static void gen_record(codegen_ctx_t *ctx, fxsh_ast_node_t *ast) {
     emit_raw(ctx, "({ ");
-    emit_fmt(ctx, "struct fxsh_rec_%u { ", ctx->temp_var_counter++);
+    emit_raw(ctx, "fxsh_record_t _r = fxsh_record_make(");
+    emit_fmt(ctx, "%u", (unsigned)sp_dyn_array_size(ast->data.elements));
+    emit_raw(ctx, "); ");
+    u32 rec_id = ctx->temp_var_counter++;
     sp_dyn_array_for(ast->data.elements, i) {
         fxsh_ast_node_t *f = ast->data.elements[i];
         if (!f || f->kind != AST_FIELD_ACCESS)
             continue;
-        emit_c_type_guess_for_expr(ctx, f->data.field.object);
-        emit_raw(ctx, " ");
-        emit_mangled(ctx, f->data.field.field);
-        emit_raw(ctx, "; ");
+        emit_raw(ctx, "fxsh_record_set(&_r, ");
+        emit_fmt(ctx, "%u", (unsigned)i);
+        emit_raw(ctx, ", \"");
+        emit_string(ctx, f->data.field.field);
+        emit_raw(ctx, "\", ");
+        gen_boxed_expr(ctx, f->data.field.object);
+        emit_raw(ctx, "); ");
     }
-    emit_raw(ctx, "} _r = { ");
-    sp_dyn_array_for(ast->data.elements, i) {
-        fxsh_ast_node_t *f = ast->data.elements[i];
-        if (!f || f->kind != AST_FIELD_ACCESS)
-            continue;
-        emit_raw(ctx, ".");
-        emit_mangled(ctx, f->data.field.field);
-        emit_raw(ctx, " = ");
-        gen_expr(ctx, f->data.field.object);
-        emit_raw(ctx, ", ");
-    }
-    emit_raw(ctx, "}; _r; })");
+    (void)rec_id;
+    emit_raw(ctx, "_r; })");
 }
 
 static void gen_field_access(codegen_ctx_t *ctx, fxsh_ast_node_t *ast) {
-    emit_raw(ctx, "(");
+    emit_raw(ctx, "fxsh_unbox_i64(fxsh_record_get(");
     gen_expr(ctx, ast->data.field.object);
-    emit_raw(ctx, ").");
-    emit_mangled(ctx, ast->data.field.field);
+    emit_raw(ctx, ", \"");
+    emit_string(ctx, ast->data.field.field);
+    emit_raw(ctx, "\"))");
 }
 
 static void gen_let_in(codegen_ctx_t *ctx, fxsh_ast_node_t *ast) {
@@ -1805,6 +1876,48 @@ static void gen_prelude(codegen_ctx_t *ctx) {
     emit_line(ctx, "typedef double   f64;");
     emit_line(ctx, "typedef char     c8;");
     emit_line(ctx, "typedef struct { const char *data; u32 len; } sp_str_t;");
+    emit_line(ctx, "typedef enum { FXSH_VAL_I64, FXSH_VAL_F64, FXSH_VAL_BOOL, FXSH_VAL_STR, "
+                   "FXSH_VAL_PTR } fxsh_val_kind_t;");
+    emit_line(ctx, "typedef struct { fxsh_val_kind_t kind; union { s64 i; f64 f; bool b; sp_str_t "
+                   "s; void *p; } as; } fxsh_value_t;");
+    emit_line(ctx,
+              "typedef struct { u32 len; const char **names; fxsh_value_t *vals; } fxsh_record_t;");
+    emit_line(ctx, "");
+    emit_line(ctx, "static inline fxsh_value_t fxsh_box_i64(s64 v) { fxsh_value_t x; x.kind = "
+                   "FXSH_VAL_I64; x.as.i = v; return x; }");
+    emit_line(ctx, "static inline fxsh_value_t fxsh_box_f64(f64 v) { fxsh_value_t x; x.kind = "
+                   "FXSH_VAL_F64; x.as.f = v; return x; }");
+    emit_line(ctx, "static inline fxsh_value_t fxsh_box_bool(bool v) { fxsh_value_t x; x.kind = "
+                   "FXSH_VAL_BOOL; x.as.b = v; return x; }");
+    emit_line(ctx, "static inline fxsh_value_t fxsh_box_str(sp_str_t v) { fxsh_value_t x; x.kind = "
+                   "FXSH_VAL_STR; x.as.s = v; return x; }");
+    emit_line(ctx, "static inline fxsh_value_t fxsh_box_ptr(void *v) { fxsh_value_t x; x.kind = "
+                   "FXSH_VAL_PTR; x.as.p = v; return x; }");
+    emit_line(ctx, "static inline s64 fxsh_unbox_i64(fxsh_value_t v) {");
+    emit_line(ctx, "  if (v.kind == FXSH_VAL_I64) return v.as.i;");
+    emit_line(ctx, "  if (v.kind == FXSH_VAL_BOOL) return v.as.b ? 1 : 0;");
+    emit_line(ctx, "  if (v.kind == FXSH_VAL_F64) return (s64)v.as.f;");
+    emit_line(ctx, "  return 0;");
+    emit_line(ctx, "}");
+    emit_line(ctx, "static inline fxsh_record_t fxsh_record_make(u32 n) {");
+    emit_line(ctx, "  fxsh_record_t r; r.len = n;");
+    emit_line(ctx, "  r.names = (const char **)calloc((size_t)n, sizeof(const char *));");
+    emit_line(ctx, "  r.vals  = (fxsh_value_t *)calloc((size_t)n, sizeof(fxsh_value_t));");
+    emit_line(ctx, "  return r;");
+    emit_line(ctx, "}");
+    emit_line(ctx, "static inline void fxsh_record_set(fxsh_record_t *r, u32 i, const char *name, "
+                   "fxsh_value_t v) {");
+    emit_line(ctx, "  if (!r || i >= r->len) return;");
+    emit_line(ctx, "  r->names[i] = name;");
+    emit_line(ctx, "  r->vals[i] = v;");
+    emit_line(ctx, "}");
+    emit_line(ctx,
+              "static inline fxsh_value_t fxsh_record_get(fxsh_record_t r, const char *name) {");
+    emit_line(ctx, "  for (u32 i = 0; i < r.len; i++) {");
+    emit_line(ctx, "    if (r.names[i] && strcmp(r.names[i], name) == 0) return r.vals[i];");
+    emit_line(ctx, "  }");
+    emit_line(ctx, "  return fxsh_box_i64(0);");
+    emit_line(ctx, "}");
     emit_line(ctx, "");
     emit_line(ctx, "static inline sp_str_t fxsh_str_concat(sp_str_t a, sp_str_t b) {");
     emit_line(ctx, "  u32 n = a.len + b.len;");
