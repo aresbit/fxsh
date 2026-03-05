@@ -127,6 +127,12 @@ static void gen_type_def(codegen_ctx_t *ctx, fxsh_ast_node_t *ast);
 /* Track registered ADT type names to resolve cross-references */
 static sp_dyn_array(sp_str_t) g_adt_type_names = SP_NULLPTR;
 
+typedef struct {
+    sp_str_t constr_name;
+    sp_str_t type_name;
+} adt_constr_entry_t;
+static sp_dyn_array(adt_constr_entry_t) g_adt_constrs = SP_NULLPTR;
+
 /* Track ADT-typed global let bindings that need runtime init */
 typedef struct {
     sp_str_t c_name;        /* mangled variable name */
@@ -140,6 +146,14 @@ static bool is_known_adt(sp_str_t name) {
         return false;
     sp_dyn_array_for(g_adt_type_names, i) if (sp_str_equal(g_adt_type_names[i], name)) return true;
     return false;
+}
+
+static sp_str_t adt_type_of_constructor(sp_str_t constr) {
+    sp_dyn_array_for(g_adt_constrs, i) {
+        if (sp_str_equal(g_adt_constrs[i].constr_name, constr))
+            return g_adt_constrs[i].type_name;
+    }
+    return (sp_str_t){0};
 }
 
 /*=============================================================================
@@ -199,6 +213,8 @@ static void gen_type_def_struct(codegen_ctx_t *ctx, fxsh_ast_node_t *ast) {
         fxsh_ast_node_t *c = constrs[i];
         if (c->kind != AST_DATA_CONSTR)
             continue;
+        adt_constr_entry_t ce = {.constr_name = c->data.data_constr.name, .type_name = type_name};
+        sp_dyn_array_push(g_adt_constrs, ce);
         emit_indent(ctx);
         emit_raw(ctx, "fxsh_tag_");
         emit_mangled(ctx, type_name);
@@ -562,10 +578,11 @@ static void gen_match(codegen_ctx_t *ctx, fxsh_ast_node_t *ast) {
     emit_raw(ctx, ";\n");
 
     emit_indent(ctx);
-    emit_raw(ctx, "__auto_type _match_res = _match_val; /* placeholder */\n");
+    emit_raw(ctx, "__auto_type _match_res = 0; /* placeholder */\n");
     emit_indent(ctx);
     emit_raw(ctx, "switch (_match_val.tag) {\n");
     ctx->indent_level++;
+    bool emitted_default = false;
 
     sp_dyn_array_for(ast->data.match_expr.arms, i) {
         fxsh_ast_node_t *arm = ast->data.match_expr.arms[i];
@@ -576,20 +593,34 @@ static void gen_match(codegen_ctx_t *ctx, fxsh_ast_node_t *ast) {
         emit_indent(ctx);
 
         if (pat->kind == AST_PAT_WILD || pat->kind == AST_PAT_VAR) {
+            if (emitted_default)
+                continue;
             emit_raw(ctx, "default: {\n");
+            emitted_default = true;
         } else if (pat->kind == AST_PAT_CONSTR) {
-            /* We need the type name to form the tag enum member.
-             * Since we don't have type info here, use a heuristic:
-             * scan g_adt_type_names to find which ADT has this constructor.
-             * TODO: pass constr_env to codegen for proper resolution. */
-            emit_raw(ctx, "case 0 /* fxsh_tag_<T>_");
-            emit_mangled(ctx, pat->data.constr_appl.constr_name);
-            emit_raw(ctx, " */: {\n");
+            sp_str_t tname = adt_type_of_constructor(pat->data.constr_appl.constr_name);
+            if (tname.len == 0) {
+                if (emitted_default)
+                    continue;
+                emit_raw(ctx, "default: {\n");
+                emitted_default = true;
+            } else {
+                emit_raw(ctx, "case fxsh_tag_");
+                emit_mangled(ctx, tname);
+                emit_raw(ctx, "_");
+                emit_mangled(ctx, pat->data.constr_appl.constr_name);
+                emit_raw(ctx, ": {\n");
+            }
         } else if (pat->kind == AST_PAT_LIT) {
-            emit_raw(ctx, "/* lit pattern — use if-chain in real impl */\n");
+            if (emitted_default)
+                continue;
             emit_raw(ctx, "default: {\n");
+            emitted_default = true;
         } else {
+            if (emitted_default)
+                continue;
             emit_raw(ctx, "default: {\n");
+            emitted_default = true;
         }
         ctx->indent_level++;
 
