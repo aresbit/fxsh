@@ -688,6 +688,22 @@ static void gen_binary(codegen_ctx_t *ctx, fxsh_ast_node_t *ast) {
         emit_raw(ctx, ")");
         return;
     }
+    if (ast->data.binary.op == TOK_EQ || ast->data.binary.op == TOK_NEQ) {
+        bool str_cmp = (ast->data.binary.left && ast->data.binary.left->kind == AST_LIT_STRING) ||
+                       (ast->data.binary.right && ast->data.binary.right->kind == AST_LIT_STRING);
+        if (str_cmp) {
+            if (ast->data.binary.op == TOK_NEQ)
+                emit_raw(ctx, "(!");
+            emit_raw(ctx, "fxsh_str_eq(");
+            gen_expr(ctx, ast->data.binary.left);
+            emit_raw(ctx, ", ");
+            gen_expr(ctx, ast->data.binary.right);
+            emit_raw(ctx, ")");
+            if (ast->data.binary.op == TOK_NEQ)
+                emit_raw(ctx, ")");
+            return;
+        }
+    }
     const char *op = (ast->data.binary.op < (int)(sizeof(ops) / sizeof(ops[0])))
                          ? ops[ast->data.binary.op]
                          : " /* ? */ ";
@@ -1197,7 +1213,61 @@ static void gen_constr_appl(codegen_ctx_t *ctx, fxsh_ast_node_t *ast) {
  *=============================================================================*/
 
 /* Generate code to bind pattern variables from `val_name` */
-static void gen_pattern_bindings(codegen_ctx_t *ctx, fxsh_ast_node_t *pat, const char *val_name) {
+static fxsh_type_t *guess_expr_type_for_codegen(fxsh_ast_node_t *expr);
+
+static fxsh_type_t *tuple_elem_type_hint(fxsh_type_t *t, u32 idx) {
+    if (!t)
+        return NULL;
+    t = normalize_codegen_type(t);
+    if (!t || t->kind != TYPE_TUPLE)
+        return NULL;
+    if (idx >= sp_dyn_array_size(t->data.tuple))
+        return NULL;
+    return t->data.tuple[idx];
+}
+
+static fxsh_type_t *record_field_type_hint(fxsh_type_t *t, sp_str_t field) {
+    if (!t)
+        return NULL;
+    t = normalize_codegen_type(t);
+    if (!t || t->kind != TYPE_RECORD)
+        return NULL;
+    sp_dyn_array_for(t->data.record.fields, i) {
+        if (sp_str_equal(t->data.record.fields[i].name, field))
+            return t->data.record.fields[i].type;
+    }
+    return NULL;
+}
+
+static void emit_unbox_from_boxed(codegen_ctx_t *ctx, fxsh_type_t *hint_t, const char *boxed_expr) {
+    hint_t = normalize_codegen_type(hint_t);
+    if (hint_t && hint_t->kind == TYPE_CON) {
+        if (sp_str_equal(hint_t->data.con, TYPE_FLOAT)) {
+            emit_raw(ctx, "fxsh_unbox_f64(");
+            emit_raw(ctx, boxed_expr);
+            emit_raw(ctx, ")");
+            return;
+        }
+        if (sp_str_equal(hint_t->data.con, TYPE_BOOL)) {
+            emit_raw(ctx, "fxsh_unbox_bool(");
+            emit_raw(ctx, boxed_expr);
+            emit_raw(ctx, ")");
+            return;
+        }
+        if (sp_str_equal(hint_t->data.con, TYPE_STRING)) {
+            emit_raw(ctx, "fxsh_unbox_str(");
+            emit_raw(ctx, boxed_expr);
+            emit_raw(ctx, ")");
+            return;
+        }
+    }
+    emit_raw(ctx, "fxsh_unbox_i64(");
+    emit_raw(ctx, boxed_expr);
+    emit_raw(ctx, ")");
+}
+
+static void gen_pattern_bindings(codegen_ctx_t *ctx, fxsh_ast_node_t *pat, const char *val_name,
+                                 bool val_is_boxed, fxsh_type_t *hint_t) {
     if (!pat)
         return;
     switch (pat->kind) {
@@ -1206,7 +1276,12 @@ static void gen_pattern_bindings(codegen_ctx_t *ctx, fxsh_ast_node_t *pat, const
             emit_indent(ctx);
             emit_raw(ctx, "__auto_type ");
             emit_mangled(ctx, pat->data.ident);
-            emit_fmt(ctx, " = %s;\n", val_name);
+            emit_raw(ctx, " = ");
+            if (val_is_boxed)
+                emit_unbox_from_boxed(ctx, hint_t, val_name);
+            else
+                emit_raw(ctx, val_name);
+            emit_raw(ctx, ";\n");
             break;
         case AST_PAT_WILD:
             /* nothing */
@@ -1220,7 +1295,7 @@ static void gen_pattern_bindings(codegen_ctx_t *ctx, fxsh_ast_node_t *pat, const
                 char field_expr[256];
                 snprintf(field_expr, sizeof(field_expr), "%s.data.%s._%u", val_name, cname_buf,
                          (unsigned)j);
-                gen_pattern_bindings(ctx, pat->data.constr_appl.args[j], field_expr);
+                gen_pattern_bindings(ctx, pat->data.constr_appl.args[j], field_expr, false, NULL);
             }
             break;
         }
@@ -1229,17 +1304,11 @@ static void gen_pattern_bindings(codegen_ctx_t *ctx, fxsh_ast_node_t *pat, const
                 fxsh_ast_node_t *f = pat->data.elements[i];
                 if (!f || f->kind != AST_FIELD_ACCESS || !f->data.field.object)
                     continue;
-                fxsh_ast_node_t *sub = f->data.field.object;
-                if (sub->kind == AST_PAT_VAR) {
-                    emit_indent(ctx);
-                    emit_raw(ctx, "__auto_type ");
-                    emit_mangled(ctx, sub->data.ident);
-                    emit_raw(ctx, " = fxsh_unbox_i64(fxsh_record_get(");
-                    emit_string(ctx, (sp_str_t){.data = val_name, .len = (u32)strlen(val_name)});
-                    emit_raw(ctx, ", \"");
-                    emit_string(ctx, f->data.field.field);
-                    emit_raw(ctx, "\"));\n");
-                }
+                char sub_expr[256];
+                snprintf(sub_expr, sizeof(sub_expr), "fxsh_record_get(%s, \"%.*s\")", val_name,
+                         f->data.field.field.len, f->data.field.field.data);
+                fxsh_type_t *sub_hint = record_field_type_hint(hint_t, f->data.field.field);
+                gen_pattern_bindings(ctx, f->data.field.object, sub_expr, true, sub_hint);
             }
             break;
         }
@@ -1248,13 +1317,11 @@ static void gen_pattern_bindings(codegen_ctx_t *ctx, fxsh_ast_node_t *pat, const
                 fxsh_ast_node_t *sub = pat->data.elements[i];
                 if (!sub)
                     continue;
-                if (sub->kind == AST_PAT_VAR) {
-                    emit_indent(ctx);
-                    emit_raw(ctx, "__auto_type ");
-                    emit_mangled(ctx, sub->data.ident);
-                    emit_fmt(ctx, " = fxsh_unbox_i64(fxsh_tuple_get(%s, %u));\n", val_name,
-                             (unsigned)i);
-                }
+                char sub_expr[256];
+                snprintf(sub_expr, sizeof(sub_expr), "fxsh_tuple_get(%s, %u)", val_name,
+                         (unsigned)i);
+                fxsh_type_t *sub_hint = tuple_elem_type_hint(hint_t, (u32)i);
+                gen_pattern_bindings(ctx, sub, sub_expr, true, sub_hint);
             }
             break;
         }
@@ -1446,6 +1513,7 @@ static void gen_match(codegen_ctx_t *ctx, fxsh_ast_node_t *ast) {
     emit_raw(ctx, "__auto_type _match_val = ");
     gen_expr(ctx, ast->data.match_expr.expr);
     emit_raw(ctx, ";\n");
+    fxsh_type_t *match_t_hint = guess_expr_type_for_codegen(ast->data.match_expr.expr);
 
     emit_indent(ctx);
     emit_raw(ctx, "__auto_type _match_res = 0; /* placeholder */\n");
@@ -1504,7 +1572,7 @@ static void gen_match(codegen_ctx_t *ctx, fxsh_ast_node_t *ast) {
             }
             ctx->indent_level++;
 
-            gen_pattern_bindings(ctx, pat, "_match_val");
+            gen_pattern_bindings(ctx, pat, "_match_val", false, match_t_hint);
 
             if (arm->data.match_arm.guard) {
                 emit_indent(ctx);
@@ -1543,7 +1611,7 @@ static void gen_match(codegen_ctx_t *ctx, fxsh_ast_node_t *ast) {
             emit_raw(ctx, ")) {\n");
             ctx->indent_level++;
 
-            gen_pattern_bindings(ctx, pat, "_match_val");
+            gen_pattern_bindings(ctx, pat, "_match_val", false, match_t_hint);
 
             if (arm->data.match_arm.guard) {
                 emit_indent(ctx);
@@ -1577,6 +1645,68 @@ static void gen_match(codegen_ctx_t *ctx, fxsh_ast_node_t *ast) {
     emit_indent(ctx);
     emit_raw(ctx, "})");
     sp_dyn_array_free(emitted_ctors);
+}
+
+static fxsh_type_t *type_from_literal_expr(fxsh_ast_node_t *expr) {
+    if (!expr)
+        return NULL;
+    switch (expr->kind) {
+        case AST_LIT_INT:
+            return fxsh_type_con(TYPE_INT);
+        case AST_LIT_FLOAT:
+            return fxsh_type_con(TYPE_FLOAT);
+        case AST_LIT_BOOL:
+            return fxsh_type_con(TYPE_BOOL);
+        case AST_LIT_STRING:
+            return fxsh_type_con(TYPE_STRING);
+        case AST_LIT_UNIT:
+            return fxsh_type_con(TYPE_UNIT);
+        default:
+            return NULL;
+    }
+}
+
+static fxsh_type_t *guess_expr_type_for_codegen(fxsh_ast_node_t *expr) {
+    if (!expr)
+        return NULL;
+    if (expr->kind == AST_IDENT)
+        return lookup_symbol_type(expr->data.ident);
+    if (expr->kind == AST_TUPLE) {
+        sp_dyn_array(fxsh_type_t *) elems = SP_NULLPTR;
+        sp_dyn_array_for(expr->data.elements, i) {
+            fxsh_type_t *et = guess_expr_type_for_codegen(expr->data.elements[i]);
+            if (!et)
+                et = type_from_literal_expr(expr->data.elements[i]);
+            if (!et)
+                et = fxsh_type_con(TYPE_INT);
+            sp_dyn_array_push(elems, et);
+        }
+        fxsh_type_t *tt = (fxsh_type_t *)fxsh_alloc0(sizeof(fxsh_type_t));
+        tt->kind = TYPE_TUPLE;
+        tt->data.tuple = elems;
+        return tt;
+    }
+    if (expr->kind == AST_RECORD) {
+        sp_dyn_array(fxsh_field_t) fields = SP_NULLPTR;
+        sp_dyn_array_for(expr->data.elements, i) {
+            fxsh_ast_node_t *f = expr->data.elements[i];
+            if (!f || f->kind != AST_FIELD_ACCESS)
+                continue;
+            fxsh_type_t *ft = guess_expr_type_for_codegen(f->data.field.object);
+            if (!ft)
+                ft = type_from_literal_expr(f->data.field.object);
+            if (!ft)
+                ft = fxsh_type_con(TYPE_INT);
+            fxsh_field_t rf = {.name = f->data.field.field, .type = ft};
+            sp_dyn_array_push(fields, rf);
+        }
+        fxsh_type_t *rt = (fxsh_type_t *)fxsh_alloc0(sizeof(fxsh_type_t));
+        rt->kind = TYPE_RECORD;
+        rt->data.record.fields = fields;
+        rt->data.record.row_var = -1;
+        return rt;
+    }
+    return type_from_literal_expr(expr);
 }
 
 static void gen_expr(codegen_ctx_t *ctx, fxsh_ast_node_t *ast) {
@@ -2157,6 +2287,10 @@ static void gen_prelude(codegen_ctx_t *ctx) {
     emit_line(ctx,
               "typedef struct { u32 len; const char **names; fxsh_value_t *vals; } fxsh_record_t;");
     emit_line(ctx, "");
+    emit_line(ctx, "static inline bool fxsh_str_eq(sp_str_t a, sp_str_t b) {");
+    emit_line(ctx, "  return a.len == b.len && strncmp(a.data, b.data, a.len) == 0;");
+    emit_line(ctx, "}");
+    emit_line(ctx, "");
     emit_line(ctx, "static inline fxsh_value_t fxsh_box_i64(s64 v) { fxsh_value_t x; x.kind = "
                    "FXSH_VAL_I64; x.as.i = v; return x; }");
     emit_line(ctx, "static inline fxsh_value_t fxsh_box_f64(f64 v) { fxsh_value_t x; x.kind = "
@@ -2179,6 +2313,22 @@ static void gen_prelude(codegen_ctx_t *ctx) {
     emit_line(ctx, "  if (v.kind == FXSH_VAL_BOOL) return v.as.b ? 1 : 0;");
     emit_line(ctx, "  if (v.kind == FXSH_VAL_F64) return (s64)v.as.f;");
     emit_line(ctx, "  return 0;");
+    emit_line(ctx, "}");
+    emit_line(ctx, "static inline f64 fxsh_unbox_f64(fxsh_value_t v) {");
+    emit_line(ctx, "  if (v.kind == FXSH_VAL_F64) return v.as.f;");
+    emit_line(ctx, "  if (v.kind == FXSH_VAL_I64) return (f64)v.as.i;");
+    emit_line(ctx, "  if (v.kind == FXSH_VAL_BOOL) return v.as.b ? 1.0 : 0.0;");
+    emit_line(ctx, "  return 0.0;");
+    emit_line(ctx, "}");
+    emit_line(ctx, "static inline bool fxsh_unbox_bool(fxsh_value_t v) {");
+    emit_line(ctx, "  if (v.kind == FXSH_VAL_BOOL) return v.as.b;");
+    emit_line(ctx, "  if (v.kind == FXSH_VAL_I64) return v.as.i != 0;");
+    emit_line(ctx, "  if (v.kind == FXSH_VAL_F64) return v.as.f != 0.0;");
+    emit_line(ctx, "  return false;");
+    emit_line(ctx, "}");
+    emit_line(ctx, "static inline sp_str_t fxsh_unbox_str(fxsh_value_t v) {");
+    emit_line(ctx, "  if (v.kind == FXSH_VAL_STR) return v.as.s;");
+    emit_line(ctx, "  return (sp_str_t){ .data = \"\", .len = 0 };");
     emit_line(ctx, "}");
     emit_line(ctx, "static inline fxsh_tuple_t fxsh_tuple_make(u32 n) {");
     emit_line(ctx, "  fxsh_tuple_t t; t.len = n;");

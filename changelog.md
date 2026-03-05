@@ -141,4 +141,9 @@
     - interpreter/runtime now support tuple runtime values and tuple pattern binding
     - native-codegen now lowers tuple values (`fxsh_tuple_t`) and tuple pattern checks/bindings
       in match fallback chain.
+  - native-codegen pattern binding now selects unbox path by inferred basic type hint for
+    tuple/record pattern variables:
+    - supports `int` / `float` / `bool` / `string` bindings
+    - covered by `examples/match_tuple_basic_types.fxsh` and
+      `examples/match_record_basic_types.fxsh`.
 - Added `tests/unit/smoke.c` so `make test` has a baseline executable test target.

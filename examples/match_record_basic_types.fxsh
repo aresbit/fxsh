@@ -1,0 +1,8 @@
+# Record pattern binding for float/bool/string
+
+let r = { f = 1.5, b = true, s = "ok" }
+let out = match r with
+  | { f = fv, b = bv, s = sv } ->
+      if bv and (sv == "ok") and (fv == 1.5) then 1 else 0
+  | _ -> 0
+end
