@@ -93,6 +93,11 @@ test-integration: $(NAME)
 		fi; \
 	done
 
+.PHONY: test-consistency
+test-consistency: $(NAME)
+	@echo "Running interpreter/native consistency smoke tests..."
+	@sh $(TESTS_DIR)/integration/consistency.sh ./$(BIN_DIR)/$(NAME)
+
 # Run linter
 .PHONY: lint
 lint:
@@ -155,6 +160,7 @@ help:
 	@echo "  make debug=1      - Build with debug symbols"
 	@echo "  make test         - Run unit tests"
 	@echo "  make test-integration - Run integration tests"
+	@echo "  make test-consistency - Run interpreter/native consistency smoke tests"
 	@echo "  make lint         - Run static analysis"
 	@echo "  make format       - Format code"
 	@echo "  make check        - Run memory checks"

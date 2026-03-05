@@ -119,6 +119,7 @@ static void mangle_into(sp_str_t name, char *buf, size_t buf_sz) {
 
 static void gen_expr(codegen_ctx_t *ctx, fxsh_ast_node_t *ast);
 static void gen_type_def(codegen_ctx_t *ctx, fxsh_ast_node_t *ast);
+static void emit_c_type_for_fxsh_type(codegen_ctx_t *ctx, sp_str_t name);
 
 /*=============================================================================
  * ADT Type Tracking
@@ -132,6 +133,9 @@ typedef struct {
     sp_str_t type_name;
 } adt_constr_entry_t;
 static sp_dyn_array(adt_constr_entry_t) g_adt_constrs = SP_NULLPTR;
+static sp_dyn_array(fxsh_ast_node_t *) g_main_lets = SP_NULLPTR;
+static sp_dyn_array(sp_str_t) g_lambda_fn_names = SP_NULLPTR;
+static fxsh_type_env_t g_codegen_type_env = SP_NULLPTR;
 
 /* Track ADT-typed global let bindings that need runtime init */
 typedef struct {
@@ -154,6 +158,71 @@ static sp_str_t adt_type_of_constructor(sp_str_t constr) {
             return g_adt_constrs[i].type_name;
     }
     return (sp_str_t){0};
+}
+
+static bool is_lambda_fn_name(sp_str_t name) {
+    sp_dyn_array_for(g_lambda_fn_names, i) {
+        if (sp_str_equal(g_lambda_fn_names[i], name))
+            return true;
+    }
+    return false;
+}
+
+static fxsh_type_t *lookup_symbol_type(sp_str_t name) {
+    fxsh_tenv_node_t *n = (fxsh_tenv_node_t *)g_codegen_type_env;
+    while (n) {
+        if (sp_str_equal(n->name, name))
+            return n->scheme ? n->scheme->type : NULL;
+        n = n->next;
+    }
+    return NULL;
+}
+
+static fxsh_type_t *normalize_codegen_type(fxsh_type_t *t) {
+    while (t && t->kind == TYPE_APP) {
+        t = t->data.app.con;
+    }
+    return t;
+}
+
+static void emit_c_type_for_type(codegen_ctx_t *ctx, fxsh_type_t *t) {
+    t = normalize_codegen_type(t);
+    if (!t) {
+        emit_raw(ctx, "s64");
+        return;
+    }
+    if (t->kind == TYPE_CON) {
+        emit_c_type_for_fxsh_type(ctx, t->data.con);
+        return;
+    }
+    if (t->kind == TYPE_VAR) {
+        emit_raw(ctx, "s64");
+        return;
+    }
+    if (t->kind == TYPE_ARROW) {
+        emit_raw(ctx, "void*");
+        return;
+    }
+    emit_raw(ctx, "s64");
+}
+
+static fxsh_type_t *nth_param_type(fxsh_type_t *fn_t, u32 idx) {
+    fxsh_type_t *cur = fn_t;
+    for (u32 i = 0; i < idx; i++) {
+        if (!cur || cur->kind != TYPE_ARROW)
+            return NULL;
+        cur = cur->data.arrow.ret;
+    }
+    if (!cur || cur->kind != TYPE_ARROW)
+        return NULL;
+    return cur->data.arrow.param;
+}
+
+static fxsh_type_t *return_type_of_fn(fxsh_type_t *fn_t) {
+    fxsh_type_t *cur = fn_t;
+    while (cur && cur->kind == TYPE_ARROW)
+        cur = cur->data.arrow.ret;
+    return cur;
 }
 
 /*=============================================================================
@@ -392,14 +461,14 @@ static void gen_literal(codegen_ctx_t *ctx, fxsh_ast_node_t *ast) {
             emit_raw(ctx, ast->data.lit_bool ? "true" : "false");
             break;
         case AST_LIT_STRING:
-            sp_dyn_array_push(*ctx->output, '"');
+            emit_raw(ctx, "((sp_str_t){ .data = \"");
             for (u32 i = 0; i < ast->data.lit_string.len; i++) {
                 c8 c = ast->data.lit_string.data[i];
                 if (c == '"' || c == '\\')
                     sp_dyn_array_push(*ctx->output, '\\');
                 sp_dyn_array_push(*ctx->output, c);
             }
-            sp_dyn_array_push(*ctx->output, '"');
+            emit_fmt(ctx, "\", .len = %u })", (unsigned)ast->data.lit_string.len);
             break;
         case AST_LIT_UNIT:
             emit_raw(ctx, "0 /* unit */");
@@ -420,6 +489,14 @@ static void gen_binary(codegen_ctx_t *ctx, fxsh_ast_node_t *ast) {
         [TOK_GT] = " > ",      [TOK_LEQ] = " <= ",  [TOK_GEQ] = " >= ", [TOK_AND] = " && ",
         [TOK_OR] = " || ",
     };
+    if (ast->data.binary.op == TOK_CONCAT) {
+        emit_raw(ctx, "fxsh_str_concat(");
+        gen_expr(ctx, ast->data.binary.left);
+        emit_raw(ctx, ", ");
+        gen_expr(ctx, ast->data.binary.right);
+        emit_raw(ctx, ")");
+        return;
+    }
     const char *op = (ast->data.binary.op < (int)(sizeof(ops) / sizeof(ops[0])))
                          ? ops[ast->data.binary.op]
                          : " /* ? */ ";
@@ -458,14 +535,28 @@ static void gen_if(codegen_ctx_t *ctx, fxsh_ast_node_t *ast) {
 }
 
 static void gen_call(codegen_ctx_t *ctx, fxsh_ast_node_t *ast) {
-    gen_expr(ctx, ast->data.call.func);
+    fxsh_ast_list_t flat_args = SP_NULLPTR;
+    fxsh_ast_node_t *func = ast;
+    while (func && func->kind == AST_CALL) {
+        sp_dyn_array_for(func->data.call.args, i) {
+            sp_dyn_array_push(flat_args, func->data.call.args[i]);
+        }
+        func = func->data.call.func;
+    }
+    if (!func) {
+        emit_raw(ctx, "0 /* bad call */");
+        sp_dyn_array_free(flat_args);
+        return;
+    }
+    gen_expr(ctx, func);
     sp_dyn_array_push(*ctx->output, '(');
-    sp_dyn_array_for(ast->data.call.args, i) {
-        if (i > 0)
+    for (s32 i = (s32)sp_dyn_array_size(flat_args) - 1; i >= 0; i--) {
+        if (i != (s32)sp_dyn_array_size(flat_args) - 1)
             emit_raw(ctx, ", ");
-        gen_expr(ctx, ast->data.call.args[i]);
+        gen_expr(ctx, flat_args[i]);
     }
     sp_dyn_array_push(*ctx->output, ')');
+    sp_dyn_array_free(flat_args);
 }
 
 /* Lambda: emit a named static function + return its pointer as closure stub */
@@ -569,7 +660,7 @@ static void gen_match(codegen_ctx_t *ctx, fxsh_ast_node_t *ast) {
      *      _r;
      *   })
      */
-    emit_raw(ctx, "__({\n"); /* GCC statement expression */
+    emit_raw(ctx, "({\n"); /* GCC statement expression */
     ctx->indent_level++;
 
     emit_indent(ctx);
@@ -583,6 +674,7 @@ static void gen_match(codegen_ctx_t *ctx, fxsh_ast_node_t *ast) {
     emit_raw(ctx, "switch (_match_val.tag) {\n");
     ctx->indent_level++;
     bool emitted_default = false;
+    sp_dyn_array(sp_str_t) emitted_ctors = SP_NULLPTR;
 
     sp_dyn_array_for(ast->data.match_expr.arms, i) {
         fxsh_ast_node_t *arm = ast->data.match_expr.arms[i];
@@ -598,6 +690,16 @@ static void gen_match(codegen_ctx_t *ctx, fxsh_ast_node_t *ast) {
             emit_raw(ctx, "default: {\n");
             emitted_default = true;
         } else if (pat->kind == AST_PAT_CONSTR) {
+            bool seen_ctor = false;
+            sp_dyn_array_for(emitted_ctors, k) {
+                if (sp_str_equal(emitted_ctors[k], pat->data.constr_appl.constr_name)) {
+                    seen_ctor = true;
+                    break;
+                }
+            }
+            if (seen_ctor)
+                continue;
+
             sp_str_t tname = adt_type_of_constructor(pat->data.constr_appl.constr_name);
             if (tname.len == 0) {
                 if (emitted_default)
@@ -605,6 +707,7 @@ static void gen_match(codegen_ctx_t *ctx, fxsh_ast_node_t *ast) {
                 emit_raw(ctx, "default: {\n");
                 emitted_default = true;
             } else {
+                sp_dyn_array_push(emitted_ctors, pat->data.constr_appl.constr_name);
                 emit_raw(ctx, "case fxsh_tag_");
                 emit_mangled(ctx, tname);
                 emit_raw(ctx, "_");
@@ -656,6 +759,7 @@ static void gen_match(codegen_ctx_t *ctx, fxsh_ast_node_t *ast) {
     ctx->indent_level--;
     emit_indent(ctx);
     emit_raw(ctx, "})");
+    sp_dyn_array_free(emitted_ctors);
 }
 
 static void gen_expr(codegen_ctx_t *ctx, fxsh_ast_node_t *ast) {
@@ -672,6 +776,9 @@ static void gen_expr(codegen_ctx_t *ctx, fxsh_ast_node_t *ast) {
             gen_literal(ctx, ast);
             break;
         case AST_IDENT:
+            if (is_lambda_fn_name(ast->data.ident)) {
+                emit_raw(ctx, "fxsh_fn_");
+            }
             emit_mangled(ctx, ast->data.ident);
             break;
         case AST_BINARY:
@@ -718,8 +825,10 @@ static void gen_expr(codegen_ctx_t *ctx, fxsh_ast_node_t *ast) {
  *=============================================================================*/
 
 static void gen_decl_fn(codegen_ctx_t *ctx, fxsh_ast_node_t *ast) {
+    fxsh_type_t *fn_t = lookup_symbol_type(ast->data.decl_fn.name);
     emit_indent(ctx);
-    emit_raw(ctx, "s64 "); /* TODO: use actual return type from TypeEnv */
+    emit_c_type_for_type(ctx, return_type_of_fn(fn_t));
+    emit_raw(ctx, " ");
     emit_mangled(ctx, ast->data.decl_fn.name);
     sp_dyn_array_push(*ctx->output, '(');
     if (sp_dyn_array_size(ast->data.decl_fn.params) == 0) {
@@ -729,11 +838,12 @@ static void gen_decl_fn(codegen_ctx_t *ctx, fxsh_ast_node_t *ast) {
             if (i > 0)
                 emit_raw(ctx, ", ");
             fxsh_ast_node_t *p = ast->data.decl_fn.params[i];
+            emit_c_type_for_type(ctx, nth_param_type(fn_t, (u32)i));
+            emit_raw(ctx, " ");
             if (p->kind == AST_PAT_VAR) {
-                emit_raw(ctx, "s64 ");
                 emit_mangled(ctx, p->data.ident);
             } else {
-                emit_fmt(ctx, "s64 _arg%u", (unsigned)i);
+                emit_fmt(ctx, "_arg%u", (unsigned)i);
             }
         }
     }
@@ -771,31 +881,47 @@ static sp_str_t constr_appl_type_name(fxsh_ast_node_t *v) {
 }
 
 static void gen_decl_let(codegen_ctx_t *ctx, fxsh_ast_node_t *ast) {
-    sp_str_t type_hint = constr_appl_type_name(ast->data.let.value);
-
-    emit_indent(ctx);
-    if (type_hint.len > 0) {
-        emit_raw(ctx, "static fxsh_");
-        emit_mangled(ctx, type_hint);
-        emit_raw(ctx, "_t ");
+    /* Lambda let-binding becomes a C function (no closure capture support yet). */
+    if (ast->data.let.value && ast->data.let.value->kind == AST_LAMBDA) {
+        fxsh_ast_node_t *lam = ast->data.let.value;
+        fxsh_type_t *fn_t = lookup_symbol_type(ast->data.let.name);
+        sp_dyn_array_push(g_lambda_fn_names, ast->data.let.name);
+        emit_indent(ctx);
+        emit_raw(ctx, "static ");
+        emit_c_type_for_type(ctx, return_type_of_fn(fn_t));
+        emit_raw(ctx, " ");
+        emit_raw(ctx, "fxsh_fn_");
         emit_mangled(ctx, ast->data.let.name);
-        emit_raw(ctx, "; /* init in fxsh_init() */\n");
-        char cn[128], tn[128];
-        mangle_into(ast->data.let.name, cn, sizeof(cn));
-        mangle_into(type_hint, tn, sizeof(tn));
-        adt_init_t entry = {
-            .c_name = (sp_str_t){.data = cn, .len = (u32)strlen(cn)},
-            .type_name = (sp_str_t){.data = tn, .len = (u32)strlen(tn)},
-            .value = ast->data.let.value,
-        };
-        sp_dyn_array_push(g_adt_inits, entry);
-    } else {
-        emit_raw(ctx, "static __auto_type ");
-        emit_mangled(ctx, ast->data.let.name);
-        emit_raw(ctx, " = ");
-        gen_expr(ctx, ast->data.let.value);
+        emit_raw(ctx, "(");
+        if (!lam->data.lambda.params || sp_dyn_array_size(lam->data.lambda.params) == 0) {
+            emit_raw(ctx, "void");
+        } else {
+            sp_dyn_array_for(lam->data.lambda.params, i) {
+                if (i > 0)
+                    emit_raw(ctx, ", ");
+                emit_c_type_for_type(ctx, nth_param_type(fn_t, (u32)i));
+                emit_raw(ctx, " ");
+                fxsh_ast_node_t *p = lam->data.lambda.params[i];
+                if (p->kind == AST_PAT_VAR || p->kind == AST_IDENT) {
+                    emit_mangled(ctx, p->data.ident);
+                } else {
+                    emit_fmt(ctx, "_arg%u", (unsigned)i);
+                }
+            }
+        }
+        emit_raw(ctx, ") {\n");
+        ctx->indent_level++;
+        emit_indent(ctx);
+        emit_raw(ctx, "return ");
+        gen_expr(ctx, lam->data.lambda.body);
         emit_raw(ctx, ";\n");
+        ctx->indent_level--;
+        emit_line(ctx, "}");
+        emit_raw(ctx, "\n");
+        return;
     }
+
+    sp_dyn_array_push(g_main_lets, ast);
 }
 
 /*=============================================================================
@@ -807,6 +933,8 @@ static void gen_prelude(codegen_ctx_t *ctx) {
     emit_line(ctx, "#include <stdbool.h>");
     emit_line(ctx, "#include <stdint.h>");
     emit_line(ctx, "#include <stdio.h>");
+    emit_line(ctx, "#include <stdlib.h>");
+    emit_line(ctx, "#include <string.h>");
     emit_line(ctx, "");
     emit_line(ctx, "typedef int64_t  s64;");
     emit_line(ctx, "typedef int32_t  s32;");
@@ -816,8 +944,17 @@ static void gen_prelude(codegen_ctx_t *ctx) {
     emit_line(ctx, "typedef char     c8;");
     emit_line(ctx, "typedef struct { const char *data; u32 len; } sp_str_t;");
     emit_line(ctx, "");
-    emit_line(ctx, "/* Forward: GCC statement-expression helper */");
-    emit_line(ctx, "#define __(x) x");
+    emit_line(ctx, "static inline sp_str_t fxsh_str_concat(sp_str_t a, sp_str_t b) {");
+    emit_line(ctx, "  u32 n = a.len + b.len;");
+    emit_line(ctx, "  char *p = (char *)malloc((size_t)n + 1u);");
+    emit_line(ctx, "  if (!p) return (sp_str_t){ .data = \"\", .len = 0 };");
+    emit_line(ctx, "  memcpy(p, a.data, a.len);");
+    emit_line(ctx, "  memcpy(p + a.len, b.data, b.len);");
+    emit_line(ctx, "  p[n] = '\\0';");
+    emit_line(ctx, "  return (sp_str_t){ .data = p, .len = n };");
+    emit_line(ctx, "}");
+    emit_line(ctx, "");
+    emit_line(ctx, "/* GNU statement-expressions are used in generated expressions. */");
     emit_line(ctx, "");
 }
 
@@ -844,6 +981,17 @@ static void gen_epilogue(codegen_ctx_t *ctx) {
     ctx->indent_level++;
     if (g_adt_inits && sp_dyn_array_size(g_adt_inits) > 0)
         emit_line(ctx, "fxsh_init_globals();");
+    if (g_main_lets) {
+        sp_dyn_array_for(g_main_lets, i) {
+            fxsh_ast_node_t *d = g_main_lets[i];
+            emit_indent(ctx);
+            emit_raw(ctx, "__auto_type ");
+            emit_mangled(ctx, d->data.let.name);
+            emit_raw(ctx, " = ");
+            gen_expr(ctx, d->data.let.value);
+            emit_raw(ctx, ";\n");
+        }
+    }
     emit_line(ctx, "return 0;");
     ctx->indent_level--;
     emit_line(ctx, "}");
@@ -863,6 +1011,20 @@ char *fxsh_codegen(fxsh_ast_node_t *ast) {
     };
     g_adt_type_names = SP_NULLPTR;
     g_adt_inits = SP_NULLPTR;
+    g_main_lets = SP_NULLPTR;
+    g_lambda_fn_names = SP_NULLPTR;
+    g_codegen_type_env = SP_NULLPTR;
+
+    /* Build a type environment so signatures are generated with concrete types. */
+    if (ast) {
+        fxsh_type_env_t tenv = SP_NULLPTR;
+        fxsh_constr_env_t cenv = SP_NULLPTR;
+        fxsh_type_t *program_t = NULL;
+        if (fxsh_type_infer(ast, &tenv, &cenv, &program_t) == ERR_OK)
+            g_codegen_type_env = tenv;
+        (void)cenv;
+        (void)program_t;
+    }
 
     gen_prelude(&ctx);
 
@@ -876,10 +1038,29 @@ char *fxsh_codegen(fxsh_ast_node_t *ast) {
         sp_dyn_array_for(ast->data.decls, i) {
             fxsh_ast_node_t *d = ast->data.decls[i];
             if (d->kind == AST_DECL_FN) {
-                emit_raw(&ctx, "static s64 ");
+                fxsh_type_t *fn_t = lookup_symbol_type(d->data.decl_fn.name);
+                emit_raw(&ctx, "static ");
+                emit_c_type_for_type(&ctx, return_type_of_fn(fn_t));
+                emit_raw(&ctx, " ");
                 emit_mangled(&ctx, d->data.decl_fn.name);
-                emit_raw(&ctx,
-                         sp_dyn_array_size(d->data.decl_fn.params) == 0 ? "(void);\n" : "(...);\n");
+                emit_raw(&ctx, "(");
+                if (sp_dyn_array_size(d->data.decl_fn.params) == 0) {
+                    emit_raw(&ctx, "void");
+                } else {
+                    sp_dyn_array_for(d->data.decl_fn.params, pi) {
+                        if (pi > 0)
+                            emit_raw(&ctx, ", ");
+                        emit_c_type_for_type(&ctx, nth_param_type(fn_t, (u32)pi));
+                        emit_raw(&ctx, " ");
+                        fxsh_ast_node_t *p = d->data.decl_fn.params[pi];
+                        if (p->kind == AST_PAT_VAR) {
+                            emit_mangled(&ctx, p->data.ident);
+                        } else {
+                            emit_fmt(&ctx, "_arg%u", (unsigned)pi);
+                        }
+                    }
+                }
+                emit_raw(&ctx, ");\n");
             }
         }
         emit_raw(&ctx, "\n");

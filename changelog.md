@@ -21,6 +21,13 @@
   - match codegen emits real `case fxsh_tag_<type>_<ctor>` when constructor can be resolved
   - avoids duplicate `default` labels in generated match switches
   - added `--native` mode prototype: codegen -> clang compile -> execute generated binary
+  - added `make test-consistency` smoke suite (`tests/integration/consistency.sh`)
+    to compare interpreter/native exit-code consistency on supported examples.
+  - native codegen now runs internal type inference and emits type-driven C signatures
+    for top-level functions/lambda-lifted `let fn` bindings (instead of fixed `s64`).
+  - native codegen now lowers string literal to `sp_str_t` and `++` to `fxsh_str_concat`.
+  - native codegen now flattens curried calls (`f a b`) into one C call emission.
+  - native consistency suite expanded to include `match/adt/regression_stage2` examples.
 - Added function application by juxtaposition syntax: `f x y`.
 - Added parser support for string concat operator token `++` in additive precedence.
 - Added type inference rule for `++` (`string ++ string -> string`).
