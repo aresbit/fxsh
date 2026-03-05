@@ -70,4 +70,11 @@
   - `--native` now always uses closure-safe native runtime runner by default.
   - `--native-codegen` added for direct C codegen native execution path.
 - `test-consistency` now includes closure regression examples.
+- Native codegen closure work (incremental):
+  - added first-class closure representation for one-argument int closures in generated C
+    (`fxsh_closure1_i64_t` + `fxsh_apply1_i64`).
+  - codegen now lowers nested lambda shape `fn x -> fn y -> <int expr>` into
+    environment struct + closure call target (capturing `x` in heap env).
+  - added `make test-native-codegen` smoke suite (`tests/integration/native_codegen.sh`)
+    to guard direct native-codegen path on supported subset.
 - Added `tests/unit/smoke.c` so `make test` has a baseline executable test target.

@@ -108,6 +108,11 @@ test-closure-native: $(NAME)
 	@echo "Running native closure consistency tests..."
 	@sh $(TESTS_DIR)/integration/closure_native.sh ./$(BIN_DIR)/$(NAME)
 
+.PHONY: test-native-codegen
+test-native-codegen: $(NAME)
+	@echo "Running native-codegen smoke tests..."
+	@sh $(TESTS_DIR)/integration/native_codegen.sh ./$(BIN_DIR)/$(NAME)
+
 # Run linter
 .PHONY: lint
 lint:
@@ -173,6 +178,7 @@ help:
 	@echo "  make test-consistency - Run interpreter/native consistency smoke tests"
 	@echo "  make test-closure - Run closure integration tests (interpreter)"
 	@echo "  make test-closure-native - Run closure consistency tests in native mode"
+	@echo "  make test-native-codegen - Run native-codegen smoke tests"
 	@echo "  make lint         - Run static analysis"
 	@echo "  make format       - Format code"
 	@echo "  make check        - Run memory checks"

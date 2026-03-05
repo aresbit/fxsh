@@ -135,6 +135,8 @@ typedef struct {
 static sp_dyn_array(adt_constr_entry_t) g_adt_constrs = SP_NULLPTR;
 static sp_dyn_array(fxsh_ast_node_t *) g_main_lets = SP_NULLPTR;
 static sp_dyn_array(sp_str_t) g_lambda_fn_names = SP_NULLPTR;
+static sp_dyn_array(sp_str_t) g_closure_fn_names = SP_NULLPTR;
+static sp_dyn_array(sp_str_t) g_decl_fn_names = SP_NULLPTR;
 static fxsh_type_env_t g_codegen_type_env = SP_NULLPTR;
 
 /* Track ADT-typed global let bindings that need runtime init */
@@ -163,6 +165,22 @@ static sp_str_t adt_type_of_constructor(sp_str_t constr) {
 static bool is_lambda_fn_name(sp_str_t name) {
     sp_dyn_array_for(g_lambda_fn_names, i) {
         if (sp_str_equal(g_lambda_fn_names[i], name))
+            return true;
+    }
+    return false;
+}
+
+static bool is_closure_fn_name(sp_str_t name) {
+    sp_dyn_array_for(g_closure_fn_names, i) {
+        if (sp_str_equal(g_closure_fn_names[i], name))
+            return true;
+    }
+    return false;
+}
+
+static bool is_decl_fn_name(sp_str_t name) {
+    sp_dyn_array_for(g_decl_fn_names, i) {
+        if (sp_str_equal(g_decl_fn_names[i], name))
             return true;
     }
     return false;
@@ -223,6 +241,11 @@ static fxsh_type_t *return_type_of_fn(fxsh_type_t *fn_t) {
     while (cur && cur->kind == TYPE_ARROW)
         cur = cur->data.arrow.ret;
     return cur;
+}
+
+static bool is_type_con_named(fxsh_type_t *t, sp_str_t name) {
+    t = normalize_codegen_type(t);
+    return t && t->kind == TYPE_CON && sp_str_equal(t->data.con, name);
 }
 
 /*=============================================================================
@@ -547,6 +570,45 @@ static void gen_call(codegen_ctx_t *ctx, fxsh_ast_node_t *ast) {
         emit_raw(ctx, "0 /* bad call */");
         sp_dyn_array_free(flat_args);
         return;
+    }
+    if (func->kind == AST_IDENT) {
+        sp_str_t fname = func->data.ident;
+        fxsh_type_t *ft = lookup_symbol_type(fname);
+
+        if (is_closure_fn_name(fname)) {
+            if (sp_dyn_array_size(flat_args) == 1) {
+                gen_expr(ctx, func);
+                emit_raw(ctx, "(");
+                gen_expr(ctx, flat_args[0]);
+                emit_raw(ctx, ")");
+            } else if (sp_dyn_array_size(flat_args) == 2) {
+                emit_raw(ctx, "fxsh_apply1_i64(");
+                gen_expr(ctx, func);
+                emit_raw(ctx, "(");
+                gen_expr(ctx, flat_args[0]);
+                emit_raw(ctx, "), ");
+                gen_expr(ctx, flat_args[1]);
+                emit_raw(ctx, ")");
+            } else {
+                emit_raw(ctx, "0 /* unsupported closure arity */");
+            }
+            sp_dyn_array_free(flat_args);
+            return;
+        }
+
+        if (!is_lambda_fn_name(fname) && !is_decl_fn_name(fname) && ft && ft->kind == TYPE_ARROW) {
+            if (sp_dyn_array_size(flat_args) == 1) {
+                emit_raw(ctx, "fxsh_apply1_i64(");
+                gen_expr(ctx, func);
+                emit_raw(ctx, ", ");
+                gen_expr(ctx, flat_args[0]);
+                emit_raw(ctx, ")");
+            } else {
+                emit_raw(ctx, "0 /* unsupported multi-arg closure call */");
+            }
+            sp_dyn_array_free(flat_args);
+            return;
+        }
     }
     gen_expr(ctx, func);
     sp_dyn_array_push(*ctx->output, '(');
@@ -880,9 +942,97 @@ static sp_str_t constr_appl_type_name(fxsh_ast_node_t *v) {
     return (sp_str_t){0};
 }
 
+static bool gen_decl_let_closure1_i64(codegen_ctx_t *ctx, fxsh_ast_node_t *ast) {
+    fxsh_ast_node_t *lam = ast->data.let.value;
+    if (!lam || lam->kind != AST_LAMBDA)
+        return false;
+    if (!lam->data.lambda.params || sp_dyn_array_size(lam->data.lambda.params) != 1)
+        return false;
+    if (!lam->data.lambda.body || lam->data.lambda.body->kind != AST_LAMBDA)
+        return false;
+
+    fxsh_ast_node_t *inner = lam->data.lambda.body;
+    if (!inner->data.lambda.params || sp_dyn_array_size(inner->data.lambda.params) != 1)
+        return false;
+
+    fxsh_type_t *fn_t = lookup_symbol_type(ast->data.let.name);
+    if (!fn_t || fn_t->kind != TYPE_ARROW)
+        return false;
+    fxsh_type_t *x_t = fn_t->data.arrow.param;
+    fxsh_type_t *ret1_t = fn_t->data.arrow.ret;
+    if (!ret1_t || ret1_t->kind != TYPE_ARROW)
+        return false;
+    fxsh_type_t *y_t = ret1_t->data.arrow.param;
+    fxsh_type_t *ret2_t = ret1_t->data.arrow.ret;
+    if (!is_type_con_named(x_t, TYPE_INT) || !is_type_con_named(y_t, TYPE_INT) ||
+        !is_type_con_named(ret2_t, TYPE_INT))
+        return false;
+
+    fxsh_ast_node_t *x_pat = lam->data.lambda.params[0];
+    fxsh_ast_node_t *y_pat = inner->data.lambda.params[0];
+    if (!x_pat || !y_pat)
+        return false;
+    if (!((x_pat->kind == AST_PAT_VAR || x_pat->kind == AST_IDENT) &&
+          (y_pat->kind == AST_PAT_VAR || y_pat->kind == AST_IDENT)))
+        return false;
+
+    char base[128];
+    mangle_into(ast->data.let.name, base, sizeof(base));
+
+    emit_fmt(ctx, "typedef struct { s64 ");
+    emit_mangled(ctx, x_pat->data.ident);
+    emit_fmt(ctx, "; } fxsh_env_%s_0_t;\n", base);
+
+    emit_fmt(ctx, "static s64 fxsh_clo_%s_0(void *env, s64 ", base);
+    emit_mangled(ctx, y_pat->data.ident);
+    emit_raw(ctx, ") {\n");
+    ctx->indent_level++;
+    emit_indent(ctx);
+    emit_fmt(ctx, "fxsh_env_%s_0_t *e = (fxsh_env_%s_0_t *)env;\n", base, base);
+    emit_indent(ctx);
+    emit_raw(ctx, "s64 ");
+    emit_mangled(ctx, x_pat->data.ident);
+    emit_raw(ctx, " = e->");
+    emit_mangled(ctx, x_pat->data.ident);
+    emit_raw(ctx, ";\n");
+    emit_indent(ctx);
+    emit_raw(ctx, "return ");
+    gen_expr(ctx, inner->data.lambda.body);
+    emit_raw(ctx, ";\n");
+    ctx->indent_level--;
+    emit_line(ctx, "}");
+
+    sp_dyn_array_push(g_lambda_fn_names, ast->data.let.name);
+    sp_dyn_array_push(g_closure_fn_names, ast->data.let.name);
+
+    emit_raw(ctx, "static fxsh_closure1_i64_t fxsh_fn_");
+    emit_mangled(ctx, ast->data.let.name);
+    emit_raw(ctx, "(s64 ");
+    emit_mangled(ctx, x_pat->data.ident);
+    emit_raw(ctx, ") {\n");
+    ctx->indent_level++;
+    emit_indent(ctx);
+    emit_fmt(ctx, "fxsh_env_%s_0_t *e = (fxsh_env_%s_0_t *)malloc(sizeof(fxsh_env_%s_0_t));\n",
+             base, base, base);
+    emit_indent(ctx);
+    emit_raw(ctx, "e->");
+    emit_mangled(ctx, x_pat->data.ident);
+    emit_raw(ctx, " = ");
+    emit_mangled(ctx, x_pat->data.ident);
+    emit_raw(ctx, ";\n");
+    emit_indent(ctx);
+    emit_fmt(ctx, "return (fxsh_closure1_i64_t){ .call = fxsh_clo_%s_0, .env = e };\n", base);
+    ctx->indent_level--;
+    emit_line(ctx, "}");
+    emit_raw(ctx, "\n");
+    return true;
+}
+
 static void gen_decl_let(codegen_ctx_t *ctx, fxsh_ast_node_t *ast) {
     /* Lambda let-binding becomes a C function (no closure capture support yet). */
     if (ast->data.let.value && ast->data.let.value->kind == AST_LAMBDA) {
+        if (gen_decl_let_closure1_i64(ctx, ast))
+            return;
         fxsh_ast_node_t *lam = ast->data.let.value;
         fxsh_type_t *fn_t = lookup_symbol_type(ast->data.let.name);
         sp_dyn_array_push(g_lambda_fn_names, ast->data.let.name);
@@ -943,6 +1093,11 @@ static void gen_prelude(codegen_ctx_t *ctx) {
     emit_line(ctx, "typedef double   f64;");
     emit_line(ctx, "typedef char     c8;");
     emit_line(ctx, "typedef struct { const char *data; u32 len; } sp_str_t;");
+    emit_line(
+        ctx, "typedef struct { s64 (*call)(void *env, s64 arg); void *env; } fxsh_closure1_i64_t;");
+    emit_line(ctx, "static inline s64 fxsh_apply1_i64(fxsh_closure1_i64_t c, s64 arg) {");
+    emit_line(ctx, "  return c.call(c.env, arg);");
+    emit_line(ctx, "}");
     emit_line(ctx, "");
     emit_line(ctx, "static inline sp_str_t fxsh_str_concat(sp_str_t a, sp_str_t b) {");
     emit_line(ctx, "  u32 n = a.len + b.len;");
@@ -1013,6 +1168,8 @@ char *fxsh_codegen(fxsh_ast_node_t *ast) {
     g_adt_inits = SP_NULLPTR;
     g_main_lets = SP_NULLPTR;
     g_lambda_fn_names = SP_NULLPTR;
+    g_closure_fn_names = SP_NULLPTR;
+    g_decl_fn_names = SP_NULLPTR;
     g_codegen_type_env = SP_NULLPTR;
 
     /* Build a type environment so signatures are generated with concrete types. */
@@ -1038,6 +1195,7 @@ char *fxsh_codegen(fxsh_ast_node_t *ast) {
         sp_dyn_array_for(ast->data.decls, i) {
             fxsh_ast_node_t *d = ast->data.decls[i];
             if (d->kind == AST_DECL_FN) {
+                sp_dyn_array_push(g_decl_fn_names, d->data.decl_fn.name);
                 fxsh_type_t *fn_t = lookup_symbol_type(d->data.decl_fn.name);
                 emit_raw(&ctx, "static ");
                 emit_c_type_for_type(&ctx, return_type_of_fn(fn_t));
