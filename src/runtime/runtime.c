@@ -58,6 +58,26 @@ fxsh_rt_value_t *fxsh_rt_constr(sp_str_t tag, sp_dyn_array(fxsh_rt_value_t *) ar
     return v;
 }
 
+fxsh_rt_value_t *fxsh_rt_record(sp_dyn_array(sp_str_t) names,
+                                sp_dyn_array(fxsh_rt_value_t *) values) {
+    fxsh_rt_value_t *v = rt_new(FXSH_RT_RECORD);
+    v->as.record.names = names;
+    v->as.record.values = values;
+    return v;
+}
+
+fxsh_rt_value_t *fxsh_rt_record_get(fxsh_rt_value_t *record, sp_str_t field_name) {
+    if (!record || record->kind != FXSH_RT_RECORD)
+        return NULL;
+    if (sp_dyn_array_size(record->as.record.names) != sp_dyn_array_size(record->as.record.values))
+        return NULL;
+    sp_dyn_array_for(record->as.record.names, i) {
+        if (sp_str_equal(record->as.record.names[i], field_name))
+            return record->as.record.values[i];
+    }
+    return NULL;
+}
+
 fxsh_rt_env_t *fxsh_rt_env_bind(fxsh_rt_env_t *env, sp_str_t name, fxsh_rt_value_t *value) {
     fxsh_rt_env_t *n = (fxsh_rt_env_t *)fxsh_alloc0(sizeof(fxsh_rt_env_t));
     n->name = name;
@@ -98,6 +118,17 @@ bool fxsh_rt_equal(fxsh_rt_value_t *a, fxsh_rt_value_t *b) {
                 return false;
             sp_dyn_array_for(a->as.constr.args, i) {
                 if (!fxsh_rt_equal(a->as.constr.args[i], b->as.constr.args[i]))
+                    return false;
+            }
+            return true;
+        }
+        case FXSH_RT_RECORD: {
+            if (sp_dyn_array_size(a->as.record.names) != sp_dyn_array_size(b->as.record.names))
+                return false;
+            sp_dyn_array_for(a->as.record.names, i) {
+                fxsh_rt_value_t *av = fxsh_rt_record_get(a, a->as.record.names[i]);
+                fxsh_rt_value_t *bv = fxsh_rt_record_get(b, a->as.record.names[i]);
+                if (!av || !bv || !fxsh_rt_equal(av, bv))
                     return false;
             }
             return true;
@@ -146,6 +177,23 @@ sp_str_t fxsh_rt_to_string(fxsh_rt_value_t *v) {
                     break;
             }
             snprintf(buf + off, 256 - off, ")");
+            return sp_str_view(buf);
+        }
+        case FXSH_RT_RECORD: {
+            char *buf = (char *)fxsh_alloc0(512);
+            size_t off = 0;
+            off += (size_t)snprintf(buf + off, 512 - off, "{");
+            sp_dyn_array_for(v->as.record.names, i) {
+                fxsh_rt_value_t *fv = v->as.record.values[i];
+                sp_str_t s = fxsh_rt_to_string(fv);
+                off += (size_t)snprintf(buf + off, 512 - off, "%.*s = %.*s%s",
+                                        v->as.record.names[i].len, v->as.record.names[i].data,
+                                        s.len, s.data,
+                                        i + 1 < sp_dyn_array_size(v->as.record.names) ? ", " : "");
+                if (off >= 508)
+                    break;
+            }
+            snprintf(buf + off, 512 - off, "}");
             return sp_str_view(buf);
         }
     }

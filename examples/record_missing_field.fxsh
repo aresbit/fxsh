@@ -1,0 +1,5 @@
+# Missing field should fail type checking
+
+let get_age = fn r -> r.age
+let p = { name = "Alice" }
+let out = get_age p

@@ -17,18 +17,21 @@ typedef fxsh_rt_env_t rv_env_t;
 #define RV_STRING   FXSH_RT_STRING
 #define RV_FUNCTION FXSH_RT_FUNCTION
 #define RV_CONSTR   FXSH_RT_CONSTR
+#define RV_RECORD   FXSH_RT_RECORD
 
-#define rv_unit      fxsh_rt_unit
-#define rv_bool      fxsh_rt_bool
-#define rv_int       fxsh_rt_int
-#define rv_float     fxsh_rt_float
-#define rv_string    fxsh_rt_string
-#define rv_function  fxsh_rt_function
-#define rv_constr    fxsh_rt_constr
-#define env_bind     fxsh_rt_env_bind
-#define env_lookup   fxsh_rt_env_lookup
-#define rv_equal     fxsh_rt_equal
-#define rv_to_string fxsh_rt_to_string
+#define rv_unit       fxsh_rt_unit
+#define rv_bool       fxsh_rt_bool
+#define rv_int        fxsh_rt_int
+#define rv_float      fxsh_rt_float
+#define rv_string     fxsh_rt_string
+#define rv_function   fxsh_rt_function
+#define rv_constr     fxsh_rt_constr
+#define rv_record     fxsh_rt_record
+#define rv_record_get fxsh_rt_record_get
+#define env_bind      fxsh_rt_env_bind
+#define env_lookup    fxsh_rt_env_lookup
+#define rv_equal      fxsh_rt_equal
+#define rv_to_string  fxsh_rt_to_string
 
 static rv_value_t *eval_expr(fxsh_ast_node_t *ast, rv_env_t *env, fxsh_error_t *err);
 
@@ -278,6 +281,38 @@ static rv_value_t *eval_expr(fxsh_ast_node_t *ast, rv_env_t *env, fxsh_error_t *
                 sp_dyn_array_push(args, arg);
             }
             return rv_constr(ast->data.constr_appl.constr_name, args);
+        }
+        case AST_RECORD: {
+            sp_dyn_array(sp_str_t) names = SP_NULLPTR;
+            sp_dyn_array(rv_value_t *) values = SP_NULLPTR;
+            sp_dyn_array_for(ast->data.elements, i) {
+                fxsh_ast_node_t *f = ast->data.elements[i];
+                if (!f || f->kind != AST_FIELD_ACCESS || !f->data.field.object)
+                    continue;
+                rv_value_t *v = eval_expr(f->data.field.object, env, err);
+                if (!v || *err != ERR_OK)
+                    return NULL;
+                sp_dyn_array_push(names, f->data.field.field);
+                sp_dyn_array_push(values, v);
+            }
+            return rv_record(names, values);
+        }
+        case AST_FIELD_ACCESS: {
+            rv_value_t *obj = eval_expr(ast->data.field.object, env, err);
+            if (!obj || *err != ERR_OK)
+                return NULL;
+            rv_value_t *v = rv_record_get(obj, ast->data.field.field);
+            if (!v) {
+                *err = ERR_INVALID_INPUT;
+                if (obj->kind != RV_RECORD) {
+                    fprintf(stderr, "Runtime error: field access on non-record value\n");
+                } else {
+                    fprintf(stderr, "Runtime error: missing record field `%.*s`\n",
+                            ast->data.field.field.len, ast->data.field.field.data);
+                }
+                return NULL;
+            }
+            return v;
         }
         case AST_MATCH: {
             rv_value_t *mv = eval_expr(ast->data.match_expr.expr, env, err);

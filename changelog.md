@@ -97,4 +97,15 @@
     - success: `examples/type_annotation_ok.fxsh`, `examples/type_annotation_letin_ok.fxsh`
     - failure: `examples/type_annotation_mismatch.fxsh`
     - `make test-type-annotations` target.
+  - added row-polymorphic record core support:
+    - parser now stores record literal fields in AST (`{ x = 1, y = 2 }`)
+    - interpreter/runtime now supports record values and field access (`r.x`)
+    - type inference now supports:
+      - record literal typing as closed records
+      - field projection with open-row constraint (`{ x : a | r } -> a`)
+      - record unification with row-variable propagation.
+  - added record integration tests:
+    - success: `examples/record_basic.fxsh`, `examples/record_row_poly.fxsh`
+    - failure: `examples/record_missing_field.fxsh`
+    - `make test-records` target.
 - Added `tests/unit/smoke.c` so `make test` has a baseline executable test target.

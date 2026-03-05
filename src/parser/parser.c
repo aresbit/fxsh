@@ -667,9 +667,9 @@ static fxsh_ast_node_t *parse_primary(fxsh_parser_t *parser) {
                 fxsh_ast_node_t *field_value = parse_expr(parser);
 
                 fxsh_ast_node_t *field_node = alloc_node(AST_FIELD_ACCESS, field_tok->loc);
-                field_node->data.field.object = NULL;
+                field_node->data.field.object = field_value;
                 field_node->data.field.field = field_name;
-                /* Store value in a different way - for now, store as tuple node */
+                sp_dyn_array_push(fields, field_node);
 
                 skip_newlines(parser);
                 if (!match(parser, TOK_COMMA))

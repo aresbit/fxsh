@@ -756,6 +756,7 @@ typedef enum {
     FXSH_RT_STRING,
     FXSH_RT_FUNCTION,
     FXSH_RT_CONSTR,
+    FXSH_RT_RECORD,
 } fxsh_rt_kind_t;
 
 typedef struct fxsh_rt_value fxsh_rt_value_t;
@@ -773,6 +774,11 @@ typedef struct {
     sp_dyn_array(fxsh_rt_value_t *) args;
 } fxsh_rt_constr_t;
 
+typedef struct {
+    sp_dyn_array(sp_str_t) names;
+    sp_dyn_array(fxsh_rt_value_t *) values;
+} fxsh_rt_record_t;
+
 struct fxsh_rt_value {
     fxsh_rt_kind_t kind;
     union {
@@ -782,6 +788,7 @@ struct fxsh_rt_value {
         sp_str_t s;
         fxsh_rt_func_t fn;
         fxsh_rt_constr_t constr;
+        fxsh_rt_record_t record;
     } as;
 };
 
@@ -799,6 +806,9 @@ fxsh_rt_value_t *fxsh_rt_string(sp_str_t s);
 fxsh_rt_value_t *fxsh_rt_function(fxsh_ast_list_t params, fxsh_ast_node_t *body,
                                   fxsh_rt_env_t *env);
 fxsh_rt_value_t *fxsh_rt_constr(sp_str_t tag, sp_dyn_array(fxsh_rt_value_t *) args);
+fxsh_rt_value_t *fxsh_rt_record(sp_dyn_array(sp_str_t) names,
+                                sp_dyn_array(fxsh_rt_value_t *) values);
+fxsh_rt_value_t *fxsh_rt_record_get(fxsh_rt_value_t *record, sp_str_t field_name);
 fxsh_rt_env_t *fxsh_rt_env_bind(fxsh_rt_env_t *env, sp_str_t name, fxsh_rt_value_t *value);
 fxsh_rt_value_t *fxsh_rt_env_lookup(fxsh_rt_env_t *env, sp_str_t name);
 bool fxsh_rt_equal(fxsh_rt_value_t *a, fxsh_rt_value_t *b);

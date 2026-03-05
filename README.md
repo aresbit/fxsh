@@ -149,7 +149,7 @@ let compose = fn f g x -> f (g x)   # ('b -> 'c) -> ('a -> 'b) -> 'a -> 'c
 
 - [x] 编译期元编程 (`comptime`)
 - [ ] 模式匹配 (`match ... with`)
-- [ ] 行多态记录类型
+- [x] 行多态记录类型
 - [ ] 标准库 (IO, Path, Process 模块)
 - [ ] 代码生成 (C 后端)
 - [ ] 递归函数支持

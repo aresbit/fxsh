@@ -118,6 +118,11 @@ test-type-annotations: $(NAME)
 	@echo "Running type annotation integration tests..."
 	@sh $(TESTS_DIR)/integration/type_annotations.sh ./$(BIN_DIR)/$(NAME)
 
+.PHONY: test-records
+test-records: $(NAME)
+	@echo "Running record integration tests..."
+	@sh $(TESTS_DIR)/integration/records.sh ./$(BIN_DIR)/$(NAME)
+
 # Run linter
 .PHONY: lint
 lint:
@@ -185,6 +190,7 @@ help:
 	@echo "  make test-closure-native - Run closure consistency tests in native mode"
 	@echo "  make test-native-codegen - Run native-codegen smoke tests"
 	@echo "  make test-type-annotations - Run type annotation integration tests"
+	@echo "  make test-records - Run row-polymorphic record integration tests"
 	@echo "  make lint         - Run static analysis"
 	@echo "  make format       - Format code"
 	@echo "  make check        - Run memory checks"

@@ -19,6 +19,24 @@
 
 typedef sp_ht(s32, s32) type_var_map_t;
 
+static s32 record_field_index(sp_dyn_array(fxsh_field_t) fields, sp_str_t name);
+static fxsh_type_t *make_record_type(sp_dyn_array(fxsh_field_t) fields, fxsh_type_var_t row_var);
+static const c8 *var_name(fxsh_type_var_t v);
+
+static const c8 *var_name(fxsh_type_var_t v) {
+    static _Thread_local c8 buf[16];
+    s32 q = v / 26;
+    s32 r = v % 26;
+    if (q <= 0) {
+        buf[0] = '\'';
+        buf[1] = (c8)('a' + r);
+        buf[2] = '\0';
+    } else {
+        snprintf((char *)buf, sizeof(buf), "'%c%d", (int)('a' + r), (int)q);
+    }
+    return buf;
+}
+
 /*=============================================================================
  * Type Variable Generation
  *=============================================================================*/
@@ -234,6 +252,17 @@ static void type_to_string_impl(fxsh_type_t *type, sp_dyn_array(c8) * out,
                 sp_dyn_array_push(*out, ' ');
                 type_to_string_impl(f->type, out, bound_vars);
             }
+            if (type->data.record.row_var >= 0) {
+                if (sp_dyn_array_size(type->data.record.fields) > 0)
+                    sp_dyn_array_push(*out, ';');
+                sp_dyn_array_push(*out, ' ');
+                sp_dyn_array_push(*out, '.');
+                sp_dyn_array_push(*out, '.');
+                sp_dyn_array_push(*out, ' ');
+                const c8 *n = var_name(type->data.record.row_var);
+                while (*n)
+                    sp_dyn_array_push(*out, *n++);
+            }
             sp_dyn_array_push(*out, '}');
             break;
         case TYPE_APP:
@@ -286,6 +315,17 @@ static void ftv_impl(fxsh_type_t *type, sp_dyn_array(s32) * out) {
         case TYPE_RECORD:
             sp_dyn_array_for(type->data.record.fields, i)
                 ftv_impl(type->data.record.fields[i].type, out);
+            if (type->data.record.row_var >= 0) {
+                bool seen = false;
+                sp_dyn_array_for(*out, i) {
+                    if ((*out)[i] == type->data.record.row_var) {
+                        seen = true;
+                        break;
+                    }
+                }
+                if (!seen)
+                    sp_dyn_array_push(*out, type->data.record.row_var);
+            }
             break;
         case TYPE_APP:
             ftv_impl(type->data.app.con, out);
@@ -374,6 +414,37 @@ static fxsh_type_t *apply_subst_single(fxsh_type_var_t var, fxsh_type_t *rep, fx
                 return type;
             return fxsh_type_apply(c, a);
         }
+        case TYPE_RECORD: {
+            bool changed = false;
+            sp_dyn_array(fxsh_field_t) fields = SP_NULLPTR;
+            sp_dyn_array_for(type->data.record.fields, i) {
+                fxsh_type_t *ft = apply_subst_single(var, rep, type->data.record.fields[i].type);
+                if (ft != type->data.record.fields[i].type)
+                    changed = true;
+                fxsh_field_t nf = {.name = type->data.record.fields[i].name, .type = ft};
+                sp_dyn_array_push(fields, nf);
+            }
+
+            fxsh_type_var_t row_var = type->data.record.row_var;
+            if (row_var == var) {
+                changed = true;
+                if (rep->kind == TYPE_VAR) {
+                    row_var = rep->data.var;
+                } else if (rep->kind == TYPE_RECORD) {
+                    sp_dyn_array_for(rep->data.record.fields, i) {
+                        if (record_field_index(fields, rep->data.record.fields[i].name) < 0)
+                            sp_dyn_array_push(fields, rep->data.record.fields[i]);
+                    }
+                    row_var = rep->data.record.row_var;
+                }
+            }
+
+            if (!changed) {
+                sp_dyn_array_free(fields);
+                return type;
+            }
+            return make_record_type(fields, row_var);
+        }
         default:
             return type;
     }
@@ -421,6 +492,8 @@ static bool occurs_in(fxsh_type_var_t var, fxsh_type_t *type) {
         case TYPE_RECORD:
             sp_dyn_array_for(type->data.record.fields,
                              i) if (occurs_in(var, type->data.record.fields[i].type)) return true;
+            if (type->data.record.row_var == var)
+                return true;
             return false;
     }
     return false;
@@ -507,6 +580,82 @@ fxsh_error_t fxsh_type_unify(fxsh_type_t *t1, fxsh_type_t *t2, fxsh_subst_t *out
         return ERR_OK;
     }
 
+    if (t1->kind == TYPE_RECORD && t2->kind == TYPE_RECORD) {
+        fxsh_subst_t s_total = SP_NULLPTR;
+
+        sp_dyn_array(fxsh_field_t) extra1 = SP_NULLPTR; /* in t1 only */
+        sp_dyn_array(fxsh_field_t) extra2 = SP_NULLPTR; /* in t2 only */
+
+        sp_dyn_array_for(t1->data.record.fields, i) {
+            fxsh_field_t f1 = t1->data.record.fields[i];
+            s32 j = record_field_index(t2->data.record.fields, f1.name);
+            if (j < 0) {
+                sp_dyn_array_push(extra1, f1);
+                continue;
+            }
+            fxsh_type_t *a = f1.type;
+            fxsh_type_t *b = t2->data.record.fields[j].type;
+            fxsh_type_apply_subst(s_total, &a);
+            fxsh_type_apply_subst(s_total, &b);
+            fxsh_subst_t sf = SP_NULLPTR;
+            fxsh_error_t err = fxsh_type_unify(a, b, &sf);
+            if (err != ERR_OK)
+                return err;
+            s_total = compose(sf, s_total);
+        }
+
+        sp_dyn_array_for(t2->data.record.fields, i) {
+            fxsh_field_t f2 = t2->data.record.fields[i];
+            if (record_field_index(t1->data.record.fields, f2.name) < 0)
+                sp_dyn_array_push(extra2, f2);
+        }
+
+        if (sp_dyn_array_size(extra1) > 0) {
+            if (t2->data.record.row_var < 0) {
+                fprintf(stderr, "Type error: record field mismatch\n");
+                return ERR_TYPE_ERROR;
+            }
+            fxsh_type_t *tail = make_record_type(extra1, t1->data.record.row_var);
+            if (occurs_in(t2->data.record.row_var, tail)) {
+                fprintf(stderr, "Type error: occurs check failed\n");
+                return ERR_TYPE_ERROR;
+            }
+            fxsh_subst_entry_t e = {.var = t2->data.record.row_var, .type = tail};
+            fxsh_subst_t sr = SP_NULLPTR;
+            sp_dyn_array_push(sr, e);
+            s_total = compose(sr, s_total);
+        }
+
+        if (sp_dyn_array_size(extra2) > 0) {
+            if (t1->data.record.row_var < 0) {
+                fprintf(stderr, "Type error: record field mismatch\n");
+                return ERR_TYPE_ERROR;
+            }
+            fxsh_type_t *tail = make_record_type(extra2, t2->data.record.row_var);
+            if (occurs_in(t1->data.record.row_var, tail)) {
+                fprintf(stderr, "Type error: occurs check failed\n");
+                return ERR_TYPE_ERROR;
+            }
+            fxsh_subst_entry_t e = {.var = t1->data.record.row_var, .type = tail};
+            fxsh_subst_t sr = SP_NULLPTR;
+            sp_dyn_array_push(sr, e);
+            s_total = compose(sr, s_total);
+        }
+
+        if (sp_dyn_array_size(extra1) == 0 && sp_dyn_array_size(extra2) == 0 &&
+            t1->data.record.row_var >= 0 && t2->data.record.row_var >= 0 &&
+            t1->data.record.row_var != t2->data.record.row_var) {
+            fxsh_subst_entry_t e = {.var = t1->data.record.row_var,
+                                    .type = fxsh_type_var(t2->data.record.row_var)};
+            fxsh_subst_t sr = SP_NULLPTR;
+            sp_dyn_array_push(sr, e);
+            s_total = compose(sr, s_total);
+        }
+
+        *out_subst = s_total;
+        return ERR_OK;
+    }
+
     fprintf(stderr, "Type error: kind mismatch (%d vs %d)\n", t1->kind, t2->kind);
     return ERR_TYPE_ERROR;
 }
@@ -537,6 +686,30 @@ static fxsh_type_t *instantiate_impl(fxsh_type_t *type, type_var_map_t *var_map)
             fxsh_type_t *a = instantiate_impl(type->data.app.arg, var_map);
             return (c != type->data.app.con || a != type->data.app.arg) ? fxsh_type_apply(c, a)
                                                                         : type;
+        }
+        case TYPE_RECORD: {
+            bool changed = false;
+            sp_dyn_array(fxsh_field_t) fields = SP_NULLPTR;
+            sp_dyn_array_for(type->data.record.fields, i) {
+                fxsh_type_t *ft = instantiate_impl(type->data.record.fields[i].type, var_map);
+                if (ft != type->data.record.fields[i].type)
+                    changed = true;
+                fxsh_field_t nf = {.name = type->data.record.fields[i].name, .type = ft};
+                sp_dyn_array_push(fields, nf);
+            }
+            fxsh_type_var_t row_var = type->data.record.row_var;
+            if (row_var >= 0) {
+                s32 *m = sp_ht_getp(*var_map, row_var);
+                if (m) {
+                    row_var = *m;
+                    changed = true;
+                }
+            }
+            if (!changed) {
+                sp_dyn_array_free(fields);
+                return type;
+            }
+            return make_record_type(fields, row_var);
         }
         default:
             return type;
@@ -633,6 +806,22 @@ static fxsh_type_t *ast_to_type(fxsh_ast_node_t *ast) {
         default:
             return fxsh_type_var(fxsh_fresh_var());
     }
+}
+
+static s32 record_field_index(sp_dyn_array(fxsh_field_t) fields, sp_str_t name) {
+    sp_dyn_array_for(fields, i) {
+        if (sp_str_equal(fields[i].name, name))
+            return (s32)i;
+    }
+    return -1;
+}
+
+static fxsh_type_t *make_record_type(sp_dyn_array(fxsh_field_t) fields, fxsh_type_var_t row_var) {
+    fxsh_type_t *t = (fxsh_type_t *)fxsh_alloc0(sizeof(fxsh_type_t));
+    t->kind = TYPE_RECORD;
+    t->data.record.fields = fields;
+    t->data.record.row_var = row_var;
+    return t;
 }
 
 static fxsh_type_t *make_constr_type(fxsh_ast_node_t *data_constr, fxsh_ast_list_t type_params,
@@ -1018,6 +1207,50 @@ static fxsh_error_t infer_expr(fxsh_ast_node_t *ast, fxsh_type_env_t *env,
             *subst = compose(s, *subst);
             fxsh_type_apply_subst(s, &res);
             *out_type = res;
+            return ERR_OK;
+        }
+
+        case AST_RECORD: {
+            sp_dyn_array(fxsh_field_t) fields = SP_NULLPTR;
+            sp_dyn_array_for(ast->data.elements, i) {
+                fxsh_ast_node_t *f = ast->data.elements[i];
+                if (!f || f->kind != AST_FIELD_ACCESS)
+                    continue;
+                if (record_field_index(fields, f->data.field.field) >= 0) {
+                    fprintf(stderr, "Type error: duplicate record field `%.*s`\n",
+                            f->data.field.field.len, f->data.field.field.data);
+                    return ERR_TYPE_ERROR;
+                }
+                fxsh_type_t *ft = NULL;
+                fxsh_error_t err = infer_expr(f->data.field.object, env, constr_env, subst, &ft);
+                if (err)
+                    return err;
+                fxsh_field_t rf = {.name = f->data.field.field, .type = ft};
+                sp_dyn_array_push(fields, rf);
+            }
+            *out_type = make_record_type(fields, -1);
+            return ERR_OK;
+        }
+
+        case AST_FIELD_ACCESS: {
+            fxsh_type_t *obj_t = NULL;
+            fxsh_error_t err = infer_expr(ast->data.field.object, env, constr_env, subst, &obj_t);
+            if (err)
+                return err;
+
+            fxsh_type_t *res_t = fxsh_type_var(fxsh_fresh_var());
+            sp_dyn_array(fxsh_field_t) req_fields = SP_NULLPTR;
+            fxsh_field_t req = {.name = ast->data.field.field, .type = res_t};
+            sp_dyn_array_push(req_fields, req);
+            fxsh_type_t *req_rec = make_record_type(req_fields, fxsh_fresh_var());
+
+            fxsh_subst_t s = SP_NULLPTR;
+            err = fxsh_type_unify(obj_t, req_rec, &s);
+            if (err)
+                return err;
+            *subst = compose(s, *subst);
+            fxsh_type_apply_subst(s, &res_t);
+            *out_type = res_t;
             return ERR_OK;
         }
 

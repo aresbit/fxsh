@@ -1,0 +1,4 @@
+# Record literal + field access
+
+let p = { name = "Alice", age = 41 }
+let out = p.age + 1
