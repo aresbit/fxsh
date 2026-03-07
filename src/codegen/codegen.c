@@ -3958,6 +3958,15 @@ static bool tco_has_tail_self_call(fxsh_ast_node_t *expr, sp_str_t self_name, u3
                    tco_has_tail_self_call(expr->data.if_expr.else_branch, self_name, arity);
         case AST_LET_IN:
             return tco_has_tail_self_call(expr->data.let_in.body, self_name, arity);
+        case AST_MATCH:
+            sp_dyn_array_for(expr->data.match_expr.arms, i) {
+                fxsh_ast_node_t *arm = expr->data.match_expr.arms[i];
+                if (!arm || arm->kind != AST_MATCH_ARM)
+                    continue;
+                if (tco_has_tail_self_call(arm->data.match_arm.body, self_name, arity))
+                    return true;
+            }
+            return false;
         default:
             return false;
     }
@@ -4043,6 +4052,83 @@ static void gen_tail_dispatch(codegen_ctx_t *ctx, fxsh_ast_node_t *expr, sp_str_
             emit_raw(ctx, ";\n");
         }
         gen_tail_dispatch(ctx, expr->data.let_in.body, self_name, fn_t, params, ret_unit);
+        ctx->indent_level--;
+        emit_line(ctx, "}");
+        return;
+    }
+
+    if (expr->kind == AST_MATCH) {
+        char mval[32];
+        char mdone[32];
+        emit_temp(ctx, mval, sizeof(mval));
+        emit_temp(ctx, mdone, sizeof(mdone));
+
+        fxsh_type_t *match_t_hint = infer_expr_type_strict_for_codegen(expr->data.match_expr.expr);
+
+        emit_indent(ctx);
+        emit_raw(ctx, "__auto_type ");
+        emit_raw(ctx, mval);
+        emit_raw(ctx, " = ");
+        gen_expr(ctx, expr->data.match_expr.expr);
+        emit_raw(ctx, ";\n");
+
+        emit_indent(ctx);
+        emit_raw(ctx, "bool ");
+        emit_raw(ctx, mdone);
+        emit_raw(ctx, " = false;\n");
+
+        sp_dyn_array_for(expr->data.match_expr.arms, i) {
+            fxsh_ast_node_t *arm = expr->data.match_expr.arms[i];
+            if (!arm || arm->kind != AST_MATCH_ARM)
+                continue;
+            fxsh_ast_node_t *pat = arm->data.match_arm.pattern;
+
+            emit_indent(ctx);
+            emit_raw(ctx, "if (!");
+            emit_raw(ctx, mdone);
+            emit_raw(ctx, " && (");
+            gen_pattern_condition(ctx, pat, mval);
+            emit_raw(ctx, ")) {\n");
+            ctx->indent_level++;
+
+            derive_pattern_var_types_from_match(pat, match_t_hint);
+            u32 lty_m = local_type_mark();
+            pat_var_types_push_local_types();
+            gen_pattern_bindings(ctx, pat, mval, false, match_t_hint);
+
+            if (arm->data.match_arm.guard) {
+                emit_indent(ctx);
+                emit_raw(ctx, "if (");
+                gen_expr(ctx, arm->data.match_arm.guard);
+                emit_raw(ctx, ") {\n");
+                ctx->indent_level++;
+            }
+
+            emit_indent(ctx);
+            emit_raw(ctx, mdone);
+            emit_raw(ctx, " = true;\n");
+            gen_tail_dispatch(ctx, arm->data.match_arm.body, self_name, fn_t, params, ret_unit);
+
+            if (arm->data.match_arm.guard) {
+                ctx->indent_level--;
+                emit_line(ctx, "}");
+            }
+
+            local_type_pop_to(lty_m);
+            pat_var_types_reset();
+            ctx->indent_level--;
+            emit_line(ctx, "}");
+        }
+        emit_indent(ctx);
+        emit_raw(ctx, "if (!");
+        emit_raw(ctx, mdone);
+        emit_raw(ctx, ") {\n");
+        ctx->indent_level++;
+        emit_indent(ctx);
+        if (ret_unit)
+            emit_raw(ctx, "return;\n");
+        else
+            emit_raw(ctx, "return 0;\n");
         ctx->indent_level--;
         emit_line(ctx, "}");
         return;

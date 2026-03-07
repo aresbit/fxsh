@@ -1,0 +1,7 @@
+let rec loop = fn n acc ->
+  match n with
+  | 0 -> acc
+  | _ -> loop (n - 1) (acc + 1)
+  end
+
+let out = loop 100000 0

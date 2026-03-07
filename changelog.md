@@ -6,8 +6,10 @@
   - applies to top-level `let` lambda functions and `decl fn` functions when parameters are
     variable patterns and tail position contains self-call.
   - rewrites tail-recursive self-calls into `for (;;)` + parallel temp rebind + `continue`.
-  - supports tail positions through `if` branches (and `let-in` wrapper passthrough).
+  - supports tail positions through `if` branches, `match` branches, and `let-in` wrapper
+    passthrough.
   - added `examples/tco_sum_tail.fxsh`.
+  - added `examples/tco_match_int_tail.fxsh`.
 
 - Language spec convergence (remove shell syntax sugar design):
   - DESIGN/README now explicitly define: no language-level shell sugar.
