@@ -1,0 +1,8 @@
+module Math = {
+let two = 2
+let inc = fn x -> x + 1
+}
+
+import Math
+
+let value = Math.inc Math.two

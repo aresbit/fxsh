@@ -41,6 +41,12 @@ fxsh_rt_value_t *fxsh_rt_string(sp_str_t s) {
     return v;
 }
 
+fxsh_rt_value_t *fxsh_rt_type(fxsh_type_t *type) {
+    fxsh_rt_value_t *v = rt_new(FXSH_RT_TYPE);
+    v->as.type_val = type;
+    return v;
+}
+
 fxsh_rt_value_t *fxsh_rt_function(fxsh_ast_list_t params, fxsh_ast_node_t *body,
                                   fxsh_rt_env_t *env) {
     fxsh_rt_value_t *v = rt_new(FXSH_RT_FUNCTION);
@@ -313,6 +319,9 @@ bool fxsh_rt_equal(fxsh_rt_value_t *a, fxsh_rt_value_t *b) {
             }
             return true;
         }
+        case FXSH_RT_TYPE:
+            return sp_str_equal(sp_str_view(fxsh_type_to_string(a->as.type_val)),
+                                sp_str_view(fxsh_type_to_string(b->as.type_val)));
         case FXSH_RT_FUNCTION:
             return a == b;
     }
@@ -340,6 +349,8 @@ sp_str_t fxsh_rt_to_string(fxsh_rt_value_t *v) {
         }
         case FXSH_RT_STRING:
             return v->as.s;
+        case FXSH_RT_TYPE:
+            return sp_str_view(fxsh_type_to_string(v->as.type_val));
         case FXSH_RT_FUNCTION:
             return sp_str_lit("<function>");
         case FXSH_RT_CONSTR: {

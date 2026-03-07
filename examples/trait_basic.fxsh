@@ -1,0 +1,28 @@
+trait Eq = {
+  let equal: Self -> Self -> bool
+}
+
+impl Eq for int = {
+  let equal x y = x == y
+}
+
+type flag = On | Off
+
+impl Eq for flag = {
+  let equal x y =
+    match x with
+    | On ->
+      match y with
+      | On -> true
+      | Off -> false
+      end
+    | Off ->
+      match y with
+      | On -> false
+      | Off -> true
+      end
+    end
+}
+
+let same_int = Eq.int.equal 1 1
+let diff_flag = Eq.flag.equal On Off

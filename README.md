@@ -4,6 +4,18 @@
 
 ## 项目状态
 
+`fxsh 1.0.0`
+
+- 定位：可维护脚本语言，而不是通用应用框架
+- 当前发布边界：解释器、`--native`、`--native-codegen`、模块、ADT/match、record、comptime、FFI、显式 trait/impl
+- 设计原则：最小可用、类型安全、脚本优先，不引入过度复杂的语言机制
+
+## 快速入口
+
+- 30 分钟语言指南：[docs/half_hour_fxsh.md](/data/data/com.termux/files/home/yyscode/dev0304/fxsh/docs/half_hour_fxsh.md)
+- 设计文档：[DESIGN.md](/data/data/com.termux/files/home/yyscode/dev0304/fxsh/DESIGN.md)
+- 变更记录：[changelog.md](/data/data/com.termux/files/home/yyscode/dev0304/fxsh/changelog.md)
+
 ### 已实现功能
 
 - [x] **现代 C 项目框架**：使用 sp.h 单头文件库
@@ -53,16 +65,37 @@ if x > 0 then x else -x
 # 管道操作符
 5 |> double |> add_one
 
+# 模块导入（支持点路径）
+import Pkg.Result
+let status: Pkg.Result.flag = Pkg.Result.default
+let ok = match status with
+  | Pkg.Result.On -> true
+  | Pkg.Result.Off -> false
+
+# trait / impl（显式命名空间调用，非隐式 typeclass 分派）
+trait Eq = {
+  let equal: Self -> Self -> bool
+}
+impl Eq for int = {
+  let equal x y = x == y
+}
+let same = Eq.int.equal 1 1
+
 # 编译期计算 (comptime)
 let comptime MAX_SIZE = 1024 * 1024   # 编译期求值
 let comptime DEBUG = true
 
 # 编译期类型编程
-let comptime make_vector = fn T -> {
-  data = T,
-  len = 0,
-  cap = 0
-}
+let comptime vec_t = @Vector(@typeOf(1))          # {data: int; len: int; cap: int}
+let comptime ints = @List(@typeOf(1))             # int list
+let comptime maybe_name = @Option(@typeOf("fx"))  # string option
+let comptime reply = @Result(@typeOf(1), @typeOf("err"))  # int string result
+type 'a box = Box of 'a
+let comptime boxed = @box(@typeOf(1))             # int box
+let user_t = @typeOf({ id = 1, name = "fx" })     # first-class type value
+let comptime user_fields = @fieldsOf(user_t)      # ["id", "name"]
+let comptime user_name = @typeName(user_t)        # "{id: int; name: string}"
+let comptime user_is_record = @isRecord(user_t)   # true
 
 # 编译期条件
 let comptime mode = if DEBUG then "debug" else "release"
@@ -137,6 +170,13 @@ type hidden = Hidden of tensor
 let w_up = tensor_new2 4 8 0.1
 let to_hidden = fn x -> match x with | Embed t -> Hidden (tensor_dot t w_up) end
 ```
+
+## 1.0 边界
+
+- `trait/impl` 是显式 namespace，不做隐式 instance 搜索
+- `impl` 目标当前优先保证命名类型场景稳定
+- shell 能力统一走库层 builtin API，不增加语言级 shell 语法糖
+- 复杂优化不是 1.0 重点，优先保证语义清晰和工具链可用
 
 ## 构建
 

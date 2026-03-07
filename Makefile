@@ -25,6 +25,7 @@ SRCS := $(wildcard $(SRC_DIR)/*.c) \
 
 # Generate object file paths
 OBJS := $(patsubst $(SRC_DIR)/%.c,$(BUILD_DIR)/%.o,$(SRCS))
+COMMON_HEADERS := $(wildcard $(INCLUDE_DIR)/*.h) $(wildcard $(LIB_DIR)/*.h)
 
 # Compiler settings
 CC := clang
@@ -64,7 +65,7 @@ $(NAME): format dir $(OBJS)
 	@echo "Built: $(BIN_DIR)/$@"
 
 # Compile object files
-$(BUILD_DIR)/%.o: $(SRC_DIR)/%.c
+$(BUILD_DIR)/%.o: $(SRC_DIR)/%.c $(COMMON_HEADERS)
 	@mkdir -p $(@D)
 	$(CC) $(CFLAGS) -c $< -o $@
 
@@ -75,7 +76,7 @@ bear:
 
 # Run unit tests
 .PHONY: test
-test: dir
+test: dir $(OBJS)
 	@echo "Running unit tests..."
 	@$(CC) $(CFLAGS) -o $(BIN_DIR)/$(NAME)_test \
 		$(TESTS_DIR)/unit/*.c \

@@ -1593,6 +1593,9 @@ static fxsh_error_t infer_expr(fxsh_ast_node_t *ast, fxsh_type_env_t *env,
         case AST_LIT_UNIT:
             *out_type = fxsh_type_con(TYPE_UNIT);
             return ERR_OK;
+        case AST_TYPE_VALUE:
+            *out_type = fxsh_type_con(TYPE_TYPE);
+            return ERR_OK;
 
         case AST_IDENT: {
             fxsh_scheme_t *sc = type_env_lookup(*env, ast->data.ident);
@@ -1606,6 +1609,9 @@ static fxsh_error_t infer_expr(fxsh_ast_node_t *ast, fxsh_type_env_t *env,
         }
 
         case AST_CT_TYPE_OF:
+            *out_type = fxsh_type_con(TYPE_TYPE);
+            return ERR_OK;
+        case AST_CT_TYPE_NAME:
             *out_type = fxsh_type_con(TYPE_STRING);
             return ERR_OK;
         case AST_CT_SIZE_OF:
@@ -1613,6 +1619,8 @@ static fxsh_error_t infer_expr(fxsh_ast_node_t *ast, fxsh_type_env_t *env,
             *out_type = fxsh_type_con(TYPE_INT);
             return ERR_OK;
         case AST_CT_HAS_FIELD:
+        case AST_CT_IS_RECORD:
+        case AST_CT_IS_TUPLE:
             *out_type = fxsh_type_con(TYPE_BOOL);
             return ERR_OK;
         case AST_CT_FIELDS_OF:
@@ -1620,6 +1628,9 @@ static fxsh_error_t infer_expr(fxsh_ast_node_t *ast, fxsh_type_env_t *env,
             return ERR_OK;
         case AST_CT_JSON_SCHEMA:
             *out_type = fxsh_type_con(TYPE_STRING);
+            return ERR_OK;
+        case AST_CT_CTOR_APPLY:
+            *out_type = fxsh_type_con(TYPE_TYPE);
             return ERR_OK;
         case AST_CT_QUOTE:
             *out_type = fxsh_type_con(TYPE_STRING);
@@ -1797,6 +1808,10 @@ static fxsh_error_t infer_expr(fxsh_ast_node_t *ast, fxsh_type_env_t *env,
             fxsh_error_t err = infer_expr(ast->data.lambda.body, &new_env, constr_env, subst, &bt);
             if (err)
                 return err;
+            sp_dyn_array_for(param_types, i) {
+                fxsh_type_apply_subst(*subst, &param_types[i]);
+            }
+            fxsh_type_apply_subst(*subst, &bt);
             fxsh_type_t *rt = bt;
             for (s32 i = (s32)sp_dyn_array_size(param_types) - 1; i >= 0; i--)
                 rt = fxsh_type_arrow(param_types[i], rt);

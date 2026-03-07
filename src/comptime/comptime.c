@@ -82,6 +82,7 @@ fxsh_ct_value_t *fxsh_ct_list(fxsh_ct_value_t **items, u32 len) {
 void fxsh_comptime_ctx_init(fxsh_comptime_ctx_t *ctx) {
     ctx->env = SP_NULLPTR;
     ctx->type_env = SP_NULLPTR;
+    ctx->type_defs = SP_NULLPTR;
     ctx->in_comptime = true;
     g_ct_error_msg[0] = '\0';
 }
@@ -121,6 +122,9 @@ static void bind_var(fxsh_comptime_ctx_t *ctx, sp_str_t name, fxsh_ct_value_t *v
  *=============================================================================*/
 
 static fxsh_ct_value_t *eval_expr(fxsh_ast_node_t *ast, fxsh_comptime_ctx_t *ctx);
+fxsh_ct_value_t *fxsh_ct_type_name(fxsh_ct_value_t *type_val);
+static fxsh_ct_value_t *fxsh_ct_is_record(fxsh_ct_value_t *type_val);
+static fxsh_ct_value_t *fxsh_ct_is_tuple(fxsh_ct_value_t *type_val);
 
 static void ct_set_error(const c8 *fmt, ...) {
     va_list ap;
@@ -229,6 +233,7 @@ static fxsh_ast_node_t *clone_ast(fxsh_ast_node_t *n) {
             c->data.type_arrow.ret = clone_ast(n->data.type_arrow.ret);
             break;
         case AST_CT_TYPE_OF:
+        case AST_CT_TYPE_NAME:
         case AST_CT_QUOTE:
         case AST_CT_UNQUOTE:
         case AST_CT_SPLICE:
@@ -241,10 +246,16 @@ static fxsh_ast_node_t *clone_ast(fxsh_ast_node_t *n) {
         case AST_CT_SIZE_OF:
         case AST_CT_ALIGN_OF:
         case AST_CT_FIELDS_OF:
+        case AST_CT_IS_RECORD:
+        case AST_CT_IS_TUPLE:
+        case AST_CT_JSON_SCHEMA:
             c->data.ct_type_op.type_expr = clone_ast(n->data.ct_type_op.type_expr);
             break;
         case AST_CT_HAS_FIELD:
             c->data.ct_has_field.type_expr = clone_ast(n->data.ct_has_field.type_expr);
+            break;
+        case AST_CT_CTOR_APPLY:
+            c->data.ct_ctor_apply.type_args = clone_ast_list(n->data.ct_ctor_apply.type_args);
             break;
         case AST_CONSTR_APPL:
             c->data.constr_appl.args = clone_ast_list(n->data.constr_appl.args);
@@ -326,10 +337,13 @@ static bool ct_value_to_ast_expr(fxsh_ct_value_t *v, fxsh_ast_node_t **out) {
         case CT_STRING:
             *out = fxsh_ast_lit_string(v->data.string_val, (fxsh_loc_t){0});
             return true;
-        case CT_TYPE:
-            *out = fxsh_ast_lit_string(sp_str_view(fxsh_type_to_string(v->data.type_val)),
-                                       (fxsh_loc_t){0});
+        case CT_TYPE: {
+            fxsh_ast_node_t *n = fxsh_alloc0(sizeof(fxsh_ast_node_t));
+            n->kind = AST_TYPE_VALUE;
+            n->data.type_value = v->data.type_val;
+            *out = n;
             return true;
+        }
         case CT_AST:
             *out = clone_ast(v->data.ast_val);
             return true;
@@ -612,6 +626,144 @@ static fxsh_ct_value_t *eval_type_operand_to_ct_type(fxsh_ast_node_t *type_expr,
     return fxsh_ct_op_type_of(type_expr, ctx);
 }
 
+typedef fxsh_type_constructor_t *(*ct_ctor_builder_fn)(void);
+
+typedef struct {
+    sp_str_t name;
+    ct_ctor_builder_fn build;
+} ct_ctor_registry_entry_t;
+
+static void ct_register_type_def(fxsh_comptime_ctx_t *ctx, fxsh_ast_node_t *type_def) {
+    if (!ctx || !type_def || type_def->kind != AST_TYPE_DEF)
+        return;
+
+    sp_dyn_array_for(ctx->type_defs, i) {
+        fxsh_ast_node_t *existing = ctx->type_defs[i];
+        if (existing && existing->kind == AST_TYPE_DEF &&
+            sp_str_equal(existing->data.type_def.name, type_def->data.type_def.name)) {
+            ctx->type_defs[i] = type_def;
+            return;
+        }
+    }
+
+    sp_dyn_array_push(ctx->type_defs, type_def);
+}
+
+static fxsh_type_t *ct_make_postfix_ctor_target_type(sp_str_t type_name,
+                                                     sp_dyn_array(fxsh_type_t *) params) {
+    fxsh_type_t *packed_args = NULL;
+
+    sp_dyn_array_for(params, i) {
+        if (!packed_args) {
+            packed_args = params[i];
+        } else {
+            packed_args = fxsh_type_apply(params[i], packed_args);
+        }
+    }
+
+    if (!packed_args)
+        return fxsh_type_con(type_name);
+    return fxsh_type_apply(fxsh_type_con(type_name), packed_args);
+}
+
+static fxsh_type_constructor_t *ct_make_type_def_ctor(fxsh_ast_node_t *type_def) {
+    if (!type_def || type_def->kind != AST_TYPE_DEF)
+        return NULL;
+
+    fxsh_type_constructor_t *ctor = fxsh_alloc0(sizeof(fxsh_type_constructor_t));
+    sp_dyn_array(fxsh_type_t *) params = SP_NULLPTR;
+
+    ctor->name = type_def->data.type_def.name;
+    ctor->fields = SP_NULLPTR;
+    ctor->type_params = SP_NULLPTR;
+
+    sp_dyn_array_for(type_def->data.type_def.type_params, i) {
+        fxsh_type_var_t var = fxsh_fresh_var();
+        sp_dyn_array_push(ctor->type_params, var);
+        sp_dyn_array_push(params, fxsh_type_var(var));
+    }
+
+    ctor->target_type = ct_make_postfix_ctor_target_type(type_def->data.type_def.name, params);
+    ctor->kind = ctor->target_type ? ctor->target_type->kind : TYPE_CON;
+
+    sp_dyn_array_free(params);
+    return ctor;
+}
+
+static fxsh_type_constructor_t *ct_make_unary_app_ctor(sp_str_t ctor_name, sp_str_t type_name) {
+    fxsh_type_constructor_t *ctor = fxsh_alloc0(sizeof(fxsh_type_constructor_t));
+    fxsh_type_var_t arg_var = fxsh_fresh_var();
+
+    ctor->name = ctor_name;
+    ctor->kind = TYPE_APP;
+    ctor->type_params = SP_NULLPTR;
+    sp_dyn_array_push(ctor->type_params, arg_var);
+    ctor->fields = SP_NULLPTR;
+    ctor->target_type = fxsh_type_apply(fxsh_type_con(type_name), fxsh_type_var(arg_var));
+    return ctor;
+}
+
+static fxsh_type_constructor_t *ct_make_binary_app_ctor(sp_str_t ctor_name, sp_str_t type_name) {
+    fxsh_type_constructor_t *ctor = fxsh_alloc0(sizeof(fxsh_type_constructor_t));
+    fxsh_type_var_t lhs_var = fxsh_fresh_var();
+    fxsh_type_var_t rhs_var = fxsh_fresh_var();
+    fxsh_type_t *lhs = fxsh_type_var(lhs_var);
+    fxsh_type_t *rhs = fxsh_type_var(rhs_var);
+
+    ctor->name = ctor_name;
+    ctor->kind = TYPE_APP;
+    ctor->type_params = SP_NULLPTR;
+    sp_dyn_array_push(ctor->type_params, lhs_var);
+    sp_dyn_array_push(ctor->type_params, rhs_var);
+    ctor->fields = SP_NULLPTR;
+
+    /* Match parser/source order: `A B result` lowers to result applied to `(B A)`. */
+    ctor->target_type = fxsh_type_apply(fxsh_type_con(type_name), fxsh_type_apply(rhs, lhs));
+    return ctor;
+}
+
+static fxsh_type_constructor_t *ct_make_list_ctor(void) {
+    return ct_make_unary_app_ctor((sp_str_t){.data = "List", .len = 4}, TYPE_LIST);
+}
+
+static fxsh_type_constructor_t *ct_make_option_ctor(void) {
+    return ct_make_unary_app_ctor((sp_str_t){.data = "Option", .len = 6}, TYPE_OPTION);
+}
+
+static fxsh_type_constructor_t *ct_make_result_ctor(void) {
+    return ct_make_binary_app_ctor((sp_str_t){.data = "Result", .len = 6}, TYPE_RESULT);
+}
+
+static fxsh_type_constructor_t *ct_lookup_type_constructor(fxsh_comptime_ctx_t *ctx,
+                                                           sp_str_t ctor_name) {
+    if (ctx) {
+        sp_dyn_array_for(ctx->type_defs, i) {
+            fxsh_ast_node_t *type_def = ctx->type_defs[i];
+            if (type_def && type_def->kind == AST_TYPE_DEF &&
+                sp_str_equal(type_def->data.type_def.name, ctor_name)) {
+                return ct_make_type_def_ctor(type_def);
+            }
+        }
+    }
+
+    static const ct_ctor_registry_entry_t entries[] = {
+        {{.data = "Vector", .len = 6}, fxsh_ct_make_vector_ctor},
+        {{.data = "vectorOf", .len = 8}, fxsh_ct_make_vector_ctor},
+        {{.data = "List", .len = 4}, ct_make_list_ctor},
+        {{.data = "listOf", .len = 6}, ct_make_list_ctor},
+        {{.data = "Option", .len = 6}, ct_make_option_ctor},
+        {{.data = "optionOf", .len = 8}, ct_make_option_ctor},
+        {{.data = "Result", .len = 6}, ct_make_result_ctor},
+        {{.data = "resultOf", .len = 8}, ct_make_result_ctor},
+    };
+
+    for (u32 i = 0; i < sizeof(entries) / sizeof(entries[0]); i++) {
+        if (sp_str_equal(ctor_name, entries[i].name))
+            return entries[i].build();
+    }
+    return NULL;
+}
+
 static fxsh_ct_value_t *eval_expr(fxsh_ast_node_t *ast, fxsh_comptime_ctx_t *ctx) {
     if (!ast)
         return fxsh_ct_unit();
@@ -623,6 +775,8 @@ static fxsh_ct_value_t *eval_expr(fxsh_ast_node_t *ast, fxsh_comptime_ctx_t *ctx
         case AST_LIT_BOOL:
         case AST_LIT_UNIT:
             return eval_literal(ast);
+        case AST_TYPE_VALUE:
+            return fxsh_ct_type(ast->data.type_value);
         case AST_IDENT:
             return eval_ident(ast, ctx);
         case AST_CONSTR_APPL:
@@ -696,6 +850,11 @@ static fxsh_ct_value_t *eval_expr(fxsh_ast_node_t *ast, fxsh_comptime_ctx_t *ctx
         case AST_CT_TYPE_OF: {
             return fxsh_ct_op_type_of(ast->data.ct_type_of.operand, ctx);
         }
+        case AST_CT_TYPE_NAME: {
+            fxsh_ct_value_t *type_val =
+                eval_type_operand_to_ct_type(ast->data.ct_type_op.type_expr, ctx);
+            return fxsh_ct_type_name(type_val);
+        }
         case AST_CT_SIZE_OF: {
             fxsh_ct_value_t *type_val =
                 eval_type_operand_to_ct_type(ast->data.ct_type_op.type_expr, ctx);
@@ -711,10 +870,53 @@ static fxsh_ct_value_t *eval_expr(fxsh_ast_node_t *ast, fxsh_comptime_ctx_t *ctx
                 eval_type_operand_to_ct_type(ast->data.ct_type_op.type_expr, ctx);
             return fxsh_ct_op_fields_of(type_val);
         }
+        case AST_CT_IS_RECORD: {
+            fxsh_ct_value_t *type_val =
+                eval_type_operand_to_ct_type(ast->data.ct_type_op.type_expr, ctx);
+            return fxsh_ct_is_record(type_val);
+        }
+        case AST_CT_IS_TUPLE: {
+            fxsh_ct_value_t *type_val =
+                eval_type_operand_to_ct_type(ast->data.ct_type_op.type_expr, ctx);
+            return fxsh_ct_is_tuple(type_val);
+        }
         case AST_CT_JSON_SCHEMA: {
             fxsh_ct_value_t *type_val =
                 eval_type_operand_to_ct_type(ast->data.ct_type_op.type_expr, ctx);
             return fxsh_ct_op_json_schema(type_val);
+        }
+        case AST_CT_CTOR_APPLY: {
+            fxsh_type_constructor_t *ctor =
+                ct_lookup_type_constructor(ctx, ast->data.ct_ctor_apply.ctor_name);
+            if (!ctor) {
+                ct_set_error("unknown compile-time type constructor: %.*s",
+                             ast->data.ct_ctor_apply.ctor_name.len,
+                             ast->data.ct_ctor_apply.ctor_name.data);
+                return NULL;
+            }
+
+            sp_dyn_array(fxsh_type_t *) type_args = SP_NULLPTR;
+            sp_dyn_array_for(ast->data.ct_ctor_apply.type_args, i) {
+                fxsh_ct_value_t *type_val =
+                    eval_type_operand_to_ct_type(ast->data.ct_ctor_apply.type_args[i], ctx);
+                if (!type_val || type_val->kind != CT_TYPE) {
+                    ct_set_error("compile-time type constructor `%.*s` expects type arguments",
+                                 ast->data.ct_ctor_apply.ctor_name.len,
+                                 ast->data.ct_ctor_apply.ctor_name.data);
+                    return NULL;
+                }
+                sp_dyn_array_push(type_args, type_val->data.type_val);
+            }
+
+            fxsh_type_t *inst = fxsh_ct_instantiate_generic(ctor, type_args);
+            sp_dyn_array_free(type_args);
+            if (!inst) {
+                ct_set_error("compile-time type constructor `%.*s` instantiation failed",
+                             ast->data.ct_ctor_apply.ctor_name.len,
+                             ast->data.ct_ctor_apply.ctor_name.data);
+                return NULL;
+            }
+            return fxsh_ct_type(inst);
         }
         case AST_CT_HAS_FIELD: {
             fxsh_ct_value_t *type_val =
@@ -786,12 +988,22 @@ fxsh_ct_result_t fxsh_ct_eval(fxsh_ast_node_t *ast, fxsh_comptime_ctx_t *ctx) {
     if (ast->kind == AST_PROGRAM) {
         sp_dyn_array_for(ast->data.decls, i) {
             fxsh_ast_node_t *d = ast->data.decls[i];
+            if (d && d->kind == AST_TYPE_DEF) {
+                ct_register_type_def(ctx, d);
+                continue;
+            }
             if ((d->kind == AST_DECL_LET || d->kind == AST_LET) && d->data.let.is_comptime) {
                 fxsh_ct_result_t r = fxsh_ct_eval(d, ctx);
                 if (r.error != ERR_OK)
                     return r;
             }
         }
+        result.value = fxsh_ct_unit();
+        return result;
+    }
+
+    if (ast->kind == AST_TYPE_DEF) {
+        ct_register_type_def(ctx, ast);
         result.value = fxsh_ct_unit();
         return result;
     }
@@ -812,10 +1024,12 @@ fxsh_ct_value_t *fxsh_ct_eval_expr(fxsh_ast_node_t *ast, fxsh_comptime_ctx_t *ct
 }
 
 static bool is_ct_expr_kind(fxsh_ast_kind_t k) {
-    return k == AST_CT_TYPE_OF || k == AST_CT_SIZE_OF || k == AST_CT_ALIGN_OF ||
-           k == AST_CT_FIELDS_OF || k == AST_CT_HAS_FIELD || k == AST_CT_JSON_SCHEMA ||
-           k == AST_CT_QUOTE || k == AST_CT_UNQUOTE || k == AST_CT_SPLICE || k == AST_CT_EVAL ||
-           k == AST_CT_COMPILE_ERROR || k == AST_CT_COMPILE_LOG || k == AST_CT_PANIC;
+    return k == AST_CT_TYPE_OF || k == AST_CT_TYPE_NAME || k == AST_CT_SIZE_OF ||
+           k == AST_CT_ALIGN_OF || k == AST_CT_FIELDS_OF || k == AST_CT_HAS_FIELD ||
+           k == AST_CT_IS_RECORD || k == AST_CT_IS_TUPLE || k == AST_CT_JSON_SCHEMA ||
+           k == AST_CT_CTOR_APPLY || k == AST_CT_QUOTE || k == AST_CT_UNQUOTE ||
+           k == AST_CT_SPLICE || k == AST_CT_EVAL || k == AST_CT_COMPILE_ERROR ||
+           k == AST_CT_COMPILE_LOG || k == AST_CT_PANIC;
 }
 
 fxsh_error_t fxsh_ct_expand_program(fxsh_ast_node_t *ast, fxsh_type_env_t type_env) {
@@ -832,10 +1046,26 @@ fxsh_error_t fxsh_ct_expand_program(fxsh_ast_node_t *ast, fxsh_type_env_t type_e
         if (!d)
             continue;
 
+        if (d->kind == AST_TYPE_DEF) {
+            ct_register_type_def(&ctx, d);
+            sp_dyn_array_push(out, d);
+            continue;
+        }
+
         if ((d->kind == AST_DECL_LET || d->kind == AST_LET) && d->data.let.is_comptime) {
             fxsh_ct_result_t r = fxsh_ct_eval(d, &ctx);
             if (r.error != ERR_OK)
                 return r.error;
+            if (r.value) {
+                fxsh_ast_node_t *lowered = NULL;
+                if (!ct_value_to_ast_expr(r.value, &lowered)) {
+                    if (!fxsh_ct_last_error())
+                        ct_set_error("cannot lower comptime value in let `%.*s`",
+                                     d->data.let.name.len, d->data.let.name.data);
+                    return ERR_INTERNAL;
+                }
+                d->data.let.value = lowered;
+            }
             sp_dyn_array_push(out, d);
             continue;
         }
@@ -968,6 +1198,16 @@ fxsh_ct_value_t *fxsh_ct_type_name(fxsh_ct_value_t *type_val) {
     const c8 *name = fxsh_type_to_string(type);
 
     return fxsh_ct_string((sp_str_t){.data = name, .len = strlen(name)});
+}
+
+static fxsh_ct_value_t *fxsh_ct_is_record(fxsh_ct_value_t *type_val) {
+    return fxsh_ct_bool(type_val && type_val->kind == CT_TYPE && type_val->data.type_val &&
+                        type_val->data.type_val->kind == TYPE_RECORD);
+}
+
+static fxsh_ct_value_t *fxsh_ct_is_tuple(fxsh_ct_value_t *type_val) {
+    return fxsh_ct_bool(type_val && type_val->kind == CT_TYPE && type_val->data.type_val &&
+                        type_val->data.type_val->kind == TYPE_TUPLE);
 }
 
 fxsh_ct_value_t *fxsh_ct_size_of(fxsh_ct_value_t *type_val) {
@@ -1405,16 +1645,129 @@ fxsh_ct_value_t *fxsh_ct_op_json_schema(fxsh_ct_value_t *type_val) {
  * Generic Type Instantiation
  *=============================================================================*/
 
+static bool ct_type_var_list_contains(sp_dyn_array(fxsh_type_var_t) vars, fxsh_type_var_t var) {
+    sp_dyn_array_for(vars, i) {
+        if (vars[i] == var)
+            return true;
+    }
+    return false;
+}
+
+static void ct_collect_type_vars(fxsh_type_t *type, sp_dyn_array(fxsh_type_var_t) * out_vars) {
+    if (!type)
+        return;
+
+    switch (type->kind) {
+        case TYPE_VAR:
+            if (!ct_type_var_list_contains(*out_vars, type->data.var))
+                sp_dyn_array_push(*out_vars, type->data.var);
+            return;
+        case TYPE_CON:
+            return;
+        case TYPE_ARROW:
+            ct_collect_type_vars(type->data.arrow.param, out_vars);
+            ct_collect_type_vars(type->data.arrow.ret, out_vars);
+            return;
+        case TYPE_TUPLE:
+            sp_dyn_array_for(type->data.tuple, i) {
+                ct_collect_type_vars(type->data.tuple[i], out_vars);
+            }
+            return;
+        case TYPE_APP:
+            ct_collect_type_vars(type->data.app.con, out_vars);
+            ct_collect_type_vars(type->data.app.arg, out_vars);
+            return;
+        case TYPE_RECORD:
+            sp_dyn_array_for(type->data.record.fields, i) {
+                ct_collect_type_vars(type->data.record.fields[i].type, out_vars);
+            }
+            if (type->data.record.row_var >= 0 &&
+                !ct_type_var_list_contains(*out_vars, type->data.record.row_var)) {
+                sp_dyn_array_push(*out_vars, type->data.record.row_var);
+            }
+            return;
+    }
+}
+
+static sp_dyn_array(fxsh_type_var_t) ct_collect_ctor_type_params(fxsh_type_constructor_t *ctor) {
+    sp_dyn_array(fxsh_type_var_t) vars = SP_NULLPTR;
+
+    if (!ctor)
+        return vars;
+
+    if (ctor->type_params) {
+        sp_dyn_array_for(ctor->type_params, i) {
+            sp_dyn_array_push(vars, ctor->type_params[i]);
+        }
+        return vars;
+    }
+
+    if (ctor->target_type)
+        ct_collect_type_vars(ctor->target_type, &vars);
+
+    sp_dyn_array_for(ctor->fields, i) {
+        fxsh_ct_value_t *type_val = ctor->fields[i].type_val;
+        if (type_val && type_val->kind == CT_TYPE)
+            ct_collect_type_vars(type_val->data.type_val, &vars);
+    }
+
+    return vars;
+}
+
+static fxsh_type_t *ct_make_record_runtime_type(sp_dyn_array(fxsh_field_t) fields,
+                                                fxsh_type_var_t row_var) {
+    fxsh_type_t *record = fxsh_alloc0(sizeof(fxsh_type_t));
+    record->kind = TYPE_RECORD;
+    record->data.record.fields = fields;
+    record->data.record.row_var = row_var;
+    return record;
+}
+
+static fxsh_type_t *ct_instantiate_ctor_record(fxsh_type_constructor_t *ctor, fxsh_subst_t subst) {
+    sp_dyn_array(fxsh_field_t) fields = SP_NULLPTR;
+
+    sp_dyn_array_for(ctor->fields, i) {
+        fxsh_ct_record_field_t field = ctor->fields[i];
+        if (!field.type_val || field.type_val->kind != CT_TYPE)
+            return NULL;
+
+        fxsh_type_t *field_type = field.type_val->data.type_val;
+        fxsh_type_apply_subst(subst, &field_type);
+
+        fxsh_field_t runtime_field = {.name = field.name, .type = field_type};
+        sp_dyn_array_push(fields, runtime_field);
+    }
+
+    return ct_make_record_runtime_type(fields, -1);
+}
+
 fxsh_type_t *fxsh_ct_instantiate_generic(fxsh_type_constructor_t *ctor,
                                          sp_dyn_array(fxsh_type_t *) type_args) {
     if (!ctor)
         return NULL;
 
-    /* Create a new concrete type from the constructor */
-    fxsh_type_t *instance = fxsh_alloc0(sizeof(fxsh_type_t));
-    instance->kind = ctor->kind;
+    sp_dyn_array(fxsh_type_var_t) params = ct_collect_ctor_type_params(ctor);
+    if (sp_dyn_array_size(params) != sp_dyn_array_size(type_args)) {
+        sp_dyn_array_free(params);
+        return NULL;
+    }
 
-    /* TODO: Substitute type parameters with arguments */
+    fxsh_subst_t subst = SP_NULLPTR;
+    sp_dyn_array_for(params, i) {
+        fxsh_subst_entry_t entry = {.var = params[i], .type = type_args[i]};
+        sp_dyn_array_push(subst, entry);
+    }
+
+    fxsh_type_t *instance = NULL;
+    if (ctor->target_type) {
+        instance = ctor->target_type;
+        fxsh_type_apply_subst(subst, &instance);
+    } else if (ctor->kind == TYPE_RECORD) {
+        instance = ct_instantiate_ctor_record(ctor, subst);
+    }
+
+    sp_dyn_array_free(subst);
+    sp_dyn_array_free(params);
 
     return instance;
 }
@@ -1425,10 +1778,42 @@ fxsh_type_t *fxsh_ct_instantiate_generic(fxsh_type_constructor_t *ctor,
 
 fxsh_type_constructor_t *fxsh_ct_make_vector_ctor(void) {
     fxsh_type_constructor_t *ctor = fxsh_alloc0(sizeof(fxsh_type_constructor_t));
+    fxsh_type_var_t elem_var = fxsh_fresh_var();
+    fxsh_type_t *elem_type = fxsh_type_var(elem_var);
+    sp_dyn_array(fxsh_field_t) target_fields = SP_NULLPTR;
+
     ctor->name = (sp_str_t){.data = "Vector", .len = 6};
     ctor->kind = TYPE_RECORD;
+    ctor->type_params = SP_NULLPTR;
+    sp_dyn_array_push(ctor->type_params, elem_var);
     ctor->fields = SP_NULLPTR;
-    ctor->target_type = NULL;
+
+    fxsh_ct_record_field_t data_field = {
+        .name = (sp_str_t){.data = "data", .len = 4},
+        .type_val = fxsh_ct_type(elem_type),
+        .default_val = NULL,
+    };
+    fxsh_ct_record_field_t len_field = {
+        .name = (sp_str_t){.data = "len", .len = 3},
+        .type_val = fxsh_ct_type(fxsh_type_con(TYPE_INT)),
+        .default_val = NULL,
+    };
+    fxsh_ct_record_field_t cap_field = {
+        .name = (sp_str_t){.data = "cap", .len = 3},
+        .type_val = fxsh_ct_type(fxsh_type_con(TYPE_INT)),
+        .default_val = NULL,
+    };
+
+    sp_dyn_array_push(ctor->fields, data_field);
+    sp_dyn_array_push(ctor->fields, len_field);
+    sp_dyn_array_push(ctor->fields, cap_field);
+
+    sp_dyn_array_push(target_fields, ((fxsh_field_t){.name = data_field.name, .type = elem_type}));
+    sp_dyn_array_push(target_fields, ((fxsh_field_t){.name = len_field.name,
+                                                     .type = len_field.type_val->data.type_val}));
+    sp_dyn_array_push(target_fields, ((fxsh_field_t){.name = cap_field.name,
+                                                     .type = cap_field.type_val->data.type_val}));
+    ctor->target_type = ct_make_record_runtime_type(target_fields, -1);
     return ctor;
 }
 

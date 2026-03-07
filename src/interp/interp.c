@@ -22,12 +22,14 @@ typedef fxsh_rt_env_t rv_env_t;
 #define RV_TUPLE    FXSH_RT_TUPLE
 #define RV_LIST     FXSH_RT_LIST
 #define RV_TENSOR   FXSH_RT_TENSOR
+#define RV_TYPE     FXSH_RT_TYPE
 
 #define rv_unit              fxsh_rt_unit
 #define rv_bool              fxsh_rt_bool
 #define rv_int               fxsh_rt_int
 #define rv_float             fxsh_rt_float
 #define rv_string            fxsh_rt_string
+#define rv_type              fxsh_rt_type
 #define rv_function          fxsh_rt_function
 #define rv_constr            fxsh_rt_constr
 #define rv_record            fxsh_rt_record
@@ -68,7 +70,7 @@ static rv_value_t *rv_from_ct(fxsh_ct_value_t *v, fxsh_error_t *err) {
         case CT_STRING:
             return rv_string(v->data.string_val);
         case CT_TYPE:
-            return rv_string(sp_str_view(fxsh_type_to_string(v->data.type_val)));
+            return rv_type(v->data.type_val);
         case CT_AST:
             return rv_string((sp_str_t){.data = "<ast>", .len = 5});
         case CT_FUNCTION:
@@ -929,6 +931,8 @@ static rv_value_t *eval_expr(fxsh_ast_node_t *ast, rv_env_t *env, fxsh_error_t *
             return rv_bool(ast->data.lit_bool);
         case AST_LIT_UNIT:
             return rv_unit();
+        case AST_TYPE_VALUE:
+            return rv_type(ast->data.type_value);
         case AST_IDENT: {
             rv_value_t *v = env_lookup(env, ast->data.ident);
             if (!v) {
@@ -1218,11 +1222,15 @@ static rv_value_t *eval_expr(fxsh_ast_node_t *ast, rv_env_t *env, fxsh_error_t *
             return last;
         }
         case AST_CT_TYPE_OF:
+        case AST_CT_TYPE_NAME:
         case AST_CT_SIZE_OF:
         case AST_CT_ALIGN_OF:
         case AST_CT_FIELDS_OF:
         case AST_CT_HAS_FIELD:
+        case AST_CT_IS_RECORD:
+        case AST_CT_IS_TUPLE:
         case AST_CT_JSON_SCHEMA:
+        case AST_CT_CTOR_APPLY:
         case AST_CT_QUOTE:
         case AST_CT_UNQUOTE:
         case AST_CT_SPLICE:

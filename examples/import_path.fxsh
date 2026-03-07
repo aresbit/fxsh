@@ -1,0 +1,11 @@
+import Pkg.Result
+
+let status: Pkg.Result.flag = Pkg.Result.default
+
+let flipped =
+  match status with
+  | Pkg.Result.On -> Pkg.Result.Off
+  | Pkg.Result.Off -> Pkg.Result.On
+  end
+
+let answer = Pkg.Result.to_int flipped

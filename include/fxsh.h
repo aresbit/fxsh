@@ -13,8 +13,8 @@
  * Version
  *=============================================================================*/
 
-#define FXSH_VERSION_MAJOR 0
-#define FXSH_VERSION_MINOR 1
+#define FXSH_VERSION_MAJOR 1
+#define FXSH_VERSION_MINOR 0
 #define FXSH_VERSION_PATCH 0
 
 /*=============================================================================
@@ -193,6 +193,7 @@ typedef enum {
     AST_LIT_STRING,
     AST_LIT_BOOL,
     AST_LIT_UNIT,
+    AST_TYPE_VALUE, /* lowered compile-time type value */
     AST_IDENT,
     AST_TUPLE,
     AST_LIST,
@@ -227,11 +228,15 @@ typedef enum {
 
     /* Compile-time type operators */
     AST_CT_TYPE_OF,       /* @typeOf expr */
+    AST_CT_TYPE_NAME,     /* @typeName(type) */
     AST_CT_SIZE_OF,       /* @sizeOf type */
     AST_CT_ALIGN_OF,      /* @alignOf type */
     AST_CT_FIELDS_OF,     /* @fieldsOf type */
     AST_CT_HAS_FIELD,     /* @hasField(type, "name") */
+    AST_CT_IS_RECORD,     /* @isRecord(type) */
+    AST_CT_IS_TUPLE,      /* @isTuple(type) */
     AST_CT_JSON_SCHEMA,   /* @jsonSchema(type) */
+    AST_CT_CTOR_APPLY,    /* @Vector(type), @vectorOf(type) */
     AST_CT_QUOTE,         /* @quote(expr) */
     AST_CT_UNQUOTE,       /* @unquote(ast_expr) */
     AST_CT_SPLICE,        /* @splice(ast_expr) */
@@ -262,6 +267,11 @@ typedef enum {
 
 typedef struct fxsh_ast_node fxsh_ast_node_t;
 typedef sp_dyn_array(fxsh_ast_node_t *) fxsh_ast_list_t;
+
+typedef struct {
+    sp_str_t name;
+    fxsh_ast_list_t methods; /* AST_DECL_LET signature stubs */
+} fxsh_trait_decl_t;
 
 /*=============================================================================
  * Type System (forward declarations)
@@ -382,6 +392,7 @@ struct fxsh_ast_node {
         f64 lit_float;
         sp_str_t lit_string;
         bool lit_bool;
+        fxsh_type_t *type_value;
 
         /* Identifier */
         sp_str_t ident;
@@ -489,6 +500,11 @@ struct fxsh_ast_node {
             sp_str_t field_name;
         } ct_has_field;
 
+        struct {
+            sp_str_t ctor_name;
+            fxsh_ast_list_t type_args;
+        } ct_ctor_apply;
+
         /* Type Definition */
         struct {
             sp_str_t name;
@@ -568,6 +584,7 @@ struct fxsh_type {
 #define TYPE_TENSOR  ((sp_str_t){.data = "tensor", .len = 6})
 #define TYPE_OPTION  ((sp_str_t){.data = "option", .len = 6})
 #define TYPE_RESULT  ((sp_str_t){.data = "result", .len = 6})
+#define TYPE_TYPE    ((sp_str_t){.data = "type", .len = 4})
 
 /*=============================================================================
  * Substitution (for unification)
@@ -589,6 +606,7 @@ typedef struct {
     u32 pos;
     sp_dyn_array(sp_str_t) modules;
     sp_dyn_array(sp_str_t) imports;
+    sp_dyn_array(fxsh_trait_decl_t) traits;
     bool had_error;
 } fxsh_parser_t;
 
@@ -638,6 +656,8 @@ fxsh_type_t *fxsh_type_var(fxsh_type_var_t var);
 fxsh_type_t *fxsh_type_con(sp_str_t name);
 fxsh_type_t *fxsh_type_arrow(fxsh_type_t *param, fxsh_type_t *ret);
 fxsh_type_t *fxsh_type_apply(fxsh_type_t *con, fxsh_type_t *arg);
+fxsh_type_var_t fxsh_fresh_var(void);
+void fxsh_reset_type_vars(void);
 
 /* Type environment (linked list implementation) */
 fxsh_type_env_t fxsh_type_env_empty(void);
@@ -688,6 +708,7 @@ typedef sp_ht(sp_str_t, fxsh_ct_value_t) fxsh_ct_env_t;
 typedef struct {
     fxsh_ct_env_t *env;
     fxsh_type_env_t type_env;
+    fxsh_ast_list_t type_defs;
     bool in_comptime; /* Whether we're currently in compile-time context */
 } fxsh_comptime_ctx_t;
 
@@ -749,6 +770,7 @@ typedef struct {
 typedef struct {
     sp_str_t name;
     fxsh_type_kind_t kind;
+    sp_dyn_array(fxsh_type_var_t) type_params;
     sp_dyn_array(fxsh_ct_record_field_t) fields;
     fxsh_type_t *target_type;
 } fxsh_type_constructor_t;
@@ -791,6 +813,7 @@ typedef enum {
     FXSH_RT_TUPLE,
     FXSH_RT_LIST,
     FXSH_RT_TENSOR,
+    FXSH_RT_TYPE,
 } fxsh_rt_kind_t;
 
 typedef struct fxsh_rt_value fxsh_rt_value_t;
@@ -843,6 +866,7 @@ struct fxsh_rt_value {
         fxsh_rt_tuple_t tuple;
         fxsh_rt_list_t list;
         fxsh_rt_tensor_t tensor;
+        fxsh_type_t *type_val;
     } as;
 };
 
@@ -857,6 +881,7 @@ fxsh_rt_value_t *fxsh_rt_bool(bool b);
 fxsh_rt_value_t *fxsh_rt_int(s64 i);
 fxsh_rt_value_t *fxsh_rt_float(f64 f);
 fxsh_rt_value_t *fxsh_rt_string(sp_str_t s);
+fxsh_rt_value_t *fxsh_rt_type(fxsh_type_t *type);
 fxsh_rt_value_t *fxsh_rt_function(fxsh_ast_list_t params, fxsh_ast_node_t *body,
                                   fxsh_rt_env_t *env);
 fxsh_rt_value_t *fxsh_rt_constr(sp_str_t tag, sp_dyn_array(fxsh_rt_value_t *) args);

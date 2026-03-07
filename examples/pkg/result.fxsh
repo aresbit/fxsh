@@ -1,0 +1,9 @@
+type flag = On | Off
+
+let default = On
+
+let to_int = fn value ->
+  match value with
+  | On -> 1
+  | Off -> 0
+  end

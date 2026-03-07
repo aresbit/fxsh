@@ -1,6 +1,57 @@
 # Changelog
 
+## 1.0.0 - 2026-03-07
+
+- First public 1.0 release:
+  - language core stabilized around a small, script-friendly feature set
+  - release surface includes modules/imports, ADTs/match, records, comptime, FFI,
+    interpreter/native/native-codegen, and explicit trait/impl namespaces
+  - added `docs/half_hour_fxsh.md` as the primary learning guide for new users
+
 ## 2026-03-07
+
+- Trait/impl MVP now works as explicit interface namespaces:
+  - parser accepts `trait Name = { let method: ... }` and `impl Name for Type = { let method ... }`
+  - impl blocks lower to qualified top-level functions like `Eq.int.equal`
+  - trait signatures are applied as method annotations by substituting `Self` with the impl target type
+  - initial MVP uses explicit calls such as `Eq.int.equal 1 1`; there is no implicit typeclass dispatch
+  - added `examples/trait_basic.fxsh`
+
+- Import paths now accept spec-form dotted modules:
+  - parser accepts `import A.B` and lowers references like `A.B.x`, `A.B.Ctor`, and `A.B.t`
+  - source-level import expansion resolves dotted imports to nested paths like `a/b.fxsh`
+    with fallback to flat `a.b.fxsh`
+  - added `examples/import_path.fxsh` and nested module fixture `examples/pkg/result.fxsh`
+
+- Module syntax now accepts spec-form brace bodies:
+  - parser accepts both `module Name = { ... }` and legacy `module Name = struct ... end`
+  - source-level import expansion now injects brace-body modules to match the spec
+  - added `examples/module_brace.fxsh`
+
+- Completed comptime generic type instantiation:
+  - `fxsh_ct_instantiate_generic` now substitutes explicit type parameters into target types
+    and record constructors
+  - `Vector(T)` comptime constructor metadata now carries its type parameter and concrete target type
+  - added unit coverage for record instantiation, nested type substitution, and arity mismatch
+  - language-level type constructor API now supports `@Vector(T)` with `@vectorOf(T)` alias
+  - builtin comptime type constructor registry now exposes `@List(T)`, `@Option(T)`, and
+    `@Result(T, E)` with lowercase aliases
+  - top-level user-defined `type` declarations now register as comptime type constructors, so
+    declarations like `type 'a box = Box of 'a` can be instantiated via `@box(T)`
+  - lowered compile-time type values now stay as first-class internal type nodes instead of being
+    stringified during expansion, so ordinary `let T = @typeOf(...)` bindings can flow into later
+    comptime reflection like `@fieldsOf(T)` / `@hasField(T, ...)`
+  - native codegen now emits concrete C-side representations for type values, including tuple and
+    record type literals, instead of degrading complex type nodes to placeholders
+  - added direct type reflection operators `@typeName(T)`, `@isRecord(T)`, and `@isTuple(T)`
+  - added `examples/comptime_type_ctor.fxsh` and comptime integration coverage
+
+- Native runner/build stability improvements:
+  - native temporary C/object/binary paths are now pid-scoped, avoiding collisions when running
+    native and native-codegen jobs in parallel
+  - native-codegen now links `src/utils.c` and its `sp` implementation path, fixing examples that
+    use `read_file` / `write_file` in direct native-codegen mode
+  - `make test` now depends on compiled objects, avoiding stale-object false failures after source edits
 
 - Native self-tail-call optimization (OCaml-style loop lowering) added in C backend:
   - applies to top-level `let` lambda functions and `decl fn` functions when parameters are

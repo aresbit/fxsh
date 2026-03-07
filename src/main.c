@@ -9,6 +9,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <unistd.h>
 
 static void print_usage(const char *program) {
     printf("fxsh - Functional Core Minimal Bash\n");
@@ -122,6 +123,41 @@ static bool parse_line_keyword_name(const char *line, size_t n, const char *kw,
     return true;
 }
 
+static bool parse_line_keyword_dotted_name(const char *line, size_t n, const char *kw,
+                                           sp_str_t *out_name) {
+    size_t i = 0;
+    while (i < n && (line[i] == ' ' || line[i] == '\t'))
+        i++;
+    size_t kw_len = strlen(kw);
+    if (i + kw_len >= n)
+        return false;
+    if (strncmp(line + i, kw, kw_len) != 0)
+        return false;
+    i += kw_len;
+    if (!(line[i] == ' ' || line[i] == '\t'))
+        return false;
+    while (i < n && (line[i] == ' ' || line[i] == '\t'))
+        i++;
+    if (i >= n || !(isalpha((unsigned char)line[i]) || line[i] == '_'))
+        return false;
+    size_t start = i;
+    while (i < n) {
+        if (isalnum((unsigned char)line[i]) || line[i] == '_') {
+            i++;
+            continue;
+        }
+        if (line[i] == '.' && i + 1 < n &&
+            (isalpha((unsigned char)line[i + 1]) || line[i + 1] == '_')) {
+            i++;
+            continue;
+        }
+        break;
+    }
+    if (out_name)
+        *out_name = (sp_str_t){.data = line + start, .len = (u32)(i - start)};
+    return true;
+}
+
 static bool str_in_list(sp_dyn_array(sp_str_t) names, sp_str_t s) {
     sp_dyn_array_for(names, i) {
         if (sp_str_equal(names[i], s))
@@ -130,16 +166,42 @@ static bool str_in_list(sp_dyn_array(sp_str_t) names, sp_str_t s) {
     return false;
 }
 
-static sp_str_t dup_lower_name(sp_str_t s) {
-    char *p = (char *)sp_alloc((size_t)s.len + 1);
-    if (!p)
-        return (sp_str_t){.data = "", .len = 0};
-    for (u32 i = 0; i < s.len; i++) {
-        unsigned char ch = (unsigned char)s.data[i];
-        p[i] = (char)tolower(ch);
+static sp_str_t qualify_dotted_name(sp_str_t dotted) {
+    if (!dotted.data || dotted.len == 0)
+        return (sp_str_t){0};
+
+    u32 extra = 0;
+    for (u32 i = 0; i < dotted.len; i++) {
+        if (dotted.data[i] == '.')
+            extra++;
     }
-    p[s.len] = '\0';
-    return (sp_str_t){.data = p, .len = s.len};
+
+    c8 *buf = (c8 *)sp_alloc((size_t)dotted.len + extra + 1);
+    if (!buf)
+        return (sp_str_t){0};
+
+    u32 out = 0;
+    for (u32 i = 0; i < dotted.len; i++) {
+        if (dotted.data[i] == '.') {
+            buf[out++] = '_';
+            buf[out++] = '_';
+        } else {
+            buf[out++] = dotted.data[i];
+        }
+    }
+    buf[out] = '\0';
+    return (sp_str_t){.data = buf, .len = out};
+}
+
+static void build_lower_import_path(sp_str_t mod_name, char *out, size_t out_n, char sep) {
+    if (!out || out_n == 0)
+        return;
+    size_t out_pos = 0;
+    for (u32 i = 0; i < mod_name.len && out_pos + 1 < out_n; i++) {
+        unsigned char ch = (unsigned char)mod_name.data[i];
+        out[out_pos++] = (char)(ch == '.' ? sep : tolower(ch));
+    }
+    out[out_pos] = '\0';
 }
 
 static bool file_exists_path(const char *path) {
@@ -175,12 +237,15 @@ static bool try_read_import_module(sp_str_t mod_name, const char *base_dir, sp_s
     if (out_loaded_path && out_loaded_path_n > 0)
         out_loaded_path[0] = '\0';
 
-    sp_str_t lower = dup_lower_name(mod_name);
-    if (!lower.data || lower.len == 0)
+    char lower_path[512];
+    char lower_flat[512];
+    build_lower_import_path(mod_name, lower_path, sizeof(lower_path), '/');
+    build_lower_import_path(mod_name, lower_flat, sizeof(lower_flat), '.');
+    if (lower_path[0] == '\0')
         return false;
 
     char cand1[512];
-    snprintf(cand1, sizeof(cand1), "stdlib/%.*s.fxsh", lower.len, lower.data);
+    snprintf(cand1, sizeof(cand1), "stdlib/%s.fxsh", lower_path);
     if (file_exists_path(cand1)) {
         sp_str_t s = read_file_to_str(cand1);
         if (s.data) {
@@ -194,9 +259,26 @@ static bool try_read_import_module(sp_str_t mod_name, const char *base_dir, sp_s
         }
     }
 
+    if (strcmp(lower_flat, lower_path) != 0) {
+        char cand1b[512];
+        snprintf(cand1b, sizeof(cand1b), "stdlib/%s.fxsh", lower_flat);
+        if (file_exists_path(cand1b)) {
+            sp_str_t s = read_file_to_str(cand1b);
+            if (s.data) {
+                if (out_source)
+                    *out_source = s;
+                if (out_loaded_path && out_loaded_path_n > 0) {
+                    strncpy(out_loaded_path, cand1b, out_loaded_path_n - 1);
+                    out_loaded_path[out_loaded_path_n - 1] = '\0';
+                }
+                return true;
+            }
+        }
+    }
+
     if (base_dir && base_dir[0]) {
         char cand2[512];
-        snprintf(cand2, sizeof(cand2), "%s/%.*s.fxsh", base_dir, lower.len, lower.data);
+        snprintf(cand2, sizeof(cand2), "%s/%s.fxsh", base_dir, lower_path);
         if (file_exists_path(cand2)) {
             sp_str_t s = read_file_to_str(cand2);
             if (s.data) {
@@ -207,6 +289,23 @@ static bool try_read_import_module(sp_str_t mod_name, const char *base_dir, sp_s
                     out_loaded_path[out_loaded_path_n - 1] = '\0';
                 }
                 return true;
+            }
+        }
+
+        if (strcmp(lower_flat, lower_path) != 0) {
+            char cand2b[512];
+            snprintf(cand2b, sizeof(cand2b), "%s/%s.fxsh", base_dir, lower_flat);
+            if (file_exists_path(cand2b)) {
+                sp_str_t s = read_file_to_str(cand2b);
+                if (s.data) {
+                    if (out_source)
+                        *out_source = s;
+                    if (out_loaded_path && out_loaded_path_n > 0) {
+                        strncpy(out_loaded_path, cand2b, out_loaded_path_n - 1);
+                        out_loaded_path[out_loaded_path_n - 1] = '\0';
+                    }
+                    return true;
+                }
             }
         }
     }
@@ -244,27 +343,28 @@ static sp_str_t expand_imports_recursive(sp_str_t source, const char *base_dir,
             pos++;
         size_t line_len = pos - line_start;
         sp_str_t import_name = {0};
-        if (parse_line_keyword_name(src + line_start, line_len, "import", &import_name)) {
-            if (!str_in_list(local_mods, import_name) && !str_in_list(*loaded, import_name)) {
+        if (parse_line_keyword_dotted_name(src + line_start, line_len, "import", &import_name)) {
+            sp_str_t import_qname = qualify_dotted_name(import_name);
+            if (!str_in_list(local_mods, import_qname) && !str_in_list(*loaded, import_qname)) {
                 sp_str_t mod_src = {0};
                 char loaded_path[512] = {0};
                 if (try_read_import_module(import_name, base_dir, &mod_src, loaded_path,
                                            sizeof(loaded_path))) {
-                    sp_dyn_array_push(*loaded, import_name);
+                    sp_dyn_array_push(*loaded, import_qname);
                     char next_dir[512];
                     split_dirname(loaded_path, next_dir, sizeof(next_dir));
                     sp_str_t expanded_mod =
                         expand_imports_recursive(mod_src, next_dir, loaded, depth + 1);
 
                     sb_append_cstr(&prepend, "module ");
-                    sb_append_n(&prepend, import_name.data, import_name.len);
-                    sb_append_cstr(&prepend, " = struct\n");
+                    sb_append_n(&prepend, import_qname.data, import_qname.len);
+                    sb_append_cstr(&prepend, " = {\n");
                     sb_append_n(&prepend, expanded_mod.data, expanded_mod.len);
                     if (expanded_mod.len == 0 || expanded_mod.data[expanded_mod.len - 1] != '\n')
                         sb_append_cstr(&prepend, "\n");
-                    sb_append_cstr(&prepend, "end\n");
+                    sb_append_cstr(&prepend, "}\n");
                     sb_append_cstr(&prepend, "import ");
-                    sb_append_n(&prepend, import_name.data, import_name.len);
+                    sb_append_n(&prepend, import_qname.data, import_qname.len);
                     sb_append_cstr(&prepend, "\n\n");
                 }
             }
@@ -301,7 +401,15 @@ typedef enum {
 } run_mode_t;
 
 static fxsh_error_t run_native_interp_harness(sp_str_t source) {
-    FILE *f = fopen("build/fxsh_native_tmp.c", "wb");
+    long pid = (long)getpid();
+    char c_path[128];
+    char bin_path[128];
+    char cc_cmd[1024];
+
+    snprintf(c_path, sizeof(c_path), "build/fxsh_native_%ld.c", pid);
+    snprintf(bin_path, sizeof(bin_path), "bin/fxsh_native_%ld", pid);
+
+    FILE *f = fopen(c_path, "wb");
     if (!f)
         return ERR_INTERNAL;
 
@@ -334,19 +442,24 @@ static fxsh_error_t run_native_interp_harness(sp_str_t source) {
     fprintf(f, "}\n");
     fclose(f);
 
-    int cc = system("clang -std=gnu17 -D _GNU_SOURCE -Wall -Wextra -Wno-strict-prototypes "
-                    "-pedantic -Iinclude -Ilib -DSP_PS_DISABLE -Oz -DNDEBUG "
-                    "build/fxsh_native_tmp.c src/utils.c src/lexer/lexer.c src/parser/parser.c "
-                    "src/types/types.c src/comptime/comptime.c src/interp/interp.c "
-                    "src/runtime/runtime.c src/runtime/json.c src/runtime/regex.c "
-                    "src/runtime/shell.c src/runtime/text.c "
-                    "-lm -o bin/fxsh_native_tmp");
+    snprintf(cc_cmd, sizeof(cc_cmd),
+             "clang -std=gnu17 -D _GNU_SOURCE -Wall -Wextra -Wno-strict-prototypes "
+             "-pedantic -Iinclude -Ilib -DSP_PS_DISABLE -Oz -DNDEBUG "
+             "%s src/utils.c src/lexer/lexer.c src/parser/parser.c "
+             "src/types/types.c src/comptime/comptime.c src/interp/interp.c "
+             "src/runtime/runtime.c src/runtime/json.c src/runtime/regex.c "
+             "src/runtime/shell.c src/runtime/text.c "
+             "-lm -o %s",
+             c_path, bin_path);
+    int cc = system(cc_cmd);
     if (cc != 0) {
         fprintf(stderr, "Native fallback compile failed\n");
         return ERR_INTERNAL;
     }
 
-    int rc = system("./bin/fxsh_native_tmp");
+    char run_cmd[192];
+    snprintf(run_cmd, sizeof(run_cmd), "./%s", bin_path);
+    int rc = system(run_cmd);
     if (rc != 0) {
         fprintf(stderr, "Native fallback run failed (exit=%d)\n", rc);
         return ERR_INTERNAL;
@@ -359,8 +472,27 @@ static fxsh_error_t run_native_codegen(fxsh_ast_node_t *ast) {
     if (!code)
         return ERR_OUT_OF_MEMORY;
 
-    sp_str_t c_path = sp_str_lit("build/fxsh_native_tmp.c");
-    sp_str_t bin_path = sp_str_lit("bin/fxsh_native_tmp");
+    long pid = (long)getpid();
+    char c_path_buf[128];
+    char bin_path_buf[128];
+    char main_obj_buf[128];
+    char utils_obj_buf[128];
+    char json_obj_buf[128];
+    char regex_obj_buf[128];
+    char shell_obj_buf[128];
+    char text_obj_buf[128];
+
+    snprintf(c_path_buf, sizeof(c_path_buf), "build/fxsh_native_%ld.c", pid);
+    snprintf(bin_path_buf, sizeof(bin_path_buf), "bin/fxsh_native_%ld", pid);
+    snprintf(main_obj_buf, sizeof(main_obj_buf), "build/fxsh_native_%ld.o", pid);
+    snprintf(utils_obj_buf, sizeof(utils_obj_buf), "build/utils_native_%ld.o", pid);
+    snprintf(json_obj_buf, sizeof(json_obj_buf), "build/json_native_%ld.o", pid);
+    snprintf(regex_obj_buf, sizeof(regex_obj_buf), "build/regex_native_%ld.o", pid);
+    snprintf(shell_obj_buf, sizeof(shell_obj_buf), "build/shell_native_%ld.o", pid);
+    snprintf(text_obj_buf, sizeof(text_obj_buf), "build/text_native_%ld.o", pid);
+
+    sp_str_t c_path = sp_str_view(c_path_buf);
+    sp_str_t bin_path = sp_str_view(bin_path_buf);
     fxsh_error_t err = fxsh_write_file(c_path, (sp_str_t){.data = code, .len = (u32)strlen(code)});
     sp_free(code);
     if (err != ERR_OK)
@@ -368,7 +500,7 @@ static fxsh_error_t run_native_codegen(fxsh_ast_node_t *ast) {
 
     const char *extra_cflags = getenv("FXSH_CFLAGS");
     const char *extra_ldflags = getenv("FXSH_LDFLAGS");
-    char cc_cmd[2048];
+    char cc_cmd[4096];
 #if defined(__ANDROID__)
     const char *platform_flags = "-DSP_PS_DISABLE";
 #else
@@ -376,21 +508,27 @@ static fxsh_error_t run_native_codegen(fxsh_ast_node_t *ast) {
 #endif
     snprintf(cc_cmd, sizeof(cc_cmd),
              "clang -std=gnu17 -D _GNU_SOURCE -DSP_IMPLEMENTATION -O2 -Wall -Wextra -Iinclude "
-             "-Ilib %s %s -c build/fxsh_native_tmp.c -o build/fxsh_native_tmp.o && "
+             "-Ilib %s %s -c %s -o %s && "
+             "clang -std=gnu17 -D _GNU_SOURCE -DSP_IMPLEMENTATION -O2 -Wall -Wextra -Iinclude "
+             "-Ilib %s %s -c "
+             "src/utils.c -o %s && "
              "clang -std=gnu17 -D _GNU_SOURCE -O2 -Wall -Wextra -Iinclude -Ilib %s %s -c "
-             "src/runtime/json.c -o build/json_native_tmp.o && "
+             "src/runtime/json.c -o %s && "
              "clang -std=gnu17 -D _GNU_SOURCE -O2 -Wall -Wextra -Iinclude -Ilib %s %s -c "
-             "src/runtime/regex.c -o build/regex_native_tmp.o && "
+             "src/runtime/regex.c -o %s && "
              "clang -std=gnu17 -D _GNU_SOURCE -O2 -Wall -Wextra -Iinclude -Ilib %s %s -c "
-             "src/runtime/shell.c -o build/shell_native_tmp.o && "
+             "src/runtime/shell.c -o %s && "
              "clang -std=gnu17 -D _GNU_SOURCE -O2 -Wall -Wextra -Iinclude -Ilib %s %s -c "
-             "src/runtime/text.c -o build/text_native_tmp.o && "
-             "clang build/fxsh_native_tmp.o build/json_native_tmp.o build/regex_native_tmp.o "
-             "build/shell_native_tmp.o build/text_native_tmp.o -lm -o bin/fxsh_native_tmp %s",
-             platform_flags, extra_cflags ? extra_cflags : "", platform_flags,
-             extra_cflags ? extra_cflags : "", platform_flags, extra_cflags ? extra_cflags : "",
-             platform_flags, extra_cflags ? extra_cflags : "", platform_flags,
-             extra_cflags ? extra_cflags : "", extra_ldflags ? extra_ldflags : "");
+             "src/runtime/text.c -o %s && "
+             "clang %s %s %s %s %s %s -lm -o %s %s",
+             platform_flags, extra_cflags ? extra_cflags : "", c_path_buf, main_obj_buf,
+             platform_flags, extra_cflags ? extra_cflags : "", utils_obj_buf, platform_flags,
+             extra_cflags ? extra_cflags : "", json_obj_buf, platform_flags,
+             extra_cflags ? extra_cflags : "", regex_obj_buf, platform_flags,
+             extra_cflags ? extra_cflags : "", shell_obj_buf, platform_flags,
+             extra_cflags ? extra_cflags : "", text_obj_buf, main_obj_buf, utils_obj_buf,
+             json_obj_buf, regex_obj_buf, shell_obj_buf, text_obj_buf, bin_path_buf,
+             extra_ldflags ? extra_ldflags : "");
     int cc = system(cc_cmd);
     if (cc != 0) {
         fprintf(stderr, "Native codegen compile failed\n");
@@ -398,7 +536,9 @@ static fxsh_error_t run_native_codegen(fxsh_ast_node_t *ast) {
         return ERR_INTERNAL;
     }
 
-    int rc = system("./bin/fxsh_native_tmp");
+    char run_cmd[192];
+    snprintf(run_cmd, sizeof(run_cmd), "./%s", bin_path_buf);
+    int rc = system(run_cmd);
     if (rc != 0) {
         fprintf(stderr, "Native run failed (exit=%d)\n", rc);
         return ERR_INTERNAL;
@@ -590,6 +730,10 @@ int main(int argc, char **argv) {
     if (ast->kind == AST_PROGRAM) {
         sp_dyn_array_for(ast->data.decls, i) {
             fxsh_ast_node_t *decl = ast->data.decls[i];
+            if (decl->kind == AST_TYPE_DEF) {
+                (void)fxsh_ct_eval(decl, &ctx);
+                continue;
+            }
             if (decl->kind == AST_DECL_LET || decl->kind == AST_LET) {
                 if (!decl->data.let.is_comptime) {
                     fxsh_ast_node_t fake = {0};

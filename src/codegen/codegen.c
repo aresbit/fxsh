@@ -1071,6 +1071,10 @@ static void emit_c_type_for_fxsh_type(codegen_ctx_t *ctx, sp_str_t name) {
         emit_raw(ctx, "sp_str_t");
         return;
     }
+    if (sp_str_equal(name, TYPE_TYPE)) {
+        emit_raw(ctx, "fxsh_type_t*");
+        return;
+    }
     if (sp_str_equal(name, TYPE_UNIT)) {
         emit_raw(ctx, "void");
         return;
@@ -1308,6 +1312,85 @@ static void gen_literal(codegen_ctx_t *ctx, fxsh_ast_node_t *ast) {
             break;
         case AST_LIT_UNIT:
             emit_raw(ctx, "0 /* unit */");
+            break;
+        case AST_TYPE_VALUE:
+            if (!ast->data.type_value) {
+                emit_raw(ctx, "NULL");
+                break;
+            }
+            switch (ast->data.type_value->kind) {
+                case TYPE_VAR:
+                    emit_fmt(ctx, "fxsh_type_var(%d)", ast->data.type_value->data.var);
+                    break;
+                case TYPE_CON:
+                    emit_fmt(ctx, "fxsh_type_con((sp_str_t){ .data = \"%.*s\", .len = %u })",
+                             ast->data.type_value->data.con.len,
+                             ast->data.type_value->data.con.data,
+                             (unsigned)ast->data.type_value->data.con.len);
+                    break;
+                case TYPE_ARROW: {
+                    fxsh_ast_node_t lhs = {.kind = AST_TYPE_VALUE};
+                    fxsh_ast_node_t rhs = {.kind = AST_TYPE_VALUE};
+                    lhs.data.type_value = ast->data.type_value->data.arrow.param;
+                    rhs.data.type_value = ast->data.type_value->data.arrow.ret;
+                    emit_raw(ctx, "fxsh_type_arrow(");
+                    gen_literal(ctx, &lhs);
+                    emit_raw(ctx, ", ");
+                    gen_literal(ctx, &rhs);
+                    emit_raw(ctx, ")");
+                    break;
+                }
+                case TYPE_APP: {
+                    fxsh_ast_node_t con = {.kind = AST_TYPE_VALUE};
+                    fxsh_ast_node_t arg = {.kind = AST_TYPE_VALUE};
+                    con.data.type_value = ast->data.type_value->data.app.con;
+                    arg.data.type_value = ast->data.type_value->data.app.arg;
+                    emit_raw(ctx, "fxsh_type_apply(");
+                    gen_literal(ctx, &con);
+                    emit_raw(ctx, ", ");
+                    gen_literal(ctx, &arg);
+                    emit_raw(ctx, ")");
+                    break;
+                }
+                case TYPE_TUPLE: {
+                    emit_raw(ctx, "({ fxsh_type_t *_t = fxsh_type_tuple_make(");
+                    emit_fmt(ctx, "%u",
+                             (unsigned)sp_dyn_array_size(ast->data.type_value->data.tuple));
+                    emit_raw(ctx, "); ");
+                    sp_dyn_array_for(ast->data.type_value->data.tuple, i) {
+                        fxsh_ast_node_t elem = {.kind = AST_TYPE_VALUE};
+                        elem.data.type_value = ast->data.type_value->data.tuple[i];
+                        emit_fmt(ctx, "fxsh_type_tuple_set(_t, %u, ", (unsigned)i);
+                        gen_literal(ctx, &elem);
+                        emit_raw(ctx, "); ");
+                    }
+                    emit_raw(ctx, "_t; })");
+                    break;
+                }
+                case TYPE_RECORD: {
+                    emit_raw(ctx, "({ fxsh_type_t *_t = fxsh_type_record_make(");
+                    emit_fmt(ctx, "%u, %d",
+                             (unsigned)sp_dyn_array_size(ast->data.type_value->data.record.fields),
+                             ast->data.type_value->data.record.row_var);
+                    emit_raw(ctx, "); ");
+                    sp_dyn_array_for(ast->data.type_value->data.record.fields, i) {
+                        fxsh_field_t *f = &ast->data.type_value->data.record.fields[i];
+                        fxsh_ast_node_t ft = {.kind = AST_TYPE_VALUE};
+                        ft.data.type_value = f->type;
+                        emit_fmt(ctx, "fxsh_type_record_set(_t, %u, (sp_str_t){ .data = \"",
+                                 (unsigned)i);
+                        emit_c_escaped_str(ctx, f->name);
+                        emit_fmt(ctx, "\", .len = %u }, ", (unsigned)f->name.len);
+                        gen_literal(ctx, &ft);
+                        emit_raw(ctx, "); ");
+                    }
+                    emit_raw(ctx, "_t; })");
+                    break;
+                }
+                default:
+                    emit_raw(ctx, "NULL /* unsupported type literal */");
+                    break;
+            }
             break;
         default:
             break;
@@ -2227,6 +2310,9 @@ static void emit_c_type_guess_for_expr(codegen_ctx_t *ctx, fxsh_ast_node_t *expr
         case AST_LIT_STRING:
             emit_raw(ctx, "sp_str_t");
             return;
+        case AST_TYPE_VALUE:
+            emit_raw(ctx, "fxsh_type_t*");
+            return;
         case AST_BINARY:
             if (expr->data.binary.op == TOK_CONCAT) {
                 emit_raw(ctx, "sp_str_t");
@@ -2304,6 +2390,11 @@ static void gen_boxed_expr(codegen_ctx_t *ctx, fxsh_ast_node_t *expr) {
             return;
         case AST_LIT_STRING:
             emit_raw(ctx, "fxsh_box_str(");
+            gen_expr(ctx, expr);
+            emit_raw(ctx, ")");
+            return;
+        case AST_TYPE_VALUE:
+            emit_raw(ctx, "fxsh_box_ptr((void*)");
             gen_expr(ctx, expr);
             emit_raw(ctx, ")");
             return;
@@ -3038,6 +3129,10 @@ static void emit_zero_init_for_type(codegen_ctx_t *ctx, fxsh_type_t *t) {
         return;
     }
     if (t->kind == TYPE_CON) {
+        if (sp_str_equal(t->data.con, TYPE_TYPE)) {
+            emit_raw(ctx, "NULL");
+            return;
+        }
         if (sp_str_equal(t->data.con, TYPE_STRING)) {
             emit_raw(ctx, "((sp_str_t){0})");
             return;
@@ -3609,6 +3704,8 @@ static fxsh_type_t *type_from_literal_expr(fxsh_ast_node_t *expr) {
             return fxsh_type_con(TYPE_BOOL);
         case AST_LIT_STRING:
             return fxsh_type_con(TYPE_STRING);
+        case AST_TYPE_VALUE:
+            return fxsh_type_con(TYPE_TYPE);
         case AST_LIT_UNIT:
             return fxsh_type_con(TYPE_UNIT);
         default:
@@ -3697,6 +3794,7 @@ static void gen_expr(codegen_ctx_t *ctx, fxsh_ast_node_t *ast) {
         case AST_LIT_STRING:
         case AST_LIT_BOOL:
         case AST_LIT_UNIT:
+        case AST_TYPE_VALUE:
             gen_literal(ctx, ast);
             break;
         case AST_IDENT: {
@@ -4844,7 +4942,17 @@ static void gen_prelude(codegen_ctx_t *ctx) {
     emit_line(ctx, "typedef uint32_t u32;");
     emit_line(ctx, "typedef double   f64;");
     emit_line(ctx, "typedef char     c8;");
+    emit_line(ctx, "typedef s32 fxsh_type_var_t;");
     emit_line(ctx, "typedef struct { const char *data; u32 len; } sp_str_t;");
+    emit_line(ctx, "typedef enum { TYPE_VAR, TYPE_CON, TYPE_ARROW, TYPE_TUPLE, TYPE_RECORD, "
+                   "TYPE_APP } fxsh_type_kind_t;");
+    emit_line(ctx, "typedef struct fxsh_type fxsh_type_t;");
+    emit_line(ctx, "typedef struct { sp_str_t name; fxsh_type_t *type; } fxsh_field_t;");
+    emit_line(ctx, "struct fxsh_type { fxsh_type_kind_t kind; union { fxsh_type_var_t var; "
+                   "sp_str_t con; struct { fxsh_type_t *param; fxsh_type_t *ret; } arrow; "
+                   "struct { u32 len; fxsh_type_t **items; } tuple; "
+                   "struct { u32 len; fxsh_field_t *fields; fxsh_type_var_t row_var; } record; "
+                   "struct { fxsh_type_t *con; fxsh_type_t *arg; } app; } data; };");
     emit_line(ctx, "typedef enum { FXSH_VAL_I64, FXSH_VAL_F64, FXSH_VAL_BOOL, FXSH_VAL_STR, "
                    "FXSH_VAL_PTR } fxsh_val_kind_t;");
     emit_line(ctx, "typedef struct { fxsh_val_kind_t kind; union { s64 i; f64 f; bool b; sp_str_t "
@@ -4898,6 +5006,51 @@ static void gen_prelude(codegen_ctx_t *ctx) {
     emit_line(ctx, "extern sp_str_t fxsh_from_cstr(const char *p);");
     emit_line(ctx, "extern bool fxsh_str_eq(sp_str_t a, sp_str_t b);");
     emit_line(ctx, "extern sp_str_t fxsh_str_concat(sp_str_t a, sp_str_t b);");
+    emit_line(ctx, "");
+    emit_line(ctx, "static inline fxsh_type_t *fxsh_codegen_type_new(void) {");
+    emit_line(ctx, "  return (fxsh_type_t*)calloc(1, sizeof(fxsh_type_t));");
+    emit_line(ctx, "}");
+    emit_line(ctx, "static inline fxsh_type_t *fxsh_type_var(fxsh_type_var_t v) {");
+    emit_line(ctx, "  fxsh_type_t *t = fxsh_codegen_type_new(); if (!t) return NULL; t->kind = "
+                   "TYPE_VAR; t->data.var = v; return t;");
+    emit_line(ctx, "}");
+    emit_line(ctx, "static inline fxsh_type_t *fxsh_type_con(sp_str_t name) {");
+    emit_line(ctx, "  fxsh_type_t *t = fxsh_codegen_type_new(); if (!t) return NULL; t->kind = "
+                   "TYPE_CON; t->data.con = name; return t;");
+    emit_line(ctx, "}");
+    emit_line(ctx, "static inline fxsh_type_t *fxsh_type_arrow(fxsh_type_t *param, fxsh_type_t "
+                   "*ret) {");
+    emit_line(ctx, "  fxsh_type_t *t = fxsh_codegen_type_new(); if (!t) return NULL; t->kind = "
+                   "TYPE_ARROW; t->data.arrow.param = param; t->data.arrow.ret = ret; return t;");
+    emit_line(ctx, "}");
+    emit_line(ctx, "static inline fxsh_type_t *fxsh_type_apply(fxsh_type_t *con, fxsh_type_t "
+                   "*arg) {");
+    emit_line(ctx, "  fxsh_type_t *t = fxsh_codegen_type_new(); if (!t) return NULL; t->kind = "
+                   "TYPE_APP; t->data.app.con = con; t->data.app.arg = arg; return t;");
+    emit_line(ctx, "}");
+    emit_line(ctx, "static inline fxsh_type_t *fxsh_type_tuple_make(u32 len) {");
+    emit_line(ctx, "  fxsh_type_t *t = fxsh_codegen_type_new(); if (!t) return NULL; t->kind = "
+                   "TYPE_TUPLE; t->data.tuple.len = len; t->data.tuple.items = len ? "
+                   "(fxsh_type_t**)calloc(len, sizeof(fxsh_type_t*)) : NULL; return t;");
+    emit_line(ctx, "}");
+    emit_line(ctx, "static inline void fxsh_type_tuple_set(fxsh_type_t *t, u32 idx, fxsh_type_t "
+                   "*elem) {");
+    emit_line(ctx, "  if (!t || t->kind != TYPE_TUPLE || idx >= t->data.tuple.len) return; "
+                   "t->data.tuple.items[idx] = elem;");
+    emit_line(ctx, "}");
+    emit_line(ctx, "static inline fxsh_type_t *fxsh_type_record_make(u32 len, fxsh_type_var_t "
+                   "row_var) {");
+    emit_line(ctx, "  fxsh_type_t *t = fxsh_codegen_type_new(); if (!t) return NULL; t->kind = "
+                   "TYPE_RECORD; t->data.record.len = len; t->data.record.row_var = row_var; "
+                   "t->data.record.fields = len ? (fxsh_field_t*)calloc(len, sizeof(fxsh_field_t)) "
+                   ": NULL; return t;");
+    emit_line(ctx, "}");
+    emit_line(ctx, "static inline void fxsh_type_record_set(fxsh_type_t *t, u32 idx, sp_str_t "
+                   "name, fxsh_type_t *field_t) {");
+    emit_line(ctx, "  if (!t || t->kind != TYPE_RECORD || idx >= t->data.record.len) return; "
+                   "t->data.record.fields[idx].name = name; "
+                   "t->data.record.fields[idx].type = field_t;");
+    emit_line(ctx, "}");
     emit_line(ctx, "");
     emit_line(ctx, "static inline fxsh_value_t fxsh_box_i64(s64 v) { fxsh_value_t x; x.kind = "
                    "FXSH_VAL_I64; x.as.i = v; return x; }");

@@ -1,0 +1,25 @@
+# Comptime type constructor API
+
+type 'a box = Box of 'a
+type flag = On | Off
+
+let comptime VecInt = @Vector(@typeOf(1))
+let comptime VecStr = @vectorOf(@typeOf("fx"))
+let comptime VecHasData = @hasField(VecInt, "data")
+let comptime VecFields = @fieldsOf(VecStr)
+let comptime IntList = @List(@typeOf(1))
+let comptime StrOption = @optionOf(@typeOf("fx"))
+let comptime IntResult = @Result(@typeOf(1), @typeOf("boom"))
+let comptime ListFields = @fieldsOf(IntList)
+let comptime IntBox = @box(@typeOf(1))
+let comptime Flag = @flag()
+let UserType = @typeOf({ id = 1, name = "fx" })
+let PairType = @typeOf((1, "fx"))
+let comptime UserHasId = @hasField(UserType, "id")
+let comptime UserFields = @fieldsOf(UserType)
+let comptime PairFields = @fieldsOf(PairType)
+let comptime UserTypeName = @typeName(UserType)
+let comptime PairTypeName = @typeName(PairType)
+let comptime UserIsRecord = @isRecord(UserType)
+let comptime PairIsTuple = @isTuple(PairType)
+let comptime VecIsRecord = @isRecord(VecInt)
