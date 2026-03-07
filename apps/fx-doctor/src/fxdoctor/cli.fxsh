@@ -1,0 +1,42 @@
+import FxDoctor.Model
+
+let env_or = fn key fallback ->
+  let v = getenv key in
+  if v == "" then fallback else v
+
+let env_bool = fn key fallback ->
+  let raw = env_or key fallback in
+  (raw == "1") or (raw == "true") or (raw == "yes")
+
+let parse_mode = fn raw ->
+  if raw == "json" then FxDoctor.Model.Json
+  else if raw == "prompt" then FxDoctor.Model.Prompt
+  else if raw == "schema" then FxDoctor.Model.Schema
+  else if raw == "help" then FxDoctor.Model.Help
+  else FxDoctor.Model.Doctor
+
+let load = fn () ->
+  let mode_raw = env_or "FX_DOCTOR_MODE" "doctor" in
+  let root = env_or "FX_DOCTOR_ROOT" "." in
+  let execute = env_bool "FX_DOCTOR_EXEC" "1" in
+  let write_path = env_or "FX_DOCTOR_WRITE" "" in
+  { root = root, execute = execute, mode = parse_mode mode_raw, write_path = write_path }
+
+let usage = """
+fx-doctor 0.1.0
+
+A local AI engineering assistant for repo health checks.
+
+Usage:
+  fx-doctor [--root PATH] [--json|--prompt|--schema] [--no-run] [--write PATH]
+
+Modes:
+  --json      Emit a machine-readable JSON summary
+  --prompt    Emit an LLM handoff prompt
+  --schema    Emit the compile-time report schema
+  --help      Show this help
+
+Execution:
+  default     Run planned checks in the target repository
+  --no-run    Only plan checks, do not execute them
+"""

@@ -1,0 +1,19 @@
+let rec append = fn xs ys ->
+  match xs with
+  | [] -> ys
+  | x :: xs1 -> x :: (append xs1 ys)
+  end
+
+let rec reverse_into = fn acc xs ->
+  match xs with
+  | [] -> acc
+  | x :: xs1 -> reverse_into (x :: acc) xs1
+  end
+
+let reverse = fn xs -> reverse_into [] xs
+
+let rec length = fn xs ->
+  match xs with
+  | [] -> 0
+  | _ :: xs1 -> 1 + (length xs1)
+  end

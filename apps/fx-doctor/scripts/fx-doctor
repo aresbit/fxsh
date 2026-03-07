@@ -1,0 +1,283 @@
+#!/bin/sh
+set -eu
+
+APP_DIR=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
+MODE=doctor
+ROOT=.
+EXEC=1
+WRITE_PATH=
+
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    --json) MODE=json ;;
+    --prompt) MODE=prompt ;;
+    --schema) MODE=schema ;;
+    --help|-h) MODE=help ;;
+    --no-run) EXEC=0 ;;
+    --root)
+      shift
+      ROOT=${1:-.}
+      ;;
+    --write)
+      shift
+      WRITE_PATH=${1:-}
+      ;;
+    *)
+      echo "fx-doctor: unknown argument: $1" >&2
+      exit 2
+      ;;
+  esac
+  shift
+done
+
+json_escape() {
+  printf '%s' "$1" | sed 's/\\/\\\\/g; s/"/\\"/g; :a;N;$!ba;s/\n/\\n/g; s/\r/\\r/g; s/\t/\\t/g'
+}
+
+append_line() {
+  if [ -z "$1" ]; then
+    printf '%s' "$2"
+  else
+    printf '%s\n%s' "$1" "$2"
+  fi
+}
+
+append_step_json() {
+  item=$1
+  if [ -z "$STEP_JSON" ]; then
+    STEP_JSON=$item
+  else
+    STEP_JSON="$STEP_JSON,$item"
+  fi
+}
+
+append_advice_json() {
+  item=$1
+  if [ -z "$ADVICE_JSON" ]; then
+    ADVICE_JSON=$item
+  else
+    ADVICE_JSON="$ADVICE_JSON,$item"
+  fi
+}
+
+append_advice() {
+  msg=$1
+  if [ -z "$ADVICE_TEXT" ]; then
+    ADVICE_TEXT="- $msg"
+  else
+    ADVICE_TEXT="$ADVICE_TEXT
+- $msg"
+  fi
+  append_advice_json "\"$(json_escape "$msg")\""
+  ADVICE_COUNT=$((ADVICE_COUNT + 1))
+}
+
+run_step() {
+  group=$1
+  name=$2
+  cmd=$3
+  verify=$4
+  status=skipped
+  summary='planned only'
+
+  if [ "$EXEC" = "1" ]; then
+    tmp_out=$(mktemp)
+    if (cd "$ROOT" && sh -lc "$cmd") >"$tmp_out" 2>&1; then
+      code=0
+    else
+      code=$?
+    fi
+    stdout=$(cat "$tmp_out")
+    rm -f "$tmp_out"
+
+    if [ "$verify" = "stdout_empty" ]; then
+      if [ "$code" -ne 0 ]; then
+        status=failed
+        summary="exit $code"
+      elif [ -z "$stdout" ]; then
+        status=passed
+        summary=clean
+      else
+        status=failed
+        summary='worktree not clean'
+      fi
+    else
+      if [ "$code" -eq 0 ]; then
+        status=passed
+        summary=ok
+      else
+        status=failed
+        summary="exit $code"
+      fi
+    fi
+  fi
+
+  case "$status" in
+    passed) PASSED=$((PASSED + 1)) ;;
+    failed) FAILED=$((FAILED + 1)) ;;
+    skipped) SKIPPED=$((SKIPPED + 1)) ;;
+  esac
+
+  STEP_COUNT=$((STEP_COUNT + 1))
+  line="- [$status] $group/$name: $summary"
+  cmd_line="    \$ $cmd"
+  STEPS_TEXT=$(append_line "$STEPS_TEXT" "$line")
+  STEPS_TEXT=$(append_line "$STEPS_TEXT" "$cmd_line")
+  append_step_json "{\"status\":\"$(json_escape "$status")\",\"group\":\"$(json_escape "$group")\",\"name\":\"$(json_escape "$name")\",\"command\":\"$(json_escape "$cmd")\",\"summary\":\"$(json_escape "$summary")\"}"
+}
+
+has_file() {
+  [ -e "$ROOT/$1" ]
+}
+
+has_package_script() {
+  [ -f "$ROOT/package.json" ] || return 1
+  grep -q "\"$1\"" "$ROOT/package.json"
+}
+
+NODE=0
+RUST=0
+PYTHON=0
+C_PROJ=0
+GIT=0
+
+has_file package.json && NODE=1 || true
+has_file Cargo.toml && RUST=1 || true
+has_file pyproject.toml && PYTHON=1 || true
+has_file requirements.txt && PYTHON=1 || true
+has_file requirements-agent.txt && PYTHON=1 || true
+has_file Makefile && C_PROJ=1 || true
+has_file .git && GIT=1 || true
+
+count=$((NODE + RUST + PYTHON + C_PROJ))
+if [ "$count" -eq 0 ]; then
+  KIND=unknown
+elif [ "$count" -gt 1 ]; then
+  KIND=mixed
+elif [ "$NODE" -eq 1 ]; then
+  KIND=node
+elif [ "$RUST" -eq 1 ]; then
+  KIND=rust
+elif [ "$PYTHON" -eq 1 ]; then
+  KIND=python
+else
+  KIND=c
+fi
+
+ECOSYSTEMS=
+[ "$NODE" -eq 1 ] && ECOSYSTEMS=$(append_line "$ECOSYSTEMS" node) || true
+[ "$RUST" -eq 1 ] && ECOSYSTEMS=$(append_line "$ECOSYSTEMS" rust) || true
+[ "$PYTHON" -eq 1 ] && ECOSYSTEMS=$(append_line "$ECOSYSTEMS" python) || true
+[ "$C_PROJ" -eq 1 ] && ECOSYSTEMS=$(append_line "$ECOSYSTEMS" c) || true
+ECOSYSTEMS=$(printf '%s' "$ECOSYSTEMS" | tr '\n' ',' | sed 's/,$//; s/,/, /g')
+
+BRANCH=none
+GIT_DIRTY=false
+GIT_STATE=clean
+if [ "$GIT" -eq 1 ]; then
+  BRANCH=$(cd "$ROOT" && git branch --show-current 2>/dev/null || printf 'unknown')
+  STATUS_SHORT=$(cd "$ROOT" && git status --short 2>/dev/null || true)
+  if [ -n "$STATUS_SHORT" ]; then
+    GIT_DIRTY=true
+    GIT_STATE=dirty
+  fi
+fi
+
+STEPS_TEXT=
+STEP_JSON=
+ADVICE_TEXT=
+ADVICE_JSON=
+STEP_COUNT=0
+ADVICE_COUNT=0
+PASSED=0
+FAILED=0
+SKIPPED=0
+
+[ "$GIT" -eq 1 ] && run_step git git-clean 'git status --short' stdout_empty
+
+if [ "$NODE" -eq 1 ]; then
+  has_package_script lint && run_step node lint 'npm run lint --silent' exit_zero || true
+  has_package_script typecheck && run_step node typecheck 'npm run typecheck --silent' exit_zero || true
+  has_package_script test && run_step node test 'npm test --silent' exit_zero || true
+  has_package_script build && run_step node build 'npm run build --silent' exit_zero || true
+fi
+
+if [ "$RUST" -eq 1 ]; then
+  run_step rust fmt 'cargo fmt --check' exit_zero
+  run_step rust test 'cargo test --quiet' exit_zero
+  run_step rust build 'cargo build --quiet' exit_zero
+fi
+
+if [ "$PYTHON" -eq 1 ]; then
+  run_step python compileall 'python -m compileall .' exit_zero
+  has_file tests && run_step python pytest 'python -m pytest -q' exit_zero || true
+fi
+
+if [ "$C_PROJ" -eq 1 ]; then
+  run_step c test 'make test' exit_zero
+  run_step c build 'make' exit_zero
+fi
+
+if [ "$GIT_DIRTY" = true ]; then
+  append_advice 'Commit or stash working tree changes before release.'
+fi
+if [ "$FAILED" -gt 0 ]; then
+  append_advice 'Fix failing checks before shipping.'
+fi
+if [ "$NODE" -eq 1 ]; then
+  append_advice 'Keep npm scripts deterministic so local and CI checks agree.'
+fi
+if [ "$RUST" -eq 1 ]; then
+  append_advice 'Use cargo fmt --check and cargo test as the canonical Rust gate.'
+fi
+if [ "$PYTHON" -eq 1 ]; then
+  append_advice 'Pin Python tooling versions for reproducible diagnostics.'
+fi
+if [ "$C_PROJ" -eq 1 ]; then
+  append_advice 'Keep Make targets idempotent and side-effect light for safe assistant runs.'
+fi
+if [ "$STEP_COUNT" -eq 0 ]; then
+  append_advice 'No standard checks were discovered; add lint, test, or build commands for your stack.'
+fi
+
+if [ "$FAILED" -eq 0 ]; then
+  READY=true
+else
+  READY=false
+fi
+
+export FX_DOCTOR_MODE="$MODE"
+export FX_DOCTOR_WRITE="$WRITE_PATH"
+export FXD_ROOT="$ROOT"
+export FXD_KIND="$KIND"
+export FXD_ECOSYSTEMS="$ECOSYSTEMS"
+export FXD_EXECUTED=$( [ "$EXEC" = "1" ] && printf true || printf false )
+export FXD_BRANCH="$BRANCH"
+export FXD_GIT_STATE="$GIT_STATE"
+export FXD_GIT_DIRTY="$GIT_DIRTY"
+export FXD_READY="$READY"
+export FXD_PASSED="$PASSED"
+export FXD_FAILED="$FAILED"
+export FXD_SKIPPED="$SKIPPED"
+export FXD_STEPS_TEXT="$STEPS_TEXT"
+export FXD_ADVICE_TEXT="$ADVICE_TEXT"
+export FXD_STEP_JSON="$STEP_JSON"
+export FXD_ADVICE_JSON="$ADVICE_JSON"
+export FXD_ADVICE_COUNT="$ADVICE_COUNT"
+export FXD_STEP_COUNT="$STEP_COUNT"
+
+if [ -x "$APP_DIR/bin/fx-doctor-native" ]; then
+  exec "$APP_DIR/bin/fx-doctor-native"
+fi
+
+FXSH_BIN=${FXSH_BIN:-"$APP_DIR/../../bin/fxsh"}
+TMP_OUT=$(mktemp)
+if "$FXSH_BIN" "$APP_DIR/src/main.fxsh" >"$TMP_OUT" 2>&1; then
+  awk '''BEGIN { emit = 0 } /^Comptime evaluation:$/ { emit = 1; next } /^Interpreter:$/ { exit } /^Native:$/ { exit } { if (emit && $0 !~ /^  comptime /) print }''' "$TMP_OUT"
+  rm -f "$TMP_OUT"
+  exit 0
+else
+  cat "$TMP_OUT" >&2
+  rm -f "$TMP_OUT"
+  exit 1
+fi

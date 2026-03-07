@@ -1,0 +1,30 @@
+import String
+
+let rec replace_all = fn old_t new_t s ->
+  let next = replace_once s old_t new_t in
+  if next == s then s else replace_all old_t new_t next
+
+let bool_text = fn b -> if b then "true" else "false"
+
+let json_escape = fn s ->
+  let s1 = replace_all "\\" "\\\\" s in
+  let s2 = replace_all "\"" "\\\"" s1 in
+  let s3 = replace_all "\n" "\\n" s2 in
+  let s4 = replace_all "\r" "\\r" s3 in
+  replace_all "\t" "\\t" s4
+
+let json_string = fn s -> "\"" ++ (json_escape s) ++ "\""
+
+let shell_quote = fn s ->
+  let safe = replace_all "'" "'\\''" s in
+  "'" ++ safe ++ "'"
+
+let rec join_with = fn sep xs ->
+  match xs with
+  | [] -> ""
+  | x :: [] -> x
+  | x :: xs1 -> x ++ sep ++ (join_with sep xs1)
+  end
+
+let join_lines = fn xs -> join_with "\n" xs
+let non_empty = fn s -> s != ""

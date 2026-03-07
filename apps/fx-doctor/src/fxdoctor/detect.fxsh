@@ -1,0 +1,29 @@
+let path_join = fn root rel -> if root == "." then rel else root ++ "/" ++ rel
+let has_file = fn root rel -> file_exists (path_join root rel)
+let read_text = fn root rel -> if has_file root rel then read_file (path_join root rel) else ""
+
+let has_package_script = fn root name ->
+  let raw = read_text root "package.json" in
+  if raw == "" then false
+  else
+    let compact = json_compact raw in
+    let path = "scripts." ++ name in
+    if compact == "" then false else json_has compact path
+  end
+
+let detect_kind = fn node rust python c ->
+  let count = (if node then 1 else 0) + (if rust then 1 else 0) + (if python then 1 else 0) + (if c then 1 else 0) in
+  if count == 0 then "unknown"
+  else if count > 1 then "mixed"
+  else if node then "node"
+  else if rust then "rust"
+  else if python then "python"
+  else "c"
+
+let inspect = fn root ->
+  let node = has_file root "package.json" in
+  let rust = has_file root "Cargo.toml" in
+  let python = (has_file root "pyproject.toml") or (has_file root "requirements.txt") or (has_file root "requirements-agent.txt") in
+  let c = has_file root "Makefile" in
+  let git = has_file root ".git" in
+  { root = root, node = node, rust = rust, python = python, c = c, git = git, kind = detect_kind node rust python c }

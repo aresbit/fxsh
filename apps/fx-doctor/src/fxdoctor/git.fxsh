@@ -1,0 +1,25 @@
+import FxDoctor.Stringx
+import Shell
+
+let in_root = fn root cmd ->
+  f"cd {FxDoctor.Stringx.shell_quote root} && {cmd}"
+
+let run = fn root cmd -> Shell.run (in_root root cmd)
+
+let inspect = fn info ->
+  if info.git then
+    let branch_run = run info.root "git branch --show-current" in
+    let status_run = run info.root "git status --short" in
+    let branch = if branch_run.code == 0 then branch_run.stdout else "" in
+    let status = if status_run.code == 0 then status_run.stdout else "" in
+    {
+      branch = branch,
+      dirty = status != "",
+      status = status
+    }
+  else
+    {
+      branch = "",
+      dirty = false,
+      status = ""
+    }

@@ -1,0 +1,70 @@
+type project_kind = Unknown | Node | Rust | Python | C | Mixed
+
+type step_status = Planned | Passed | Failed | Skipped
+
+type verifier = ExitZero | StdoutEmpty
+
+type output_mode = Doctor | Json | Prompt | Schema | Help
+
+trait Label = {
+  let label: Self -> string
+}
+
+impl Label for project_kind = {
+  let label kind =
+    match kind with
+    | Unknown -> "unknown"
+    | Node -> "node"
+    | Rust -> "rust"
+    | Python -> "python"
+    | C -> "c"
+    | Mixed -> "mixed"
+    end
+}
+
+impl Label for step_status = {
+  let label status =
+    match status with
+    | Planned -> "planned"
+    | Passed -> "passed"
+    | Failed -> "failed"
+    | Skipped -> "skipped"
+    end
+}
+
+impl Label for output_mode = {
+  let label mode =
+    match mode with
+    | Doctor -> "doctor"
+    | Json -> "json"
+    | Prompt -> "prompt"
+    | Schema -> "schema"
+    | Help -> "help"
+    end
+}
+
+let kind_label = Label.project_kind.label
+let status_label = Label.step_status.label
+let mode_label = Label.output_mode.label
+
+let tool_name = "fx-doctor"
+let version = "0.1.0"
+
+let sample_report = {
+  tool = tool_name,
+  root = ".",
+  kind = "unknown",
+  ready = true,
+  executed = true,
+  step_count = 0,
+  passed = 0,
+  failed = 0,
+  skipped = 0,
+  advice_count = 0
+}
+
+let comptime REPORT_SCHEMA = @jsonSchema(@typeOf(sample_report))
+let comptime REPORT_FIELDS = @fieldsOf(@typeOf(sample_report))
+
+let report_schema = REPORT_SCHEMA
+let report_fields = REPORT_FIELDS

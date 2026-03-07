@@ -1,0 +1,61 @@
+import FxDoctor.Stringx
+
+let mode = getenv "FX_DOCTOR_MODE"
+let root = getenv "FXD_ROOT"
+let kind = getenv "FXD_KIND"
+let ecosystems = getenv "FXD_ECOSYSTEMS"
+let executed = getenv "FXD_EXECUTED"
+let branch = getenv "FXD_BRANCH"
+let git_state = getenv "FXD_GIT_STATE"
+let ready = getenv "FXD_READY"
+let passed = getenv "FXD_PASSED"
+let failed = getenv "FXD_FAILED"
+let skipped = getenv "FXD_SKIPPED"
+let report_fields_text = "tool, version, root, kind, branch, git_dirty, ready, executed, step_count, passed, failed, skipped, advice_count, steps, advice"
+let steps_text = getenv "FXD_STEPS_TEXT"
+let advice_text = getenv "FXD_ADVICE_TEXT"
+let step_json = getenv "FXD_STEP_JSON"
+let advice_json = getenv "FXD_ADVICE_JSON"
+let advice_count = getenv "FXD_ADVICE_COUNT"
+let step_count = getenv "FXD_STEP_COUNT"
+let dirty = getenv "FXD_GIT_DIRTY"
+let usage = """
+fx-doctor 0.1.0
+
+A local AI engineering assistant for repo health checks.
+
+Usage:
+  fx-doctor [--root PATH] [--json|--prompt|--schema] [--no-run] [--write PATH]
+
+Modes:
+  --json      Emit a machine-readable JSON summary
+  --prompt    Emit an LLM handoff prompt
+  --schema    Emit the report schema
+  --help      Show this help
+
+Execution:
+  default     Run planned checks in the target repository
+  --no-run    Only plan checks, do not execute them
+"""
+let schema = "{\"type\":\"object\",\"properties\":{\"tool\":{\"type\":\"string\"},\"version\":{\"type\":\"string\"},\"root\":{\"type\":\"string\"},\"kind\":{\"type\":\"string\"},\"branch\":{\"type\":\"string\"},\"git_dirty\":{\"type\":\"boolean\"},\"ready\":{\"type\":\"boolean\"},\"executed\":{\"type\":\"boolean\"},\"step_count\":{\"type\":\"integer\"},\"passed\":{\"type\":\"integer\"},\"failed\":{\"type\":\"integer\"},\"skipped\":{\"type\":\"integer\"},\"advice_count\":{\"type\":\"integer\"},\"steps\":{\"type\":\"array\"},\"advice\":{\"type\":\"array\"}}}"
+
+let text_output = FxDoctor.Stringx.join_with "\n" ["fx-doctor 0.1.0", "root: " ++ root, "kind: " ++ kind, "ecosystems: " ++ ecosystems, "mode: " ++ mode, "executed: " ++ executed, "git: branch=" ++ branch ++ ", state=" ++ git_state, "summary: ready=" ++ ready ++ ", passed=" ++ passed ++ ", failed=" ++ failed ++ ", skipped=" ++ skipped, "report-fields: " ++ report_fields_text, "", "checks:", steps_text, "", "advice:", advice_text]
+let json_output = "{\"tool\":\"fx-doctor\",\"version\":\"0.1.0\",\"root\":" ++ (FxDoctor.Stringx.json_string root) ++ ",\"kind\":" ++ (FxDoctor.Stringx.json_string kind) ++ ",\"branch\":" ++ (FxDoctor.Stringx.json_string branch) ++ ",\"git_dirty\":" ++ dirty ++ ",\"ready\":" ++ ready ++ ",\"executed\":" ++ executed ++ ",\"step_count\":" ++ step_count ++ ",\"passed\":" ++ passed ++ ",\"failed\":" ++ failed ++ ",\"skipped\":" ++ skipped ++ ",\"advice_count\":" ++ advice_count ++ ",\"steps\":[" ++ step_json ++ "],\"advice\":[" ++ advice_json ++ "]}"
+let prompt_output = FxDoctor.Stringx.join_with "\n" ["You are assisting with a local engineering repository.", "Tool: fx-doctor", "Repo root: " ++ root, "Detected kind: " ++ kind, "Git branch: " ++ branch, "Git dirty: " ++ dirty, "Checks executed: " ++ executed, "Ready to ship: " ++ ready, "", "Check results:", steps_text, "", "Recommended next actions:", advice_text, "", "Respond with a concrete fix plan ordered by risk and impact."]
+
+let output =
+  if mode == "help" then usage
+  else if mode == "schema" then schema
+  else if mode == "json" then json_output
+  else if mode == "prompt" then prompt_output
+  else text_output
+
+let _ =
+  let write_path = getenv "FX_DOCTOR_WRITE" in
+  if write_path == "" then print output
+  else
+    let _ok = write_file write_path output in
+    print output
+  end
+
+let result = output
