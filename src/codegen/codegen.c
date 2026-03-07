@@ -172,6 +172,13 @@ static void collect_mono_specs(fxsh_ast_node_t *ast);
 static fxsh_type_t *infer_expr_type_strict_for_codegen(fxsh_ast_node_t *expr);
 static fxsh_type_t *if_result_type_hint(fxsh_ast_node_t *if_ast);
 static void emit_zero_init_for_type(codegen_ctx_t *ctx, fxsh_type_t *t);
+static bool tco_has_only_var_params(fxsh_ast_list_t params);
+static bool tco_has_tail_self_call(fxsh_ast_node_t *expr, sp_str_t self_name, u32 arity);
+static void gen_tail_dispatch(codegen_ctx_t *ctx, fxsh_ast_node_t *expr, sp_str_t self_name,
+                              fxsh_type_t *fn_t, fxsh_ast_list_t params, bool ret_unit);
+static bool enable_tco_for_let_lambda(fxsh_ast_node_t *ast, fxsh_ast_node_t *lam);
+static void gen_decl_let_lambda_body(codegen_ctx_t *ctx, fxsh_ast_node_t *ast, fxsh_ast_node_t *lam,
+                                     fxsh_type_t *fn_t);
 
 static bool cg_name_eq(sp_str_t n, const char *lit) {
     return sp_str_equal(n, sp_str_view((char *)lit));
@@ -3750,6 +3757,9 @@ static void gen_expr(codegen_ctx_t *ctx, fxsh_ast_node_t *ast) {
 static void gen_decl_fn(codegen_ctx_t *ctx, fxsh_ast_node_t *ast) {
     fxsh_type_t *fn_t = lookup_symbol_type(ast->data.decl_fn.name);
     bool ret_unit = is_type_con_named(return_type_of_fn(fn_t), TYPE_UNIT);
+    bool enable_tco = tco_has_only_var_params(ast->data.decl_fn.params) &&
+                      tco_has_tail_self_call(ast->data.decl_fn.body, ast->data.decl_fn.name,
+                                             (u32)sp_dyn_array_size(ast->data.decl_fn.params));
     u32 lty_m = local_type_mark();
     emit_indent(ctx);
     emit_c_type_for_type(ctx, return_type_of_fn(fn_t));
@@ -3775,21 +3785,66 @@ static void gen_decl_fn(codegen_ctx_t *ctx, fxsh_ast_node_t *ast) {
     }
     emit_raw(ctx, ") {\n");
     ctx->indent_level++;
-    emit_indent(ctx);
-    if (ret_unit) {
-        gen_expr(ctx, ast->data.decl_fn.body);
-        emit_raw(ctx, ";\n");
-        emit_indent(ctx);
-        emit_raw(ctx, "return;\n");
+    if (enable_tco) {
+        emit_line(ctx, "for (;;) {");
+        ctx->indent_level++;
+        gen_tail_dispatch(ctx, ast->data.decl_fn.body, ast->data.decl_fn.name, fn_t,
+                          ast->data.decl_fn.params, ret_unit);
+        ctx->indent_level--;
+        emit_line(ctx, "}");
     } else {
-        emit_raw(ctx, "return ");
-        gen_expr(ctx, ast->data.decl_fn.body);
-        emit_raw(ctx, ";\n");
+        emit_indent(ctx);
+        if (ret_unit) {
+            gen_expr(ctx, ast->data.decl_fn.body);
+            emit_raw(ctx, ";\n");
+            emit_indent(ctx);
+            emit_raw(ctx, "return;\n");
+        } else {
+            emit_raw(ctx, "return ");
+            gen_expr(ctx, ast->data.decl_fn.body);
+            emit_raw(ctx, ";\n");
+        }
     }
     ctx->indent_level--;
     emit_line(ctx, "}");
     local_type_pop_to(lty_m);
     sp_dyn_array_push(*ctx->output, '\n');
+}
+
+static bool enable_tco_for_let_lambda(fxsh_ast_node_t *ast, fxsh_ast_node_t *lam) {
+    if (!ast || !lam || lam->kind != AST_LAMBDA)
+        return false;
+    if (!tco_has_only_var_params(lam->data.lambda.params))
+        return false;
+    if (!ast->data.let.name.data || ast->data.let.name.len == 0)
+        return false;
+    return tco_has_tail_self_call(lam->data.lambda.body, ast->data.let.name,
+                                  (u32)sp_dyn_array_size(lam->data.lambda.params));
+}
+
+static void gen_decl_let_lambda_body(codegen_ctx_t *ctx, fxsh_ast_node_t *ast, fxsh_ast_node_t *lam,
+                                     fxsh_type_t *fn_t) {
+    bool ret_unit = is_type_con_named(return_type_of_fn(fn_t), TYPE_UNIT);
+    if (enable_tco_for_let_lambda(ast, lam)) {
+        emit_line(ctx, "for (;;) {");
+        ctx->indent_level++;
+        gen_tail_dispatch(ctx, lam->data.lambda.body, ast->data.let.name, fn_t,
+                          lam->data.lambda.params, ret_unit);
+        ctx->indent_level--;
+        emit_line(ctx, "}");
+    } else {
+        emit_indent(ctx);
+        if (ret_unit) {
+            gen_expr(ctx, lam->data.lambda.body);
+            emit_raw(ctx, ";\n");
+            emit_indent(ctx);
+            emit_raw(ctx, "return;\n");
+        } else {
+            emit_raw(ctx, "return ");
+            gen_expr(ctx, lam->data.lambda.body);
+            emit_raw(ctx, ";\n");
+        }
+    }
 }
 
 /* Heuristic: determine if a value expression is an ADT constructor application */
@@ -3847,6 +3902,163 @@ static bool flatten_call_head_ident(fxsh_ast_node_t *expr, sp_str_t *out_head, u
     if (out_argc)
         *out_argc = argc;
     return true;
+}
+
+static void flatten_call_args_in_order_rec(fxsh_ast_node_t *expr, fxsh_ast_list_t *out_args) {
+    if (!expr || expr->kind != AST_CALL || !out_args)
+        return;
+    flatten_call_args_in_order_rec(expr->data.call.func, out_args);
+    sp_dyn_array_for(expr->data.call.args, i) {
+        sp_dyn_array_push(*out_args, expr->data.call.args[i]);
+    }
+}
+
+static bool flatten_call_args_in_order(fxsh_ast_node_t *expr, fxsh_ast_list_t *out_args) {
+    if (!expr || expr->kind != AST_CALL || !out_args)
+        return false;
+    *out_args = SP_NULLPTR;
+    flatten_call_args_in_order_rec(expr, out_args);
+    return true;
+}
+
+static bool tco_has_only_var_params(fxsh_ast_list_t params) {
+    sp_dyn_array_for(params, i) {
+        if (!is_pat_var_node(params[i]))
+            return false;
+    }
+    return true;
+}
+
+static bool tco_is_self_tail_call(fxsh_ast_node_t *expr, sp_str_t self_name, u32 arity,
+                                  fxsh_ast_list_t *out_args) {
+    if (!expr || expr->kind != AST_CALL)
+        return false;
+    sp_str_t head = {0};
+    u32 argc = 0;
+    if (!flatten_call_head_ident(expr, &head, &argc))
+        return false;
+    if (!sp_str_equal(head, self_name) || argc != arity)
+        return false;
+    if (!flatten_call_args_in_order(expr, out_args))
+        return false;
+    return sp_dyn_array_size(*out_args) == argc;
+}
+
+static bool tco_has_tail_self_call(fxsh_ast_node_t *expr, sp_str_t self_name, u32 arity) {
+    if (!expr)
+        return false;
+
+    fxsh_ast_list_t dummy = SP_NULLPTR;
+    if (tco_is_self_tail_call(expr, self_name, arity, &dummy))
+        return true;
+
+    switch (expr->kind) {
+        case AST_IF:
+            return tco_has_tail_self_call(expr->data.if_expr.then_branch, self_name, arity) ||
+                   tco_has_tail_self_call(expr->data.if_expr.else_branch, self_name, arity);
+        case AST_LET_IN:
+            return tco_has_tail_self_call(expr->data.let_in.body, self_name, arity);
+        default:
+            return false;
+    }
+}
+
+static void gen_tail_dispatch(codegen_ctx_t *ctx, fxsh_ast_node_t *expr, sp_str_t self_name,
+                              fxsh_type_t *fn_t, fxsh_ast_list_t params, bool ret_unit) {
+    if (!expr) {
+        emit_indent(ctx);
+        if (ret_unit)
+            emit_raw(ctx, "return;\n");
+        else
+            emit_raw(ctx, "return 0;\n");
+        return;
+    }
+
+    fxsh_ast_list_t self_args = SP_NULLPTR;
+    if (tco_is_self_tail_call(expr, self_name, (u32)sp_dyn_array_size(params), &self_args)) {
+        sp_dyn_array(char *) tmp_names = SP_NULLPTR;
+        sp_dyn_array_for(self_args, i) {
+            char tname[32];
+            emit_temp(ctx, tname, sizeof(tname));
+            size_t tn = strlen(tname);
+            char *owned_tname = (char *)fxsh_alloc0(tn + 1);
+            memcpy(owned_tname, tname, tn);
+            sp_dyn_array_push(tmp_names, owned_tname);
+
+            emit_indent(ctx);
+            fxsh_type_t *pt = nth_param_type(fn_t, (u32)i);
+            if (pt)
+                emit_c_type_for_type(ctx, pt);
+            else
+                emit_raw(ctx, "__auto_type");
+            emit_raw(ctx, " ");
+            emit_raw(ctx, tmp_names[i]);
+            emit_raw(ctx, " = ");
+            gen_expr(ctx, self_args[i]);
+            emit_raw(ctx, ";\n");
+        }
+        sp_dyn_array_for(params, i) {
+            fxsh_ast_node_t *p = params[i];
+            emit_indent(ctx);
+            emit_mangled(ctx, p->data.ident);
+            emit_raw(ctx, " = ");
+            emit_raw(ctx, tmp_names[i]);
+            emit_raw(ctx, ";\n");
+        }
+        emit_indent(ctx);
+        emit_raw(ctx, "continue;\n");
+        return;
+    }
+
+    if (expr->kind == AST_IF) {
+        emit_indent(ctx);
+        emit_raw(ctx, "if (");
+        gen_expr(ctx, expr->data.if_expr.cond);
+        emit_raw(ctx, ") {\n");
+        ctx->indent_level++;
+        gen_tail_dispatch(ctx, expr->data.if_expr.then_branch, self_name, fn_t, params, ret_unit);
+        ctx->indent_level--;
+        emit_line(ctx, "} else {");
+        ctx->indent_level++;
+        gen_tail_dispatch(ctx, expr->data.if_expr.else_branch, self_name, fn_t, params, ret_unit);
+        ctx->indent_level--;
+        emit_line(ctx, "}");
+        return;
+    }
+
+    if (expr->kind == AST_LET_IN) {
+        emit_line(ctx, "{");
+        ctx->indent_level++;
+        sp_dyn_array_for(expr->data.let_in.bindings, i) {
+            fxsh_ast_node_t *b = expr->data.let_in.bindings[i];
+            if (!b || (b->kind != AST_LET && b->kind != AST_DECL_LET))
+                continue;
+            if (!b->data.let.pattern || b->data.let.pattern->kind != AST_PAT_VAR)
+                continue;
+            emit_indent(ctx);
+            emit_raw(ctx, "__auto_type ");
+            emit_mangled(ctx, b->data.let.name);
+            emit_raw(ctx, " = ");
+            gen_expr(ctx, b->data.let.value);
+            emit_raw(ctx, ";\n");
+        }
+        gen_tail_dispatch(ctx, expr->data.let_in.body, self_name, fn_t, params, ret_unit);
+        ctx->indent_level--;
+        emit_line(ctx, "}");
+        return;
+    }
+
+    emit_indent(ctx);
+    if (ret_unit) {
+        gen_expr(ctx, expr);
+        emit_raw(ctx, ";\n");
+        emit_indent(ctx);
+        emit_raw(ctx, "return;\n");
+    } else {
+        emit_raw(ctx, "return ");
+        gen_expr(ctx, expr);
+        emit_raw(ctx, ";\n");
+    }
 }
 
 static void emit_closure_type_name(codegen_ctx_t *ctx, sp_str_t root_fn, u32 stage) {
@@ -4411,17 +4623,7 @@ static void gen_decl_let(codegen_ctx_t *ctx, fxsh_ast_node_t *ast) {
         }
         emit_raw(ctx, ") {\n");
         ctx->indent_level++;
-        emit_indent(ctx);
-        if (is_type_con_named(return_type_of_fn(fn_t), TYPE_UNIT)) {
-            gen_expr(ctx, lam->data.lambda.body);
-            emit_raw(ctx, ";\n");
-            emit_indent(ctx);
-            emit_raw(ctx, "return;\n");
-        } else {
-            emit_raw(ctx, "return ");
-            gen_expr(ctx, lam->data.lambda.body);
-            emit_raw(ctx, ";\n");
-        }
+        gen_decl_let_lambda_body(ctx, ast, lam, fn_t);
         ctx->indent_level--;
         emit_line(ctx, "}");
         local_type_pop_to(lty_m);

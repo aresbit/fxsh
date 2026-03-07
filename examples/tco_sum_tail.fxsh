@@ -1,0 +1,4 @@
+let rec sum = fn n acc ->
+  if n == 0 then acc else sum (n - 1) (acc + n)
+
+let out = sum 100000 0
