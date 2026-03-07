@@ -1,0 +1,19 @@
+# libuv callback template (requires libuv + real handle allocation/typing discipline)
+# run sample compile:
+#   FXSH_LDFLAGS='-luv' ./bin/fxsh --native-codegen examples/ffi_uv_timer_template.fxsh
+
+let uv_default_loop : unit -> unit ptr = "c:uv_default_loop"
+let uv_run : unit ptr -> int -> int = "c:uv_run"
+
+# Signature is intentionally pointer-erased in MVP FFI:
+# uv_timer_start(timer, cb, timeout_ms, repeat_ms)
+let uv_timer_start : unit ptr -> unit ptr -> int -> int -> int = "c:uv_timer_start"
+
+let on_tick = fn h -> ()
+let cb : unit ptr = c_callback1_ptr on_tick
+let loop : unit ptr = uv_default_loop ()
+
+# Placeholder handle pointer in template; real usage should pass valid uv_timer_t*
+let timer : unit ptr = c_null ()
+let _s = uv_timer_start timer cb 10 0
+let _r = uv_run loop 0

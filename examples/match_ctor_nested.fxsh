@@ -1,0 +1,19 @@
+type tree = Leaf of int | Node of tree * tree
+
+let score = fn t ->
+  match t with
+  | Node (Leaf 1, _) -> 10
+  | Node (_, Leaf 2) -> 20
+  | Leaf 0 -> 30
+  | _ -> 40
+  end
+
+let t1 = Node (Leaf 1, Leaf 9)
+let t2 = Node (Leaf 8, Leaf 2)
+let t3 = Leaf 0
+let t4 = Leaf 7
+
+let a = score t1
+let b = score t2
+let c = score t3
+let d = score t4

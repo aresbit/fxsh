@@ -1,0 +1,17 @@
+# shell-like helpers built into fxsh runtime
+
+let code = exec_code "sh -c \"exit 3\""
+let out = exec_stdout "printf \"alpha\\nbeta\\n\""
+let err = exec_stderr "sh -c \"echo boom 1>&2\""
+let via_stdin = exec_stdin "cat" "from-stdin"
+let piped = exec_pipe "printf \"x\\ny\\n\"" "grep y"
+let matched = grep_lines "ta" out
+let paths = glob "examples/*.fxsh"
+
+let _ = print out
+let _ = print err
+let _ = print via_stdin
+let _ = print piped
+let _ = print matched
+let _ = print paths
+code

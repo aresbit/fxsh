@@ -1,0 +1,4 @@
+let comptime Q = @quote(1 + 2)
+let comptime U = @unquote(Q)
+let comptime S = @splice(@quote(40 + 2))
+

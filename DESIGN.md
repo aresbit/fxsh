@@ -29,9 +29,10 @@
 |------|------|
 | **函数式核心** | 所有值默认不可变，副作用显式标注 |
 | **类型安全** | Hindley-Milner 推导，无隐式类型转换 |
-| **脚本友好** | 直接调用系统命令，管道操作一等公民 |
+| **脚本友好** | 通过标准库调用系统命令与管道，语言层不引入专用 shell 语法 |
 | **零 GC 开销** | Arena 分配，脚本结束 OS 回收，无 GC 停顿 |
 | **可读性优先** | 比 bash 更接近自然语言 |
+| **语法正交** | 优先少量核心构造，避免并行语法糖造成歧义与维护成本 |
 
 ### 1.2 完整语言特性
 
@@ -92,10 +93,12 @@ let main = do {
   print ("You said: " ++ line)
 }
 
-# ── Shell 集成 ──────────────────────────────
-let files = $(ls -la)          # 捕获命令输出为 string list
-let _ = run! "git commit -m 'fix'"  # 执行命令，失败抛异常
-let ok = try! "ping -c1 8.8.8.8"   # 执行命令，返回 bool
+# ── Shell 集成（库层，不新增语法）──────────────
+let code = exec_code "sh -c \"exit 3\""
+let out = exec_stdout "printf \"a\\nb\\n\""
+let cap = exec_capture "sh -c \"echo out; echo err 1>&2\""
+let cap_out = capture_stdout cap
+let ok = Shell.ok (Shell.run "printf \"hello\\n\"")
 
 # ── comptime ────────────────────────────────
 let comptime MAX = 1024 * 1024
@@ -314,7 +317,7 @@ static _Thread_local fxsh_arena_t *g_current_arena = NULL;
 - 注释（`#`）
 - 类型变量（`'a`）
 
-### 4.2 待实现
+### 4.2 已实现（2026-03-07）
 
 ```
 # 多行字符串
@@ -414,7 +417,8 @@ primary     ::= INT_LIT | FLOAT_LIT | STRING_LIT | "true" | "false" | "()"
               | "match" expr "with" ("|" pattern "->" expr)+
               | "do" "{" do_stmt+ "}"
               | "@" IDENT "(" args ")"     (* comptime operator *)
-              | "$(" shell_cmd ")"         (* shell 命令捕获 *)
+              (* 不提供 `$()`/`run!`/`try!`/`cap!` 等 shell 语法糖；
+                 shell 能力统一通过标准库 builtin：exec_* / capture_* / glob / grep_lines *)
 
 param       ::= IDENT | "(" IDENT ":" type ")" | "_"
 
@@ -679,11 +683,17 @@ stdlib/
 ### 9.2 Shell 集成 API
 
 ```fxsh
-# Process 模块
-let run!   : string -> unit        # 运行，失败抛异常
-let try!   : string -> bool        # 运行，返回成功/失败
-let cap!   : string -> string      # 捕获 stdout
-let cap_lines! : string -> string list  # 捕获 stdout 按行
+# Process / Shell 统一原语（库层 API）
+let exec_code : string -> int
+let exec_stdout : string -> string
+let exec_stderr : string -> string
+let exec_capture : string -> int
+let capture_code : int -> int
+let capture_stdout : int -> string
+let capture_stderr : int -> string
+let capture_release : int -> bool
+let glob : string -> string
+let grep_lines : string -> string -> string
 
 # IO 模块
 let print   : string -> unit
@@ -696,81 +706,70 @@ let write_file : string -> string -> unit
 
 ---
 
-## 10. 当前 Bug 修复清单
+## 10. 当前状态快照（2026-03-07）
 
-### 10.1 codegen.c
+> 本节用于替代历史 Bug 清单，聚焦“当前实现状态”，与 `README.md`/`changelog.md` 保持一致。
 
-| 位置 | Bug | 修复 |
-|------|-----|------|
-| `gen_type_def_struct` ~L268 | `embed_raw` → 应为 `emit_raw` | 直接替换 |
-| `gen_decl_fn` | 所有参数硬编码为 `s64`，忽略类型信息 | 从 TypeEnv 查询 |
-| `gen_lambda` | 直接返回 NULL，未生成闭包 | 需实现闭包提升 |
-| `gen_match` | 未实现 | 实现 tag switch |
+### 10.1 已完成（核心链路）
 
-### 10.2 types.c
+- 前端：Lexer / Parser / H-M 类型推导可用
+- 运行路径：解释器（tree-walking）可执行
+- Native 路径：`--native` 与 `--native-codegen` 可执行
+- 语言能力（主线）：
+  - ADT + match（含 tuple / record / list 模式）
+  - 记录与 row-polymorphism 基础
+  - 列表与张量（MVP）
+  - 模块基础（`module/import` 前缀化降级）
+  - comptime（reflection / quote / unquote / splice / diagnostics / 部分展开）
+- 工程能力：
+  - C FFI（native-codegen）MVP
+  - shell runtime helpers：`exec_*`/`glob`/`grep_lines`
+  - JSON runtime helpers
 
-| 位置 | Bug | 修复 |
-|------|-----|------|
-| `constr_env_bind` | 调用不存在的 `sp_ht_ensure`/`sp_ht_set_fns` | 改用链表环境 |
-| `free_vars_in_env` | 函数体为空，导致泛化错误 | 实现遍历 |
-| `infer_pattern` `AST_PAT_LIT` | kind 已是 PAT_LIT，无法区分字面量类型 | 在 literal 存 kind 字段 |
-| `type_env_bind` | 修改传入 env 指针（不安全） | 改为返回新 env |
+### 10.2 部分完成（可用但仍在演进）
 
-### 10.3 comptime.c
+- comptime 完整性：已覆盖主路径，仍缺更系统的泛型元编程能力边界说明
+- native-codegen：覆盖面已扩大，但仍有“支持子集”特征（复杂程序需持续回归）
+- 标准库：已有 `list/process/json/path/system` 等模块雏形，API 一致性与完整度仍需收敛
+- shell 语言层语法糖：明确不引入（统一走库层 builtin API）
 
-| 位置 | Bug | 修复 |
-|------|-----|------|
-| `eval_let_in` | 检查 `AST_DECL_LET` 但 let_in bindings 实际是 `AST_LET` | 统一节点类型 |
-| `fxsh_ct_list` | 参数 `fxsh_ct_value_t **items` 实为 SP_NULLPTR，未初始化 | 传 NULL 前检查 |
+### 10.3 未开始或计划中
 
-### 10.4 parser.c
-
-| 位置 | Bug | 修复 |
-|------|-----|------|
-| `parse_type_def` | type 参数解析（`'a`）检查 `data[0] == '\''` 但 lexer 已去掉引号 | 修复引号处理或 token kind |
-| `parse_let_decl` | 只支持 `IDENT`，不支持函数定义糖 `let f x y = ...` | 添加多参数解析 |
-| `parse_primary` `TOK_TYPE_IDENT` | 构造器参数解析逻辑不停止条件有缺漏 | 精化停止条件 |
-
-### 10.5 lexer.c
-
-| 位置 | Bug | 修复 |
-|------|-----|------|
-| `advance_line` | 在 newline 移动前重置 `line_start` | 先 advance 再重置 |
-| 类型变量 `'a` | 当遇到 `'let`、`'in` 等时返回 IDENT 而非关键字变量 | 检查 `'` 后是否是字母序列 |
+- ANF IR 层与系统化优化管线
+- 尾调用优化（TCO）
+- 内联与更激进的中端优化
+- 更完整的错误报告与诊断体验（格式化/分层/彩色）
 
 ---
 
-## 11. 实现路线图
+## 11. 实现路线图（修订版）
 
-### Phase 1 — 修复稳定（当前）
+### Phase 1 — 基础与稳定（完成度高）
 
-- [x] Lexer 基础实现
-- [x] Parser 递归下降
-- [x] H-M 类型推导框架
-- [x] comptime 求值基础
-- [x] C codegen 框架
-- [ ] **Arena GC 替换 sp_alloc**
-- [ ] **修复上述所有 Bug**
-- [ ] **链表型 TypeEnv 替换 HashMap**
+- [x] Lexer / Parser / 类型推导基础
+- [x] 解释器执行路径
+- [x] native 与 native-codegen 基础链路
+- [x] 历史高优先级崩溃类问题已清理
+- [ ] Arena/内存策略继续统一（减少历史分配路径差异）
 
-### Phase 2 — 功能完整
+### Phase 2 — 功能完整（完成度中高）
 
-- [ ] 闭包捕获分析 + 代码生成
-- [ ] 完整模式匹配（含决策树）
-- [ ] 记录类型 + row polymorphism
-- [ ] 完整错误报告（带颜色和位置）
-- [ ] List/Option/Result 标准库
+- [x] 闭包主路径可执行（解释器 + native 路径）
+- [x] 模式匹配主路径（ADT/tuple/record/list）
+- [x] 记录类型 + row polymorphism 基础
+- [~] 标准库收敛（已有模块，仍需接口统一与文档化）
+- [~] 错误报告体验提升（仍需系统化）
 
-### Phase 3 — Shell 集成
+### Phase 3 — Shell/Agent 载体（完成度中）
 
-- [ ] `$()` 命令捕获语法
-- [ ] `run!`/`try!`/`cap!` IO 原语
-- [ ] 字符串插值 `f"...{expr}..."`
-- [ ] 管道到系统命令 `|> sh "grep foo"`
+- [x] 进程与管道基础 runtime（`exec_*`/`glob`/`grep_lines`）
+- [x] JSON/runtime 工具链可用
+- [x] shell 语法收敛：不引入 `$()`/`run!`/`try!`/`cap!`，统一走 `exec_*`/`capture_*`
+- [~] agent 机制迁移（s01-s12）已接入，fxsh 原生化仍在推进
 
-### Phase 4 — 优化
+### Phase 4 — 编译优化与长期演进（完成度低）
 
-- [ ] ANF IR 层
-- [ ] 尾调用优化
-- [ ] 内联展开
-- [ ] comptime 完整支持（含泛型类型编程）
+- [ ] ANF IR
+- [ ] TCO
+- [ ] 内联与优化通道
+- [ ] comptime 高阶泛型元编程能力补全

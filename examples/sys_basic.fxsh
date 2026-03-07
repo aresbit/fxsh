@@ -1,0 +1,5 @@
+let _e = file_exists "."
+let _w = write_file "build/fxsh_sys_tmp.txt" "ok"
+let _r = read_file "build/fxsh_sys_tmp.txt"
+let _h = getenv "HOME"
+let _x = exec "true"

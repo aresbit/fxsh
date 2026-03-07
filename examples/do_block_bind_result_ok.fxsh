@@ -1,0 +1,5 @@
+do {
+  let! x = Ok 40;
+  let! y = Ok 2;
+  Ok (x + y)
+}

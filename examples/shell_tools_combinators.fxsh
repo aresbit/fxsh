@@ -1,0 +1,12 @@
+import Shell
+
+let files = Shell.glob_text "stdlib/*.fxsh"
+let has_shell = Shell.grep_ok "shell" files
+let rg = Shell.run_grep "printf \"a\\nb\\nc\\n\"" "b"
+
+if has_shell then
+  if rg.code == 0 then
+    if rg.stdout == "b\n" then "ok" else "bad_grep_stdout"
+  else "bad_grep_code"
+else
+  "bad_glob_or_grep"

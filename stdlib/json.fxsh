@@ -1,0 +1,75 @@
+# json.fxsh - JSON helpers built on native json_* builtins
+
+type json = Json of string
+
+type 'a result = Ok of 'a | Err of string
+
+type 'a option = None | Some of 'a
+
+let is_valid = fn s -> json_validate s
+
+let compact = fn s -> json_compact s
+
+let parse = fn s ->
+  let c = json_compact s in
+  if c == "" then Err "invalid json" else Ok (Json c)
+
+let stringify = fn j ->
+  match j with
+  | Json s -> s
+  end
+
+let has = fn j path ->
+  match j with
+  | Json s -> json_has s path
+  end
+
+let get_raw = fn j path ->
+  match j with
+  | Json s ->
+      if json_has s path then
+        Some (Json (json_get s path))
+      else
+        None
+      end
+  end
+
+let get_string = fn j path ->
+  match j with
+  | Json s ->
+      if json_has s path then
+        Some (json_get_string s path)
+      else
+        None
+      end
+  end
+
+let get_int = fn j path ->
+  match j with
+  | Json s ->
+      if json_has s path then
+        Some (json_get_int s path)
+      else
+        None
+      end
+  end
+
+let get_float = fn j path ->
+  match j with
+  | Json s ->
+      if json_has s path then
+        Some (json_get_float s path)
+      else
+        None
+      end
+  end
+
+let get_bool = fn j path ->
+  match j with
+  | Json s ->
+      if json_has s path then
+        Some (json_get_bool s path)
+      else
+        None
+      end
+  end

@@ -1,0 +1,13 @@
+import Shell
+
+let c = Shell.pipeline3 "printf \"a\\nb\\n\"" "grep b" "tr b B"
+let out = Shell.stdout c
+let err = Shell.stderr c
+let rc = Shell.code c
+
+if rc == 0 then
+  if out == "B\n" then
+    if err == "" then "ok" else "bad_stderr"
+  else "bad_stdout"
+else
+  "bad_code"

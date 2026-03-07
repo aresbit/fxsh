@@ -1,0 +1,24 @@
+# system.fxsh - compatibility layer (prefer stdlib/os.fxsh for unified API)
+
+type 'a result = Ok of 'a | Err of string
+
+let print_line = fn s ->
+  let _ = print s in
+  Ok ()
+
+let env_get = fn k ->
+  let v = getenv k in
+  if v == "" then Err "env not found" else Ok v
+
+let exists = fn p -> Ok (file_exists p)
+
+let read_text = fn p ->
+  let s = read_file p in
+  if s == "" then Err "read failed or empty" else Ok s
+
+let write_text = fn p c ->
+  if write_file p c then Ok () else Err "write failed"
+
+let run = fn cmd ->
+  let rc = exec_code cmd in
+  if rc == 0 then Ok rc else Err "process failed"

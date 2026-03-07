@@ -1,0 +1,9 @@
+let _p = print "os stdlib demo"
+let _env = env_get "HOME"
+let _w = write_text "build/fxsh_os_demo.txt" "hello-os"
+let _r = read_text "build/fxsh_os_demo.txt"
+let _e = exists "build/fxsh_os_demo.txt"
+let _o = stdout "printf \"alpha\\nbeta\\n\""
+let _g = grep_text "beta" _o
+let _ = print _g
+()

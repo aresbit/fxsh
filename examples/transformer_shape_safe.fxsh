@@ -1,0 +1,15 @@
+# Shape-safe transformer block sketch (typed wrappers + tensor runtime)
+
+type embed = Embed of tensor
+type hidden = Hidden of tensor
+
+let w_up = tensor_new2 4 8 0.1
+let w_down = tensor_new2 8 4 0.2
+
+let to_hidden = fn x -> match x with | Embed t -> Hidden (tensor_dot t w_up) end
+let to_embed = fn h -> match h with | Hidden t -> Embed (tensor_dot t w_down) end
+
+let x = Embed (tensor_new2 2 4 1.0)
+let h = to_hidden x
+let y = to_embed h
+let _ = y

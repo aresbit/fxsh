@@ -1,0 +1,8 @@
+type t = A of int | B
+let f = fn x ->
+  match x with
+  | A n if n == 1 -> 10
+  | A _ -> 20
+  | B -> 30
+  end
+let _ = f (A 1)

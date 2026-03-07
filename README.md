@@ -66,6 +66,76 @@ let comptime make_vector = fn T -> {
 
 # 编译期条件
 let comptime mode = if DEBUG then "debug" else "release"
+
+# C FFI (native-codegen)
+let c_labs : int -> int = "c:labs"
+let x = c_labs (-7)
+
+# string ABI bridge: fxsh string <-> C const char*
+let c_atol : string -> int = "c:atol"
+let n = c_atol "12345"
+
+# precise C integer ABI types for FFI
+let c_puts : string -> c_int = "c:puts"
+let rc : int = c_int_to_int (c_puts "hello")
+
+# libuv example (needs FXSH_LDFLAGS='-luv')
+let uv_version : unit -> int = "c:uv_version"
+let v = uv_version ()
+
+# pointer helpers (for opaque handles)
+let p : unit ptr = c_malloc 64
+let p2 : unit ptr = c_cast_ptr p
+
+# callback pointer helper (top-level function -> opaque C callback pointer)
+let on_tick = fn _ -> ()
+let cbp : unit ptr = c_callback0 on_tick
+
+# tensor MVP (2D float)
+let a = tensor_from_list2 2 3 [1.0; 2.0; 3.0; 4.0; 5.0; 6.0]
+let b = tensor_from_list2 3 2 [7.0; 8.0; 9.0; 10.0; 11.0; 12.0]
+let c = tensor_dot a b
+let v = tensor_get2 c 1 1
+
+# JSON runtime helpers (compact + path get)
+let doc = json_compact "{ \"agent\": { \"name\": \"fx\", \"ok\": true } }"
+let name = json_get_string doc "agent.name"
+let ok = json_get_bool doc "agent.ok"
+
+# shell-like process helpers (stdin/stdout/stderr/pipe/glob/grep)
+let code = exec_code "sh -c \"exit 3\""
+let out = exec_stdout "printf \"a\\nb\\n\""
+let err = exec_stderr "sh -c \"echo boom 1>&2\""
+let via_stdin = exec_stdin "cat" "hello"
+let via_stdin_code = exec_stdin_code "cat >/dev/null" "hello"
+let via_stdin_err = exec_stdin_stderr "sh -c \"cat >/dev/null; echo boom 1>&2\"" "hello"
+let piped = exec_pipe "printf \"x\\ny\\n\"" "grep y"
+let piped_code = exec_pipe_code "printf \"x\\ny\\n\"" "grep y"
+let piped_err = exec_pipe_stderr "printf \"x\\ny\\n\"" "sh -c \"cat >/dev/null; echo boom 1>&2\""
+let cap = exec_capture "sh -c \"echo out; echo err 1>&2\""
+let cap_code = capture_code cap
+let cap_out = capture_stdout cap
+let cap_err = capture_stderr cap
+let cap_rel = capture_release cap
+let cap_in = exec_stdin_capture "sh -c \"cat; echo e 1>&2\"" "in"
+let cap_pipe = exec_pipe_capture "printf \"a\\nb\\n\"" "grep b"
+let cap_pipefail = exec_pipefail_capture "sh -c \"echo L; exit 7\"" "cat >/dev/null"
+let cap_pipefail3 = exec_pipefail3_capture "sh -c \"exit 5\"" "cat >/dev/null" "cat >/dev/null"
+let p2 = Shell.pipe "printf \"a\\nb\\n\"" "grep b"
+let p2_pf = Shell.pipefail "sh -c \"echo L; exit 7\"" "cat >/dev/null"
+let p3_pf = Shell.pipefail3 "sh -c \"exit 5\"" "cat >/dev/null" "cat >/dev/null"
+let matched = grep_lines "^b.*$" out   # regex (Thompson NFA): . * + ? | () ^ $
+let paths = glob "examples/*.fxsh"
+
+# comptime derive-json schema (MVP)
+let user = { id = 1, name = "fx", ok = true }
+let comptime USER_SCHEMA = @jsonSchema(@typeOf(user))
+
+# typed-shape transformer sketch (static wrapper types)
+type embed = Embed of tensor
+type hidden = Hidden of tensor
+let w_up = tensor_new2 4 8 0.1
+let to_hidden = fn x -> match x with | Embed t -> Hidden (tensor_dot t w_up) end
 ```
 
 ## 构建
@@ -97,6 +167,28 @@ make clean        # 清理构建文件
 # 执行文件
 ./bin/fxsh examples/factorial.fxsh
 ```
+
+## Agent 机制迁移 (s01-s12)
+
+项目已内置从 `learn-claude-code` 迁移的前 12 个 agent 机制，入口在 `agents/`：
+
+```bash
+pip install -r requirements-agent.txt
+python agents/s01_agent_loop.py
+python agents/s02_tool_use.py
+python agents/s03_todo_write.py
+python agents/s04_subagent.py
+python agents/s05_skill_loading.py
+python agents/s06_context_compact.py
+python agents/s07_task_system.py
+python agents/s08_background_tasks.py
+python agents/s09_agent_teams.py
+python agents/s10_team_protocols.py
+python agents/s11_autonomous_agents.py
+python agents/s12_worktree_task_isolation.py
+```
+
+详细说明见 `agents/README.md`。
 
 ## 项目结构
 
@@ -145,16 +237,17 @@ let id = fn x -> x          # 'a -> 'a (多态)
 let compose = fn f g x -> f (g x)   # ('b -> 'c) -> ('a -> 'b) -> 'a -> 'c
 ```
 
-## 待实现功能
+## 当前进度
 
 - [x] 编译期元编程 (`comptime`)
-- [ ] 模式匹配 (`match ... with`)
-- [x] 行多态记录类型
-- [ ] 标准库 (IO, Path, Process 模块)
-- [ ] 代码生成 (C 后端)
-- [ ] 递归函数支持
-- [ ] 类型注解语法
-- [ ] 完整的 comptime 函数调用
+- [x] 模式匹配（ADT / tuple / record / list 主路径）
+- [x] 行多态记录类型（基础）
+- [x] 代码生成（C 后端，`--native-codegen`）
+- [x] 递归函数支持（解释器 + native 主路径）
+- [x] 类型注解语法（let 绑定基础）
+- [~] 标准库收敛（已有 `list/process/json/path/system`，仍在统一 API）
+- [x] shell 设计收敛：不引入语言层语法糖（无 `$()` / `run!` / `try!` / `cap!`）
+- [ ] ANF IR / TCO / 内联优化通道
 
 ## 技术栈
 

@@ -1,0 +1,10 @@
+import Shell
+
+let r = Shell.run "sh -c \"echo out; echo err 1>&2\""
+
+if r.code == 0 then
+  if r.stdout == "out\n" then
+    if r.stderr == "err\n" then "ok" else "bad_stderr"
+  else "bad_stdout"
+else
+  "bad_code"

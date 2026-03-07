@@ -1,0 +1,9 @@
+import Shell
+
+let normal = Shell.pipe "sh -c \"echo L; exit 7\"" "cat >/dev/null"
+let strict = Shell.pipefail "sh -c \"echo L; exit 7\"" "cat >/dev/null"
+
+if normal.code == 0 then
+  if strict.code == 7 then "ok" else "bad_pipefail_code"
+else
+  "bad_normal_code"

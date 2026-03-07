@@ -1,0 +1,14 @@
+type 'a box = Box of 'a | Nope
+
+let pick = fn v ->
+  match v with
+  | Box { xs = [1; _], t = (1, "ok") } -> 10
+  | Box { xs = [3], t = (2, _) } -> 20
+  | Nope -> 30
+  | _ -> 40
+  end
+
+let a = pick (Box { xs = [1; 9], t = (1, "ok") })
+let b = pick (Box { xs = [3], t = (2, "x") })
+let c = pick Nope
+let d = pick (Box { xs = [9], t = (0, "no") })

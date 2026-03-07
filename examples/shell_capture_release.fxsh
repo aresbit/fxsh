@@ -1,0 +1,13 @@
+import Shell
+
+let c = Shell.capture "printf x"
+let out = capture_stdout c
+let ok_rel = Shell.release c
+let out2 = capture_stdout c
+
+if out == "x" then
+  if ok_rel then
+    if out2 == "" then "ok" else "bad_after_release"
+  else "bad_release_flag"
+else
+  "bad_out"

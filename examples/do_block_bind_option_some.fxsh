@@ -1,0 +1,5 @@
+do {
+  let? x = Some 40;
+  let? y = Some 2;
+  Some (x + y)
+}

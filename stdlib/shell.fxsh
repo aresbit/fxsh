@@ -1,0 +1,33 @@
+# shell.fxsh - orthogonal shell helpers (no syntax sugar wrappers)
+
+let capture = fn cmd -> exec_capture cmd
+let release = fn c -> capture_release c
+
+let run = fn cmd ->
+  let c = exec_capture cmd in
+  { code = capture_code c, stdout = capture_stdout c, stderr = capture_stderr c }
+
+let run_stdin = fn cmd input ->
+  let c = exec_stdin_capture cmd input in
+  { code = capture_code c, stdout = capture_stdout c, stderr = capture_stderr c }
+
+let pipe = fn left right ->
+  let c = exec_pipe_capture left right in
+  { code = capture_code c, stdout = capture_stdout c, stderr = capture_stderr c }
+
+let pipefail = fn left right ->
+  let c = exec_pipefail_capture left right in
+  { code = capture_code c, stdout = capture_stdout c, stderr = capture_stderr c }
+
+let pipefail3 = fn c1 c2 c3 ->
+  let c = exec_pipefail3_capture c1 c2 c3 in
+  { code = capture_code c, stdout = capture_stdout c, stderr = capture_stderr c }
+
+let pipefail4 = fn c1 c2 c3 c4 ->
+  let c = exec_pipefail4_capture c1 c2 c3 c4 in
+  { code = capture_code c, stdout = capture_stdout c, stderr = capture_stderr c }
+
+let glob_text = fn pattern -> glob pattern
+let grep_text = fn pattern text -> grep_lines pattern text
+let grep_ok = fn pattern text -> if grep_lines pattern text == "" then false else true
+let ok = fn r -> r.code == 0

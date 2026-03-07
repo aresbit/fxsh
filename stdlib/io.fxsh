@@ -1,103 +1,22 @@
-# io.fxsh - fxsh input/output operations module
+# io.fxsh - compatibility layer (prefer stdlib/os.fxsh)
 
-#==============================================================================
-# File Operations
-#==============================================================================
+type 'a result = Ok of 'a | Err of string
 
-let read_file = fn path -> @read_file path
+let exists = fn path -> Ok (file_exists path)
 
-let write_file = fn path content -> @write_file path content
+let read_text = fn path ->
+  let s = read_file path in
+  if s == "" then Err "read failed or empty" else Ok s
 
-let append_file = fn path content -> @append_file path content
+let write_text = fn path content ->
+  if write_file path content then Ok () else Err "write failed"
 
-let file_exists = fn path -> @file_exists path
+let copy_text = fn src dst ->
+  let s = read_file src in
+  if s == "" then Err "copy failed: read source failed or empty"
+  else if write_file dst s then Ok ()
+  else Err "copy failed: write destination failed"
 
-let is_file = fn path -> @is_file path
-
-let is_directory = fn path -> @is_directory path
-
-#==============================================================================
-# Console I/O
-#==============================================================================
-
-let print = fn s -> @print s
-
-let println = fn s -> @println s
-
-let print_int = fn n -> print (from_int n)
-
-let print_float = fn f -> print (from_float f)
-
-let read_line = fn -> @read_line
-
-#==============================================================================
-# Error Output
-#==============================================================================
-
-let eprint = fn s -> @eprint s
-
-let eprintln = fn s -> @eprintln s
-
-#==============================================================================
-# Formatting
-#==============================================================================
-
-let format = fn fmt args -> @format fmt args
-
-#==============================================================================
-# Path Operations
-#==============================================================================
-
-let join_path = fn parts -> @join_path parts
-
-let dirname = fn path -> @dirname path
-
-let basename = fn path -> @basename path
-
-let extension = fn path -> @extension path
-
-let expand_user = fn path -> @expand_user path
-
-let absolute_path = fn path -> @absolute_path path
-
-#==============================================================================
-# Directory Operations
-#==============================================================================
-
-let mkdir = fn path -> @mkdir path
-
-let mkdir_p = fn path -> @mkdir_p path
-
-let rmdir = fn path -> @rmdir path
-
-let list_dir = fn path -> @list_dir path
-
-let remove_file = fn path -> @remove_file path
-
-#==============================================================================
-# Higher-Level I/O
-#==============================================================================
-
-let with_file = fn path mode f ->
-  let handle = @open_file path mode in
-  let result = f handle in
-  let _ = @close_file handle in
-  result
-
-let read_lines = fn path ->
-  match read_file path with
-  | Ok content -> Ok (@lines content)
-  | Err e -> Err e
-  end
-
-let write_lines = fn path lines ->
-  let content = join "\n" lines in
-  write_file path content
-
-let copy_file = fn src dst ->
-  match read_file src with
-  | Ok content -> write_file dst content
-  | Err e -> Err e
-  end
-
-let move_file = fn src dst -> @move_file src dst
+let print_line = fn s ->
+  let _ = print s in
+  Ok ()

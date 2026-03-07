@@ -1,0 +1,3 @@
+let c_memset : unit ptr -> int -> int -> unit ptr = "c:memset"
+let p : unit ptr = c_malloc 16
+let p3 : unit ptr = c_memset p 0 16

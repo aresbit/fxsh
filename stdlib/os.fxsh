@@ -1,0 +1,71 @@
+# os.fxsh - unified executable OS/process/path/system stdlib
+
+type 'a result = Ok of 'a | Err of string
+
+#------------------------------------------------------------------------------
+# System / env / console
+#------------------------------------------------------------------------------
+
+let print_line = fn s ->
+  let _ = print s in
+  Ok ()
+
+let env_get = fn k ->
+  let v = getenv k in
+  if v == "" then Err "env not found" else Ok v
+
+#------------------------------------------------------------------------------
+# Path / file text
+#------------------------------------------------------------------------------
+
+let exists = fn p -> Ok (file_exists p)
+
+let read_text = fn p ->
+  let s = read_file p in
+  if s == "" then Err "read failed or empty" else Ok s
+
+let write_text = fn p c ->
+  if write_file p c then Ok () else Err "write failed"
+
+let copy_text = fn src dst ->
+  let s = read_file src in
+  if s == "" then Err "copy failed: read source failed or empty"
+  else if write_file dst s then Ok ()
+  else Err "copy failed: write destination failed"
+
+#------------------------------------------------------------------------------
+# Process / shell tools
+#------------------------------------------------------------------------------
+
+let run = fn cmd ->
+  let rc = exec_code cmd in
+  if rc == 0 then Ok rc else Err "process failed"
+
+let run_code = fn cmd -> exec_code cmd
+
+let stdout = fn cmd -> exec_stdout cmd
+
+let stderr = fn cmd -> exec_stderr cmd
+
+let capture = fn cmd -> exec_capture cmd
+let cap_code = fn cap -> capture_code cap
+let cap_stdout = fn cap -> capture_stdout cap
+let cap_stderr = fn cap -> capture_stderr cap
+let cap_release = fn cap -> capture_release cap
+
+let with_stdin = fn cmd input -> exec_stdin cmd input
+let with_stdin_code = fn cmd input -> exec_stdin_code cmd input
+let with_stdin_stderr = fn cmd input -> exec_stdin_stderr cmd input
+let with_stdin_capture = fn cmd input -> exec_stdin_capture cmd input
+
+let pipe = fn left right -> exec_pipe left right
+let pipe_code = fn left right -> exec_pipe_code left right
+let pipe_stderr = fn left right -> exec_pipe_stderr left right
+let pipe_capture = fn left right -> exec_pipe_capture left right
+let pipefail_capture = fn left right -> exec_pipefail_capture left right
+let pipefail3_capture = fn c1 c2 c3 -> exec_pipefail3_capture c1 c2 c3
+let pipefail4_capture = fn c1 c2 c3 c4 -> exec_pipefail4_capture c1 c2 c3 c4
+
+let glob_paths = fn pattern -> glob pattern
+
+let grep_text = fn pattern text -> grep_lines pattern text

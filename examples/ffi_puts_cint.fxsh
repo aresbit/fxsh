@@ -1,0 +1,4 @@
+# libc puts(const char*) -> int via precise FFI integer ABI
+let puts : string -> c_int = "c:puts"
+let rc : int = c_int_to_int (puts "ffi puts via c_int")
+let _ = rc + 1

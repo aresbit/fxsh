@@ -18,6 +18,7 @@ SRCS := $(wildcard $(SRC_DIR)/*.c) \
         $(wildcard $(SRC_DIR)/types/*.c) \
         $(wildcard $(SRC_DIR)/comptime/*.c) \
         $(wildcard $(SRC_DIR)/codegen/*.c) \
+        $(wildcard $(SRC_DIR)/ir/*.c) \
         $(wildcard $(SRC_DIR)/interp/*.c) \
         $(wildcard $(SRC_DIR)/runtime/*.c) \
         $(wildcard $(SRC_DIR)/modules/*.c)
@@ -123,6 +124,11 @@ test-records: $(NAME)
 	@echo "Running record integration tests..."
 	@sh $(TESTS_DIR)/integration/records.sh ./$(BIN_DIR)/$(NAME)
 
+.PHONY: test-comptime
+test-comptime: $(NAME)
+	@echo "Running comptime integration tests..."
+	@sh $(TESTS_DIR)/integration/comptime.sh ./$(BIN_DIR)/$(NAME)
+
 # Run linter
 .PHONY: lint
 lint:
@@ -157,7 +163,7 @@ setup:
 # Create build directories
 .PHONY: dir
 dir:
-	@mkdir -p $(BUILD_DIR)/{lexer,parser,types,comptime,codegen,modules}
+	@mkdir -p $(BUILD_DIR)/{lexer,parser,types,comptime,codegen,modules,ir}
 	@mkdir -p $(BUILD_DIR)/interp
 	@mkdir -p $(BUILD_DIR)/runtime
 	@mkdir -p $(BIN_DIR)
@@ -191,6 +197,7 @@ help:
 	@echo "  make test-native-codegen - Run native-codegen smoke tests"
 	@echo "  make test-type-annotations - Run type annotation integration tests"
 	@echo "  make test-records - Run row-polymorphic record integration tests"
+	@echo "  make test-comptime - Run comptime integration tests"
 	@echo "  make lint         - Run static analysis"
 	@echo "  make format       - Format code"
 	@echo "  make check        - Run memory checks"

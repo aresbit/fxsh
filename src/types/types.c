@@ -154,6 +154,13 @@ static bool str_in_list(sp_dyn_array(sp_str_t) list, sp_str_t s) {
     return false;
 }
 
+static bool lit_string_has_prefix(sp_str_t s, const char *prefix) {
+    size_t n = strlen(prefix);
+    if (!s.data || s.len < n)
+        return false;
+    return memcmp(s.data, prefix, n) == 0;
+}
+
 /* For type applications like `'a option`, peel TYPE_APP to get the head constructor `option`. */
 static sp_str_t type_head_constructor(fxsh_type_t *type) {
     if (!type)
@@ -822,12 +829,28 @@ static fxsh_scheme_t *generalize(fxsh_type_t *type, fxsh_type_env_t *env) {
  * Constructor Registration
  *=============================================================================*/
 
-static fxsh_type_t *ast_to_type(fxsh_ast_node_t *ast) {
+static s32 lookup_tparam_var(sp_dyn_array(sp_str_t) names, sp_dyn_array(s32) vars, sp_str_t name) {
+    sp_dyn_array_for(names, i) {
+        if (sp_str_equal(names[i], name))
+            return vars[i];
+    }
+    return -1;
+}
+
+static fxsh_type_t *ast_to_type_with_params(fxsh_ast_node_t *ast,
+                                            sp_dyn_array(sp_str_t) param_names,
+                                            sp_dyn_array(s32) param_vars) {
     if (!ast)
         return fxsh_type_con(TYPE_UNIT);
     switch (ast->kind) {
         case AST_IDENT: {
             sp_str_t n = ast->data.ident;
+            if (n.len > 0 && n.data && n.data[0] == '\'') {
+                s32 v = lookup_tparam_var(param_names, param_vars, n);
+                if (v >= 0)
+                    return fxsh_type_var(v);
+                return fxsh_type_var(fxsh_fresh_var());
+            }
             if (sp_str_equal(n, TYPE_INT))
                 return fxsh_type_con(TYPE_INT);
             if (sp_str_equal(n, TYPE_BOOL))
@@ -840,18 +863,28 @@ static fxsh_type_t *ast_to_type(fxsh_ast_node_t *ast) {
                 return fxsh_type_con(TYPE_UNIT);
             return fxsh_type_con(n);
         }
-        case AST_TYPE_VAR:
+        case AST_TYPE_VAR: {
+            sp_str_t n = ast->data.ident;
+            if (n.len > 0 && n.data) {
+                s32 v = lookup_tparam_var(param_names, param_vars, n);
+                if (v >= 0)
+                    return fxsh_type_var(v);
+            }
             return fxsh_type_var(fxsh_fresh_var());
+        }
         case AST_TYPE_APP: {
             if (!ast->data.type_con.args || sp_dyn_array_size(ast->data.type_con.args) != 2)
                 return fxsh_type_var(fxsh_fresh_var());
-            fxsh_type_t *lhs = ast_to_type(ast->data.type_con.args[0]);
-            fxsh_type_t *rhs = ast_to_type(ast->data.type_con.args[1]);
+            fxsh_type_t *lhs =
+                ast_to_type_with_params(ast->data.type_con.args[0], param_names, param_vars);
+            fxsh_type_t *rhs =
+                ast_to_type_with_params(ast->data.type_con.args[1], param_names, param_vars);
             return fxsh_type_apply(rhs, lhs);
         }
         case AST_TYPE_ARROW:
-            return fxsh_type_arrow(ast_to_type(ast->data.type_arrow.param),
-                                   ast_to_type(ast->data.type_arrow.ret));
+            return fxsh_type_arrow(
+                ast_to_type_with_params(ast->data.type_arrow.param, param_names, param_vars),
+                ast_to_type_with_params(ast->data.type_arrow.ret, param_names, param_vars));
         case AST_TYPE_RECORD: {
             sp_dyn_array(fxsh_field_t) fields = SP_NULLPTR;
             fxsh_type_var_t row_var = -1;
@@ -861,7 +894,8 @@ static fxsh_type_t *ast_to_type(fxsh_ast_node_t *ast) {
                     continue;
                 if (e->kind == AST_FIELD_ACCESS) {
                     fxsh_field_t f = {.name = e->data.field.field,
-                                      .type = ast_to_type(e->data.field.object)};
+                                      .type = ast_to_type_with_params(e->data.field.object,
+                                                                      param_names, param_vars)};
                     sp_dyn_array_push(fields, f);
                 } else if (e->kind == AST_TYPE_VAR) {
                     row_var = fxsh_fresh_var();
@@ -872,6 +906,10 @@ static fxsh_type_t *ast_to_type(fxsh_ast_node_t *ast) {
         default:
             return fxsh_type_var(fxsh_fresh_var());
     }
+}
+
+static fxsh_type_t *ast_to_type(fxsh_ast_node_t *ast) {
+    return ast_to_type_with_params(ast, SP_NULLPTR, SP_NULLPTR);
 }
 
 static s32 record_field_index(sp_dyn_array(fxsh_field_t) fields, sp_str_t name) {
@@ -890,13 +928,25 @@ static fxsh_type_t *make_record_type(sp_dyn_array(fxsh_field_t) fields, fxsh_typ
     return t;
 }
 
+static fxsh_type_t *make_list_type(fxsh_type_t *elem_t) {
+    return fxsh_type_apply(fxsh_type_con(TYPE_LIST), elem_t);
+}
+
 static fxsh_type_t *make_constr_type(fxsh_ast_node_t *data_constr, fxsh_ast_list_t type_params,
                                      sp_str_t type_name) {
     /* Result type: TypeName applied to its type params */
+    sp_dyn_array(sp_str_t) param_names = SP_NULLPTR;
+    sp_dyn_array(s32) param_vars = SP_NULLPTR;
     fxsh_type_t *result = fxsh_type_con(type_name);
     sp_dyn_array_for(type_params, i) {
-        (void)i;
-        fxsh_type_t *v = fxsh_type_var(fxsh_fresh_var());
+        fxsh_ast_node_t *p = type_params[i];
+        s32 tv = fxsh_fresh_var();
+        sp_str_t pname = (sp_str_t){0};
+        if (p && p->kind == AST_TYPE_VAR)
+            pname = p->data.ident;
+        sp_dyn_array_push(param_names, pname);
+        sp_dyn_array_push(param_vars, tv);
+        fxsh_type_t *v = fxsh_type_var(tv);
         result = fxsh_type_apply(result, v);
     }
 
@@ -904,11 +954,13 @@ static fxsh_type_t *make_constr_type(fxsh_ast_node_t *data_constr, fxsh_ast_list
     fxsh_type_t *constr_type = result;
     fxsh_ast_list_t arg_types = data_constr->data.data_constr.arg_types;
     for (s32 i = (s32)sp_dyn_array_size(arg_types) - 1; i >= 0; i--) {
-        fxsh_type_t *arg_t = ast_to_type(arg_types[i]);
+        fxsh_type_t *arg_t = ast_to_type_with_params(arg_types[i], param_names, param_vars);
         if (!arg_t)
             arg_t = fxsh_type_var(fxsh_fresh_var());
         constr_type = fxsh_type_arrow(arg_t, constr_type);
     }
+    sp_dyn_array_free(param_names);
+    sp_dyn_array_free(param_vars);
     return constr_type;
 }
 
@@ -940,6 +992,423 @@ void fxsh_register_type_constrs(fxsh_ast_node_t *type_def, fxsh_constr_env_t *co
 static fxsh_error_t infer_expr(fxsh_ast_node_t *ast, fxsh_type_env_t *env,
                                fxsh_constr_env_t *constr_env, fxsh_subst_t *subst,
                                fxsh_type_t **out_type);
+
+static fxsh_scheme_t *mk_mono_scheme(fxsh_type_t *t) {
+    fxsh_scheme_t *sc = (fxsh_scheme_t *)fxsh_alloc0(sizeof(fxsh_scheme_t));
+    sc->type = t;
+    sc->vars = SP_NULLPTR;
+    return sc;
+}
+
+static void ensure_builtin_env(fxsh_type_env_t *env) {
+    if (!env)
+        return;
+    if (!type_env_lookup(*env, sp_str_lit("print"))) {
+        type_env_bind(
+            env, sp_str_lit("print"),
+            mk_mono_scheme(fxsh_type_arrow(fxsh_type_con(TYPE_STRING), fxsh_type_con(TYPE_UNIT))));
+    }
+    if (!type_env_lookup(*env, sp_str_lit("getenv"))) {
+        type_env_bind(env, sp_str_lit("getenv"),
+                      mk_mono_scheme(
+                          fxsh_type_arrow(fxsh_type_con(TYPE_STRING), fxsh_type_con(TYPE_STRING))));
+    }
+    if (!type_env_lookup(*env, sp_str_lit("file_exists"))) {
+        type_env_bind(
+            env, sp_str_lit("file_exists"),
+            mk_mono_scheme(fxsh_type_arrow(fxsh_type_con(TYPE_STRING), fxsh_type_con(TYPE_BOOL))));
+    }
+    if (!type_env_lookup(*env, sp_str_lit("read_file"))) {
+        type_env_bind(env, sp_str_lit("read_file"),
+                      mk_mono_scheme(
+                          fxsh_type_arrow(fxsh_type_con(TYPE_STRING), fxsh_type_con(TYPE_STRING))));
+    }
+    if (!type_env_lookup(*env, sp_str_lit("write_file"))) {
+        fxsh_type_t *t =
+            fxsh_type_arrow(fxsh_type_con(TYPE_STRING),
+                            fxsh_type_arrow(fxsh_type_con(TYPE_STRING), fxsh_type_con(TYPE_BOOL)));
+        type_env_bind(env, sp_str_lit("write_file"), mk_mono_scheme(t));
+    }
+    if (!type_env_lookup(*env, sp_str_lit("exec"))) {
+        type_env_bind(
+            env, sp_str_lit("exec"),
+            mk_mono_scheme(fxsh_type_arrow(fxsh_type_con(TYPE_STRING), fxsh_type_con(TYPE_INT))));
+    }
+    if (!type_env_lookup(*env, sp_str_lit("exec_code"))) {
+        type_env_bind(
+            env, sp_str_lit("exec_code"),
+            mk_mono_scheme(fxsh_type_arrow(fxsh_type_con(TYPE_STRING), fxsh_type_con(TYPE_INT))));
+    }
+    if (!type_env_lookup(*env, sp_str_lit("exec_stdout"))) {
+        type_env_bind(env, sp_str_lit("exec_stdout"),
+                      mk_mono_scheme(
+                          fxsh_type_arrow(fxsh_type_con(TYPE_STRING), fxsh_type_con(TYPE_STRING))));
+    }
+    if (!type_env_lookup(*env, sp_str_lit("exec_stderr"))) {
+        type_env_bind(env, sp_str_lit("exec_stderr"),
+                      mk_mono_scheme(
+                          fxsh_type_arrow(fxsh_type_con(TYPE_STRING), fxsh_type_con(TYPE_STRING))));
+    }
+    if (!type_env_lookup(*env, sp_str_lit("exec_capture"))) {
+        type_env_bind(
+            env, sp_str_lit("exec_capture"),
+            mk_mono_scheme(fxsh_type_arrow(fxsh_type_con(TYPE_STRING), fxsh_type_con(TYPE_INT))));
+    }
+    if (!type_env_lookup(*env, sp_str_lit("capture_code"))) {
+        type_env_bind(
+            env, sp_str_lit("capture_code"),
+            mk_mono_scheme(fxsh_type_arrow(fxsh_type_con(TYPE_INT), fxsh_type_con(TYPE_INT))));
+    }
+    if (!type_env_lookup(*env, sp_str_lit("capture_stdout"))) {
+        type_env_bind(
+            env, sp_str_lit("capture_stdout"),
+            mk_mono_scheme(fxsh_type_arrow(fxsh_type_con(TYPE_INT), fxsh_type_con(TYPE_STRING))));
+    }
+    if (!type_env_lookup(*env, sp_str_lit("capture_stderr"))) {
+        type_env_bind(
+            env, sp_str_lit("capture_stderr"),
+            mk_mono_scheme(fxsh_type_arrow(fxsh_type_con(TYPE_INT), fxsh_type_con(TYPE_STRING))));
+    }
+    if (!type_env_lookup(*env, sp_str_lit("capture_release"))) {
+        type_env_bind(
+            env, sp_str_lit("capture_release"),
+            mk_mono_scheme(fxsh_type_arrow(fxsh_type_con(TYPE_INT), fxsh_type_con(TYPE_BOOL))));
+    }
+    if (!type_env_lookup(*env, sp_str_lit("exec_stdin"))) {
+        fxsh_type_t *t = fxsh_type_arrow(
+            fxsh_type_con(TYPE_STRING),
+            fxsh_type_arrow(fxsh_type_con(TYPE_STRING), fxsh_type_con(TYPE_STRING)));
+        type_env_bind(env, sp_str_lit("exec_stdin"), mk_mono_scheme(t));
+    }
+    if (!type_env_lookup(*env, sp_str_lit("exec_stdin_code"))) {
+        fxsh_type_t *t =
+            fxsh_type_arrow(fxsh_type_con(TYPE_STRING),
+                            fxsh_type_arrow(fxsh_type_con(TYPE_STRING), fxsh_type_con(TYPE_INT)));
+        type_env_bind(env, sp_str_lit("exec_stdin_code"), mk_mono_scheme(t));
+    }
+    if (!type_env_lookup(*env, sp_str_lit("exec_stdin_capture"))) {
+        fxsh_type_t *t =
+            fxsh_type_arrow(fxsh_type_con(TYPE_STRING),
+                            fxsh_type_arrow(fxsh_type_con(TYPE_STRING), fxsh_type_con(TYPE_INT)));
+        type_env_bind(env, sp_str_lit("exec_stdin_capture"), mk_mono_scheme(t));
+    }
+    if (!type_env_lookup(*env, sp_str_lit("exec_stdin_stderr"))) {
+        fxsh_type_t *t = fxsh_type_arrow(
+            fxsh_type_con(TYPE_STRING),
+            fxsh_type_arrow(fxsh_type_con(TYPE_STRING), fxsh_type_con(TYPE_STRING)));
+        type_env_bind(env, sp_str_lit("exec_stdin_stderr"), mk_mono_scheme(t));
+    }
+    if (!type_env_lookup(*env, sp_str_lit("exec_pipe"))) {
+        fxsh_type_t *t = fxsh_type_arrow(
+            fxsh_type_con(TYPE_STRING),
+            fxsh_type_arrow(fxsh_type_con(TYPE_STRING), fxsh_type_con(TYPE_STRING)));
+        type_env_bind(env, sp_str_lit("exec_pipe"), mk_mono_scheme(t));
+    }
+    if (!type_env_lookup(*env, sp_str_lit("exec_pipe_code"))) {
+        fxsh_type_t *t =
+            fxsh_type_arrow(fxsh_type_con(TYPE_STRING),
+                            fxsh_type_arrow(fxsh_type_con(TYPE_STRING), fxsh_type_con(TYPE_INT)));
+        type_env_bind(env, sp_str_lit("exec_pipe_code"), mk_mono_scheme(t));
+    }
+    if (!type_env_lookup(*env, sp_str_lit("exec_pipe_capture"))) {
+        fxsh_type_t *t =
+            fxsh_type_arrow(fxsh_type_con(TYPE_STRING),
+                            fxsh_type_arrow(fxsh_type_con(TYPE_STRING), fxsh_type_con(TYPE_INT)));
+        type_env_bind(env, sp_str_lit("exec_pipe_capture"), mk_mono_scheme(t));
+    }
+    if (!type_env_lookup(*env, sp_str_lit("exec_pipefail_capture"))) {
+        fxsh_type_t *t =
+            fxsh_type_arrow(fxsh_type_con(TYPE_STRING),
+                            fxsh_type_arrow(fxsh_type_con(TYPE_STRING), fxsh_type_con(TYPE_INT)));
+        type_env_bind(env, sp_str_lit("exec_pipefail_capture"), mk_mono_scheme(t));
+    }
+    if (!type_env_lookup(*env, sp_str_lit("exec_pipefail3_capture"))) {
+        fxsh_type_t *t = fxsh_type_arrow(
+            fxsh_type_con(TYPE_STRING),
+            fxsh_type_arrow(fxsh_type_con(TYPE_STRING),
+                            fxsh_type_arrow(fxsh_type_con(TYPE_STRING), fxsh_type_con(TYPE_INT))));
+        type_env_bind(env, sp_str_lit("exec_pipefail3_capture"), mk_mono_scheme(t));
+    }
+    if (!type_env_lookup(*env, sp_str_lit("exec_pipefail4_capture"))) {
+        fxsh_type_t *t = fxsh_type_arrow(
+            fxsh_type_con(TYPE_STRING),
+            fxsh_type_arrow(fxsh_type_con(TYPE_STRING),
+                            fxsh_type_arrow(fxsh_type_con(TYPE_STRING),
+                                            fxsh_type_arrow(fxsh_type_con(TYPE_STRING),
+                                                            fxsh_type_con(TYPE_INT)))));
+        type_env_bind(env, sp_str_lit("exec_pipefail4_capture"), mk_mono_scheme(t));
+    }
+    if (!type_env_lookup(*env, sp_str_lit("exec_pipe_stderr"))) {
+        fxsh_type_t *t = fxsh_type_arrow(
+            fxsh_type_con(TYPE_STRING),
+            fxsh_type_arrow(fxsh_type_con(TYPE_STRING), fxsh_type_con(TYPE_STRING)));
+        type_env_bind(env, sp_str_lit("exec_pipe_stderr"), mk_mono_scheme(t));
+    }
+    if (!type_env_lookup(*env, sp_str_lit("glob"))) {
+        type_env_bind(env, sp_str_lit("glob"),
+                      mk_mono_scheme(
+                          fxsh_type_arrow(fxsh_type_con(TYPE_STRING), fxsh_type_con(TYPE_STRING))));
+    }
+    if (!type_env_lookup(*env, sp_str_lit("grep_lines"))) {
+        fxsh_type_t *t = fxsh_type_arrow(
+            fxsh_type_con(TYPE_STRING),
+            fxsh_type_arrow(fxsh_type_con(TYPE_STRING), fxsh_type_con(TYPE_STRING)));
+        type_env_bind(env, sp_str_lit("grep_lines"), mk_mono_scheme(t));
+    }
+    if (!type_env_lookup(*env, sp_str_lit("replace_once"))) {
+        fxsh_type_t *t =
+            fxsh_type_arrow(fxsh_type_con(TYPE_STRING),
+                            fxsh_type_arrow(fxsh_type_con(TYPE_STRING),
+                                            fxsh_type_arrow(fxsh_type_con(TYPE_STRING),
+                                                            fxsh_type_con(TYPE_STRING))));
+        type_env_bind(env, sp_str_lit("replace_once"), mk_mono_scheme(t));
+    }
+    if (!type_env_lookup(*env, sp_str_lit("json_validate"))) {
+        type_env_bind(
+            env, sp_str_lit("json_validate"),
+            mk_mono_scheme(fxsh_type_arrow(fxsh_type_con(TYPE_STRING), fxsh_type_con(TYPE_BOOL))));
+    }
+    if (!type_env_lookup(*env, sp_str_lit("json_compact"))) {
+        type_env_bind(env, sp_str_lit("json_compact"),
+                      mk_mono_scheme(
+                          fxsh_type_arrow(fxsh_type_con(TYPE_STRING), fxsh_type_con(TYPE_STRING))));
+    }
+    if (!type_env_lookup(*env, sp_str_lit("json_has"))) {
+        fxsh_type_t *t =
+            fxsh_type_arrow(fxsh_type_con(TYPE_STRING),
+                            fxsh_type_arrow(fxsh_type_con(TYPE_STRING), fxsh_type_con(TYPE_BOOL)));
+        type_env_bind(env, sp_str_lit("json_has"), mk_mono_scheme(t));
+    }
+    if (!type_env_lookup(*env, sp_str_lit("json_get"))) {
+        fxsh_type_t *t = fxsh_type_arrow(
+            fxsh_type_con(TYPE_STRING),
+            fxsh_type_arrow(fxsh_type_con(TYPE_STRING), fxsh_type_con(TYPE_STRING)));
+        type_env_bind(env, sp_str_lit("json_get"), mk_mono_scheme(t));
+    }
+    if (!type_env_lookup(*env, sp_str_lit("json_get_string"))) {
+        fxsh_type_t *t = fxsh_type_arrow(
+            fxsh_type_con(TYPE_STRING),
+            fxsh_type_arrow(fxsh_type_con(TYPE_STRING), fxsh_type_con(TYPE_STRING)));
+        type_env_bind(env, sp_str_lit("json_get_string"), mk_mono_scheme(t));
+    }
+    if (!type_env_lookup(*env, sp_str_lit("json_get_int"))) {
+        fxsh_type_t *t =
+            fxsh_type_arrow(fxsh_type_con(TYPE_STRING),
+                            fxsh_type_arrow(fxsh_type_con(TYPE_STRING), fxsh_type_con(TYPE_INT)));
+        type_env_bind(env, sp_str_lit("json_get_int"), mk_mono_scheme(t));
+    }
+    if (!type_env_lookup(*env, sp_str_lit("json_get_float"))) {
+        fxsh_type_t *t =
+            fxsh_type_arrow(fxsh_type_con(TYPE_STRING),
+                            fxsh_type_arrow(fxsh_type_con(TYPE_STRING), fxsh_type_con(TYPE_FLOAT)));
+        type_env_bind(env, sp_str_lit("json_get_float"), mk_mono_scheme(t));
+    }
+    if (!type_env_lookup(*env, sp_str_lit("json_get_bool"))) {
+        fxsh_type_t *t =
+            fxsh_type_arrow(fxsh_type_con(TYPE_STRING),
+                            fxsh_type_arrow(fxsh_type_con(TYPE_STRING), fxsh_type_con(TYPE_BOOL)));
+        type_env_bind(env, sp_str_lit("json_get_bool"), mk_mono_scheme(t));
+    }
+    if (!type_env_lookup(*env, sp_str_lit("c_null"))) {
+        s32 a = fxsh_fresh_var();
+        fxsh_scheme_t *sc = (fxsh_scheme_t *)fxsh_alloc0(sizeof(fxsh_scheme_t));
+        sc->vars = SP_NULLPTR;
+        sp_dyn_array_push(sc->vars, a);
+        sc->type = fxsh_type_arrow(fxsh_type_con(TYPE_UNIT),
+                                   fxsh_type_apply(fxsh_type_con(TYPE_PTR), fxsh_type_var(a)));
+        type_env_bind(env, sp_str_lit("c_null"), sc);
+    }
+    if (!type_env_lookup(*env, sp_str_lit("c_malloc"))) {
+        fxsh_type_t *ret_ptr = fxsh_type_apply(fxsh_type_con(TYPE_PTR), fxsh_type_con(TYPE_UNIT));
+        type_env_bind(env, sp_str_lit("c_malloc"),
+                      mk_mono_scheme(fxsh_type_arrow(fxsh_type_con(TYPE_INT), ret_ptr)));
+    }
+    if (!type_env_lookup(*env, sp_str_lit("c_free"))) {
+        fxsh_type_t *arg_ptr = fxsh_type_apply(fxsh_type_con(TYPE_PTR), fxsh_type_con(TYPE_UNIT));
+        type_env_bind(env, sp_str_lit("c_free"),
+                      mk_mono_scheme(fxsh_type_arrow(arg_ptr, fxsh_type_con(TYPE_UNIT))));
+    }
+    if (!type_env_lookup(*env, sp_str_lit("c_cast_ptr"))) {
+        s32 a = fxsh_fresh_var();
+        s32 b = fxsh_fresh_var();
+        fxsh_scheme_t *sc = (fxsh_scheme_t *)fxsh_alloc0(sizeof(fxsh_scheme_t));
+        sc->vars = SP_NULLPTR;
+        sp_dyn_array_push(sc->vars, a);
+        sp_dyn_array_push(sc->vars, b);
+        fxsh_type_t *in_ptr = fxsh_type_apply(fxsh_type_con(TYPE_PTR), fxsh_type_var(a));
+        fxsh_type_t *out_ptr = fxsh_type_apply(fxsh_type_con(TYPE_PTR), fxsh_type_var(b));
+        sc->type = fxsh_type_arrow(in_ptr, out_ptr);
+        type_env_bind(env, sp_str_lit("c_cast_ptr"), sc);
+    }
+    if (!type_env_lookup(*env, sp_str_lit("c_callback0"))) {
+        fxsh_type_t *cb_t = fxsh_type_arrow(fxsh_type_con(TYPE_UNIT), fxsh_type_con(TYPE_UNIT));
+        fxsh_type_t *ret_ptr = fxsh_type_apply(fxsh_type_con(TYPE_PTR), fxsh_type_con(TYPE_UNIT));
+        type_env_bind(env, sp_str_lit("c_callback0"),
+                      mk_mono_scheme(fxsh_type_arrow(cb_t, ret_ptr)));
+    }
+    if (!type_env_lookup(*env, sp_str_lit("c_callback1_ptr"))) {
+        fxsh_type_t *ptr_t = fxsh_type_apply(fxsh_type_con(TYPE_PTR), fxsh_type_con(TYPE_UNIT));
+        fxsh_type_t *cb_t = fxsh_type_arrow(ptr_t, fxsh_type_con(TYPE_UNIT));
+        type_env_bind(env, sp_str_lit("c_callback1_ptr"),
+                      mk_mono_scheme(fxsh_type_arrow(cb_t, ptr_t)));
+    }
+    if (!type_env_lookup(*env, sp_str_lit("int_to_c_int"))) {
+        type_env_bind(
+            env, sp_str_lit("int_to_c_int"),
+            mk_mono_scheme(fxsh_type_arrow(fxsh_type_con(TYPE_INT), fxsh_type_con(TYPE_C_INT))));
+    }
+    if (!type_env_lookup(*env, sp_str_lit("c_int_to_int"))) {
+        type_env_bind(
+            env, sp_str_lit("c_int_to_int"),
+            mk_mono_scheme(fxsh_type_arrow(fxsh_type_con(TYPE_C_INT), fxsh_type_con(TYPE_INT))));
+    }
+    if (!type_env_lookup(*env, sp_str_lit("int_to_c_uint"))) {
+        type_env_bind(
+            env, sp_str_lit("int_to_c_uint"),
+            mk_mono_scheme(fxsh_type_arrow(fxsh_type_con(TYPE_INT), fxsh_type_con(TYPE_C_UINT))));
+    }
+    if (!type_env_lookup(*env, sp_str_lit("c_uint_to_int"))) {
+        type_env_bind(
+            env, sp_str_lit("c_uint_to_int"),
+            mk_mono_scheme(fxsh_type_arrow(fxsh_type_con(TYPE_C_UINT), fxsh_type_con(TYPE_INT))));
+    }
+    if (!type_env_lookup(*env, sp_str_lit("int_to_c_long"))) {
+        type_env_bind(
+            env, sp_str_lit("int_to_c_long"),
+            mk_mono_scheme(fxsh_type_arrow(fxsh_type_con(TYPE_INT), fxsh_type_con(TYPE_C_LONG))));
+    }
+    if (!type_env_lookup(*env, sp_str_lit("c_long_to_int"))) {
+        type_env_bind(
+            env, sp_str_lit("c_long_to_int"),
+            mk_mono_scheme(fxsh_type_arrow(fxsh_type_con(TYPE_C_LONG), fxsh_type_con(TYPE_INT))));
+    }
+    if (!type_env_lookup(*env, sp_str_lit("int_to_c_ulong"))) {
+        type_env_bind(
+            env, sp_str_lit("int_to_c_ulong"),
+            mk_mono_scheme(fxsh_type_arrow(fxsh_type_con(TYPE_INT), fxsh_type_con(TYPE_C_ULONG))));
+    }
+    if (!type_env_lookup(*env, sp_str_lit("c_ulong_to_int"))) {
+        type_env_bind(
+            env, sp_str_lit("c_ulong_to_int"),
+            mk_mono_scheme(fxsh_type_arrow(fxsh_type_con(TYPE_C_ULONG), fxsh_type_con(TYPE_INT))));
+    }
+    if (!type_env_lookup(*env, sp_str_lit("int_to_c_size"))) {
+        type_env_bind(
+            env, sp_str_lit("int_to_c_size"),
+            mk_mono_scheme(fxsh_type_arrow(fxsh_type_con(TYPE_INT), fxsh_type_con(TYPE_C_SIZE))));
+    }
+    if (!type_env_lookup(*env, sp_str_lit("c_size_to_int"))) {
+        type_env_bind(
+            env, sp_str_lit("c_size_to_int"),
+            mk_mono_scheme(fxsh_type_arrow(fxsh_type_con(TYPE_C_SIZE), fxsh_type_con(TYPE_INT))));
+    }
+    if (!type_env_lookup(*env, sp_str_lit("int_to_c_ssize"))) {
+        type_env_bind(
+            env, sp_str_lit("int_to_c_ssize"),
+            mk_mono_scheme(fxsh_type_arrow(fxsh_type_con(TYPE_INT), fxsh_type_con(TYPE_C_SSIZE))));
+    }
+    if (!type_env_lookup(*env, sp_str_lit("c_ssize_to_int"))) {
+        type_env_bind(
+            env, sp_str_lit("c_ssize_to_int"),
+            mk_mono_scheme(fxsh_type_arrow(fxsh_type_con(TYPE_C_SSIZE), fxsh_type_con(TYPE_INT))));
+    }
+    if (!type_env_lookup(*env, sp_str_lit("tensor_new2"))) {
+        fxsh_type_t *t = fxsh_type_arrow(
+            fxsh_type_con(TYPE_INT),
+            fxsh_type_arrow(fxsh_type_con(TYPE_INT), fxsh_type_arrow(fxsh_type_con(TYPE_FLOAT),
+                                                                     fxsh_type_con(TYPE_TENSOR))));
+        type_env_bind(env, sp_str_lit("tensor_new2"), mk_mono_scheme(t));
+    }
+    if (!type_env_lookup(*env, sp_str_lit("tensor_from_list2"))) {
+        fxsh_type_t *flist = fxsh_type_apply(fxsh_type_con(TYPE_LIST), fxsh_type_con(TYPE_FLOAT));
+        fxsh_type_t *t =
+            fxsh_type_arrow(fxsh_type_con(TYPE_INT),
+                            fxsh_type_arrow(fxsh_type_con(TYPE_INT),
+                                            fxsh_type_arrow(flist, fxsh_type_con(TYPE_TENSOR))));
+        type_env_bind(env, sp_str_lit("tensor_from_list2"), mk_mono_scheme(t));
+    }
+    if (!type_env_lookup(*env, sp_str_lit("tensor_shape2"))) {
+        fxsh_type_t *tt = (fxsh_type_t *)fxsh_alloc0(sizeof(fxsh_type_t));
+        tt->kind = TYPE_TUPLE;
+        tt->data.tuple = SP_NULLPTR;
+        sp_dyn_array_push(tt->data.tuple, fxsh_type_con(TYPE_INT));
+        sp_dyn_array_push(tt->data.tuple, fxsh_type_con(TYPE_INT));
+        type_env_bind(env, sp_str_lit("tensor_shape2"),
+                      mk_mono_scheme(fxsh_type_arrow(fxsh_type_con(TYPE_TENSOR), tt)));
+    }
+    if (!type_env_lookup(*env, sp_str_lit("tensor_get2"))) {
+        fxsh_type_t *t = fxsh_type_arrow(
+            fxsh_type_con(TYPE_TENSOR),
+            fxsh_type_arrow(fxsh_type_con(TYPE_INT),
+                            fxsh_type_arrow(fxsh_type_con(TYPE_INT), fxsh_type_con(TYPE_FLOAT))));
+        type_env_bind(env, sp_str_lit("tensor_get2"), mk_mono_scheme(t));
+    }
+    if (!type_env_lookup(*env, sp_str_lit("tensor_set2"))) {
+        fxsh_type_t *t = fxsh_type_arrow(
+            fxsh_type_con(TYPE_TENSOR),
+            fxsh_type_arrow(fxsh_type_con(TYPE_INT),
+                            fxsh_type_arrow(fxsh_type_con(TYPE_INT),
+                                            fxsh_type_arrow(fxsh_type_con(TYPE_FLOAT),
+                                                            fxsh_type_con(TYPE_TENSOR)))));
+        type_env_bind(env, sp_str_lit("tensor_set2"), mk_mono_scheme(t));
+    }
+    if (!type_env_lookup(*env, sp_str_lit("tensor_add"))) {
+        fxsh_type_t *t = fxsh_type_arrow(
+            fxsh_type_con(TYPE_TENSOR),
+            fxsh_type_arrow(fxsh_type_con(TYPE_TENSOR), fxsh_type_con(TYPE_TENSOR)));
+        type_env_bind(env, sp_str_lit("tensor_add"), mk_mono_scheme(t));
+    }
+    if (!type_env_lookup(*env, sp_str_lit("tensor_dot"))) {
+        fxsh_type_t *t = fxsh_type_arrow(
+            fxsh_type_con(TYPE_TENSOR),
+            fxsh_type_arrow(fxsh_type_con(TYPE_TENSOR), fxsh_type_con(TYPE_TENSOR)));
+        type_env_bind(env, sp_str_lit("tensor_dot"), mk_mono_scheme(t));
+    }
+}
+
+static void ensure_builtin_constr_env(fxsh_constr_env_t *constr_env) {
+    if (constr_env_lookup(*constr_env, sp_str_lit("Some")) == NULL) {
+        fxsh_type_var_t a = fxsh_fresh_var();
+        fxsh_type_t *ta = fxsh_type_var(a);
+        fxsh_type_t *opt_a = fxsh_type_apply(fxsh_type_con(sp_str_lit("option")), ta);
+        fxsh_constr_info_t info = {.constr_name = sp_str_lit("Some"),
+                                   .type_name = sp_str_lit("option"),
+                                   .constr_type = fxsh_type_arrow(ta, opt_a),
+                                   .arity = 1};
+        constr_env_bind(constr_env, sp_str_lit("Some"), &info);
+    }
+    if (constr_env_lookup(*constr_env, sp_str_lit("None")) == NULL) {
+        fxsh_type_var_t a = fxsh_fresh_var();
+        fxsh_type_t *ta = fxsh_type_var(a);
+        fxsh_type_t *opt_a = fxsh_type_apply(fxsh_type_con(sp_str_lit("option")), ta);
+        fxsh_constr_info_t info = {.constr_name = sp_str_lit("None"),
+                                   .type_name = sp_str_lit("option"),
+                                   .constr_type = opt_a,
+                                   .arity = 0};
+        constr_env_bind(constr_env, sp_str_lit("None"), &info);
+    }
+    if (constr_env_lookup(*constr_env, sp_str_lit("Ok")) == NULL) {
+        fxsh_type_var_t a = fxsh_fresh_var();
+        fxsh_type_t *ta = fxsh_type_var(a);
+        fxsh_type_t *res_a = fxsh_type_apply(fxsh_type_con(sp_str_lit("result")), ta);
+        fxsh_constr_info_t info = {.constr_name = sp_str_lit("Ok"),
+                                   .type_name = sp_str_lit("result"),
+                                   .constr_type = fxsh_type_arrow(ta, res_a),
+                                   .arity = 1};
+        constr_env_bind(constr_env, sp_str_lit("Ok"), &info);
+    }
+    if (constr_env_lookup(*constr_env, sp_str_lit("Err")) == NULL) {
+        fxsh_type_var_t a = fxsh_fresh_var();
+        fxsh_type_t *ta = fxsh_type_var(a);
+        fxsh_type_t *res_a = fxsh_type_apply(fxsh_type_con(sp_str_lit("result")), ta);
+        fxsh_constr_info_t info = {.constr_name = sp_str_lit("Err"),
+                                   .type_name = sp_str_lit("result"),
+                                   .constr_type =
+                                       fxsh_type_arrow(fxsh_type_con(TYPE_STRING), res_a),
+                                   .arity = 1};
+        constr_env_bind(constr_env, sp_str_lit("Err"), &info);
+    }
+}
 
 static fxsh_error_t infer_pattern(fxsh_ast_node_t *pattern, fxsh_type_env_t *env,
                                   fxsh_constr_env_t *constr_env, fxsh_subst_t *subst,
@@ -1004,6 +1473,49 @@ static fxsh_error_t infer_pattern(fxsh_ast_node_t *pattern, fxsh_type_env_t *env
             tt->kind = TYPE_TUPLE;
             tt->data.tuple = elem_types;
             *out_type = tt;
+            return ERR_OK;
+        }
+
+        case AST_LIST: {
+            fxsh_type_t *elem_t = fxsh_type_var(fxsh_fresh_var());
+            sp_dyn_array_for(pattern->data.elements, i) {
+                fxsh_type_t *et = NULL;
+                fxsh_error_t err =
+                    infer_pattern(pattern->data.elements[i], env, constr_env, subst, &et);
+                if (err != ERR_OK)
+                    return err;
+                fxsh_subst_t s = SP_NULLPTR;
+                err = fxsh_type_unify(et, elem_t, &s);
+                if (err != ERR_OK)
+                    return err;
+                *subst = compose(s, *subst);
+                fxsh_type_apply_subst(*subst, &elem_t);
+            }
+            *out_type = make_list_type(elem_t);
+            return ERR_OK;
+        }
+
+        case AST_PAT_CONS: {
+            if (!pattern->data.elements || sp_dyn_array_size(pattern->data.elements) != 2) {
+                *out_type = make_list_type(fxsh_type_var(fxsh_fresh_var()));
+                return ERR_OK;
+            }
+            fxsh_type_t *ht = NULL, *tt = NULL;
+            fxsh_error_t err =
+                infer_pattern(pattern->data.elements[0], env, constr_env, subst, &ht);
+            if (err != ERR_OK)
+                return err;
+            err = infer_pattern(pattern->data.elements[1], env, constr_env, subst, &tt);
+            if (err != ERR_OK)
+                return err;
+            fxsh_type_t *list_ht = make_list_type(ht);
+            fxsh_subst_t s = SP_NULLPTR;
+            err = fxsh_type_unify(tt, list_ht, &s);
+            if (err != ERR_OK)
+                return err;
+            *subst = compose(s, *subst);
+            fxsh_type_apply_subst(*subst, &list_ht);
+            *out_type = list_ht;
             return ERR_OK;
         }
 
@@ -1093,6 +1605,39 @@ static fxsh_error_t infer_expr(fxsh_ast_node_t *ast, fxsh_type_env_t *env,
             return ERR_OK;
         }
 
+        case AST_CT_TYPE_OF:
+            *out_type = fxsh_type_con(TYPE_STRING);
+            return ERR_OK;
+        case AST_CT_SIZE_OF:
+        case AST_CT_ALIGN_OF:
+            *out_type = fxsh_type_con(TYPE_INT);
+            return ERR_OK;
+        case AST_CT_HAS_FIELD:
+            *out_type = fxsh_type_con(TYPE_BOOL);
+            return ERR_OK;
+        case AST_CT_FIELDS_OF:
+            *out_type = make_list_type(fxsh_type_con(TYPE_STRING));
+            return ERR_OK;
+        case AST_CT_JSON_SCHEMA:
+            *out_type = fxsh_type_con(TYPE_STRING);
+            return ERR_OK;
+        case AST_CT_QUOTE:
+            *out_type = fxsh_type_con(TYPE_STRING);
+            return ERR_OK;
+        case AST_CT_UNQUOTE:
+        case AST_CT_SPLICE:
+            *out_type = fxsh_type_var(fxsh_fresh_var());
+            return ERR_OK;
+        case AST_CT_EVAL:
+            return infer_expr(ast->data.ct_type_of.operand, env, constr_env, subst, out_type);
+        case AST_CT_COMPILE_LOG:
+            *out_type = fxsh_type_con(TYPE_UNIT);
+            return ERR_OK;
+        case AST_CT_COMPILE_ERROR:
+        case AST_CT_PANIC:
+            *out_type = fxsh_type_var(fxsh_fresh_var());
+            return ERR_OK;
+
         case AST_BINARY: {
             fxsh_type_t *lt = NULL, *rt = NULL;
             fxsh_error_t err;
@@ -1104,6 +1649,17 @@ static fxsh_error_t infer_expr(fxsh_ast_node_t *ast, fxsh_type_env_t *env,
                 return err;
 
             switch (ast->data.binary.op) {
+                case TOK_APPEND: {
+                    fxsh_type_t *list_lt = make_list_type(lt);
+                    fxsh_subst_t s = SP_NULLPTR;
+                    err = fxsh_type_unify(rt, list_lt, &s);
+                    if (err)
+                        return err;
+                    *subst = compose(s, *subst);
+                    fxsh_type_apply_subst(s, &list_lt);
+                    *out_type = list_lt;
+                    return ERR_OK;
+                }
                 case TOK_CONCAT: {
                     fxsh_type_t *st = fxsh_type_con(TYPE_STRING);
                     fxsh_subst_t s1 = SP_NULLPTR, s2 = SP_NULLPTR;
@@ -1288,6 +1844,24 @@ static fxsh_error_t infer_expr(fxsh_ast_node_t *ast, fxsh_type_env_t *env,
             return ERR_OK;
         }
 
+        case AST_LIST: {
+            fxsh_type_t *elem_t = fxsh_type_var(fxsh_fresh_var());
+            sp_dyn_array_for(ast->data.elements, i) {
+                fxsh_type_t *et = NULL;
+                fxsh_error_t err = infer_expr(ast->data.elements[i], env, constr_env, subst, &et);
+                if (err)
+                    return err;
+                fxsh_subst_t s = SP_NULLPTR;
+                err = fxsh_type_unify(et, elem_t, &s);
+                if (err)
+                    return err;
+                *subst = compose(s, *subst);
+                fxsh_type_apply_subst(*subst, &elem_t);
+            }
+            *out_type = make_list_type(elem_t);
+            return ERR_OK;
+        }
+
         case AST_PIPE: {
             fxsh_type_t *lt = NULL, *rt = NULL;
             fxsh_error_t err;
@@ -1324,6 +1898,15 @@ static fxsh_error_t infer_expr(fxsh_ast_node_t *ast, fxsh_type_env_t *env,
                 fxsh_error_t err = infer_expr(f->data.field.object, env, constr_env, subst, &ft);
                 if (err)
                     return err;
+                if (f->data.field.type) {
+                    fxsh_type_t *ann_t = ast_to_type(f->data.field.type);
+                    fxsh_subst_t s_ann = SP_NULLPTR;
+                    err = fxsh_type_unify(ft, ann_t, &s_ann);
+                    if (err)
+                        return err;
+                    *subst = compose(s_ann, *subst);
+                    fxsh_type_apply_subst(s_ann, &ft);
+                }
                 fxsh_field_t rf = {.name = f->data.field.field, .type = ft};
                 sp_dyn_array_push(fields, rf);
             }
@@ -1384,6 +1967,20 @@ static fxsh_error_t infer_expr(fxsh_ast_node_t *ast, fxsh_type_env_t *env,
                 fxsh_type_apply_subst(*subst, &rec_t);
                 type_env_bind(env, ast->data.let.name, generalize(rec_t, env));
             } else {
+                if (ast->data.let.type && ast->data.let.value &&
+                    ast->data.let.value->kind == AST_LIT_STRING &&
+                    lit_string_has_prefix(ast->data.let.value->data.lit_string, "c:")) {
+                    fxsh_type_t *ann_t = ast_to_type(ast->data.let.type);
+                    if (!ann_t || ann_t->kind != TYPE_ARROW) {
+                        fprintf(stderr,
+                                "Type error: FFI declaration `%.*s` must have function type\n",
+                                ast->data.let.name.len, ast->data.let.name.data);
+                        return ERR_TYPE_ERROR;
+                    }
+                    type_env_bind(env, ast->data.let.name, generalize(ann_t, env));
+                    *out_type = fxsh_type_con(TYPE_UNIT);
+                    return ERR_OK;
+                }
                 fxsh_type_t *vt = NULL;
                 fxsh_error_t err = infer_expr(ast->data.let.value, env, constr_env, subst, &vt);
                 if (err)
@@ -1475,10 +2072,7 @@ static fxsh_error_t infer_expr(fxsh_ast_node_t *ast, fxsh_type_env_t *env,
                 } else if (arm->data.match_arm.pattern &&
                            arm->data.match_arm.pattern->kind == AST_PAT_CONSTR) {
                     sp_str_t cname = arm->data.match_arm.pattern->data.constr_appl.constr_name;
-                    if (str_in_list(seen_constrs, cname)) {
-                        fprintf(stderr, "Warning: duplicate constructor pattern `%.*s` in match\n",
-                                cname.len, cname.data);
-                    } else {
+                    if (!str_in_list(seen_constrs, cname)) {
                         sp_dyn_array_push(seen_constrs, cname);
                     }
                 }
@@ -1555,6 +2149,8 @@ static fxsh_error_t infer_expr(fxsh_ast_node_t *ast, fxsh_type_env_t *env,
 fxsh_error_t fxsh_type_infer(fxsh_ast_node_t *ast, fxsh_type_env_t *env,
                              fxsh_constr_env_t *constr_env, fxsh_type_t **out_type) {
     fxsh_reset_type_vars();
+    ensure_builtin_env(env);
+    ensure_builtin_constr_env(constr_env);
     fxsh_subst_t subst = SP_NULLPTR;
     fxsh_error_t err = infer_expr(ast, env, constr_env, &subst, out_type);
     if (err == ERR_OK)

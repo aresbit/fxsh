@@ -1,0 +1,15 @@
+import Os
+
+let out = Os.pipe "printf \"a\\nb\\n\"" "grep b"
+let code = Os.pipe_code "printf \"a\\n\"" "grep a"
+let err = Os.with_stdin_stderr "sh -c \"cat >/dev/null; echo boom 1>&2\"" "input"
+let in_code = Os.with_stdin_code "cat >/dev/null" "ok"
+
+if out == "b\n" then
+  if code == 0 then
+    if err == "boom\n" then
+      if in_code == 0 then "ok" else "bad_stdin_code"
+    else "bad_stderr"
+  else "bad_pipe_code"
+else
+  "bad_pipe_out"

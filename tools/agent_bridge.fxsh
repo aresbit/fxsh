@@ -1,0 +1,46 @@
+# fxsh agent tool bridge (env-driven)
+let op = getenv "FXSH_TOOL_OP"
+let path = getenv "FXSH_TOOL_PATH"
+let content = getenv "FXSH_TOOL_CONTENT"
+let old_text = getenv "FXSH_TOOL_OLD"
+let new_text = getenv "FXSH_TOOL_NEW"
+
+let out =
+  if op == "read_file" then
+    read_file path
+  else
+    if op == "write_file" then
+      if write_file path content then
+        "ok"
+      else
+        "error"
+      end
+    else
+      if op == "file_exists" then
+        if file_exists path then
+          "true"
+        else
+          "false"
+        end
+      else
+        if op == "edit_file" then
+          let raw = read_file path in
+          let replaced = replace_once raw old_text new_text in
+          if replaced == raw then
+            "error: old_text not found"
+          else
+            if write_file path replaced then
+              "ok"
+            else
+              "error"
+            end
+          end
+        else
+          "error: unknown op"
+        end
+      end
+    end
+  end
+
+let _ = print out
+let result = out

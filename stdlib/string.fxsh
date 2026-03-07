@@ -1,103 +1,34 @@
-# string.fxsh - fxsh string operations module
+# string.fxsh - executable string helpers for current fxsh runtime
 
-#==============================================================================
-# Basic Operations
-#==============================================================================
+let empty = ""
 
-let length = fn s -> @length s
+let concat = fn a b -> a ++ b
 
-let is_empty = fn s -> length s == 0
+let is_empty = fn s -> s == ""
 
-let get = fn i s -> @char_at s i
+let eq = fn a b -> a == b
 
-#==============================================================================
-# Searching
-#==============================================================================
+let neq = fn a b -> a != b
 
-let contains = fn substr s -> @contains s substr
+let contains = fn needle s ->
+  if grep_lines needle s == "" then false else true
 
-let starts_with = fn prefix s -> @starts_with s prefix
+let starts_with = fn prefix s ->
+  if grep_lines ("^" ++ prefix) s == "" then false else true
 
-let ends_with = fn suffix s -> @ends_with s suffix
+let ends_with = fn suffix s ->
+  if grep_lines (suffix ++ "$") s == "" then false else true
 
-let index_of = fn substr s -> @index_of s substr
-
-let last_index_of = fn substr s -> @last_index_of s substr
-
-#==============================================================================
-# Substrings
-#==============================================================================
-
-let substring = fn start len s -> @substring s start len
-
-let slice = fn start end_ s -> @slice s start end_
-
-let head = fn s ->
-  if is_empty s then None else Some (get 0 s) end
-
-let tail = fn s ->
-  if is_empty s then None else Some (slice 1 (length s) s) end
-
-#==============================================================================
-# Transformations
-#==============================================================================
-
-let concat = fn a b -> @concat a b
+let replace = fn old_t new_t s -> replace_once s old_t new_t
 
 let join = fn sep strings ->
-  let rec join_impl = fn acc ss ->
-    match ss with
-    | Nil -> acc
-    | Cons(s, Nil) -> concat acc s
-    | Cons(s, ss') -> join_impl (concat (concat acc s) sep) ss'
+  let rec loop = fn acc rest ->
+    match rest with
+    | [] -> acc
+    | x :: [] -> acc ++ x
+    | x :: xs -> loop (acc ++ x ++ sep) xs
     end
   in
-  join_impl "" strings
+  loop "" strings
 
-let split = fn sep s -> @split s sep
-
-let trim = fn s -> @trim s
-
-let trim_left = fn s -> @trim_left s
-
-let trim_right = fn s -> @trim_right s
-
-let uppercase = fn s -> @uppercase s
-
-let lowercase = fn s -> @lowercase s
-
-let capitalize = fn s ->
-  match head s with
-  | None -> ""
-  | Some c -> concat (uppercase (singleton c)) (tail s)
-  end
-
-#==============================================================================
-# Predicates
-#==============================================================================
-
-let is_alpha = fn c -> @is_alpha c
-
-let is_digit = fn c -> @is_digit c
-
-let is_alnum = fn c -> is_alpha c || is_digit c
-
-let is_space = fn c -> c == ' ' || c == '\t' || c == '\n' || c == '\r'
-
-#==============================================================================
-# Conversions
-#==============================================================================
-
-let to_int = fn s -> @parse_int s
-
-let to_float = fn s -> @parse_float s
-
-let from_int = fn n -> @int_to_string n
-
-let from_float = fn f -> @float_to_string f
-
-let from_char = fn c -> @char_to_string c
-
-let to_list = fn s -> @chars s
-
-let from_list = fn chars -> @from_chars chars
+let non_empty = fn s -> not (is_empty s)

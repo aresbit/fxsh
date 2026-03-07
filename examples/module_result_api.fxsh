@@ -1,0 +1,20 @@
+type 'a result = Ok of 'a | Err of string
+
+module Path = struct
+let exists = fn p -> Ok (file_exists p)
+let read_text = fn p ->
+  let s = read_file p in
+  if s == "" then Err "read failed or empty" else Ok s
+end
+
+module Process = struct
+let run = fn cmd ->
+  let rc = exec cmd in
+  if rc == 0 then Ok rc else Err "process failed"
+end
+
+import Path
+import Process
+
+let _r = Path.read_text "build/fxsh_sys_result.txt"
+let _p = Process.run "true"

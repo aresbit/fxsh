@@ -1,0 +1,17 @@
+module Opt = struct
+  type t = None | Some of int
+  let make = fn x -> Some x
+end
+
+let a = Opt.Some 1
+let b = Opt.make 2
+
+let _r1 = match a with
+  | Opt.Some n -> n
+  | Opt.None -> 0
+end
+
+let _r2 = match b with
+  | Opt.Some n -> n
+  | Opt.None -> 0
+end

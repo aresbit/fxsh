@@ -1,0 +1,10 @@
+# Comptime reflection operators
+
+let person = { name = "fx", age = 18 }
+
+let comptime TPerson = @typeOf(person)
+let comptime SizeInt = @sizeOf(@typeOf(1))
+let comptime AlignBool = @alignOf(@typeOf(true))
+let comptime HasAge = @hasField(@typeOf(person), "age")
+let comptime HasId = @hasField(@typeOf(person), "id")
+let comptime Fields = @fieldsOf(@typeOf(person))

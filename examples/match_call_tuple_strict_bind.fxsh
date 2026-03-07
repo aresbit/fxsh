@@ -1,0 +1,7 @@
+# Strict pattern binding type injection for call scrutinee (tuple)
+
+let mk = fn x -> (1.5, true, "ok")
+let out = match mk 1 with
+  | (f, b, s) -> if b and (s == "ok") and (f == 1.5) then 1 else 0
+  | _ -> 0
+end

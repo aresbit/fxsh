@@ -1,0 +1,18 @@
+import Shell
+
+let r2 = Shell.pipeline2 "printf \"a\\nb\\n\"" "grep b"
+let r3 = Shell.pipeline3 "printf \"a\\nb\\n\"" "grep b" "tr b B"
+let r4 = Shell.pipeline4 "printf \"a\\nb\\n\"" "grep b" "tr b B" "tr B c"
+
+if r2.code == 0 then
+  if r2.stdout == "b\n" then
+    if r3.code == 0 then
+      if r3.stdout == "B\n" then
+        if r4.code == 0 then
+          if r4.stdout == "c\n" then "ok" else "bad_r4_stdout"
+        else "bad_r4_code"
+      else "bad_r3_stdout"
+    else "bad_r3_code"
+  else "bad_r2_stdout"
+else
+  "bad_r2_code"

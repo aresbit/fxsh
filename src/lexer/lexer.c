@@ -41,7 +41,7 @@ static const keyword_entry_t keywords[] = {
     {sp_str_lit("true"), TOK_TRUE},     {sp_str_lit("false"), TOK_FALSE},
     {sp_str_lit("and"), TOK_AND},       {sp_str_lit("or"), TOK_OR},
     {sp_str_lit("not"), TOK_NOT},       {sp_str_lit("rec"), TOK_REC},
-    {sp_str_lit("do"), TOK_IN}, /* 'do' maps to IN for now */
+    {sp_str_lit("do"), TOK_DO},
 };
 #define NUM_KEYWORDS (sizeof(keywords) / sizeof(keywords[0]))
 
@@ -64,6 +64,8 @@ const c8 *fxsh_token_kind_name(fxsh_token_kind_t kind) {
             return "FLOAT";
         case TOK_STRING:
             return "STRING";
+        case TOK_FSTRING:
+            return "FSTRING";
         case TOK_BOOL:
             return "BOOL";
         case TOK_UNIT:
@@ -124,6 +126,8 @@ const c8 *fxsh_token_kind_name(fxsh_token_kind_t kind) {
             return "NOT";
         case TOK_REC:
             return "REC";
+        case TOK_DO:
+            return "DO";
         case TOK_PLUS:
             return "PLUS";
         case TOK_MINUS:
@@ -146,6 +150,10 @@ const c8 *fxsh_token_kind_name(fxsh_token_kind_t kind) {
             return "EQ";
         case TOK_NEQ:
             return "NEQ";
+        case TOK_BANG:
+            return "BANG";
+        case TOK_QMARK:
+            return "QMARK";
         case TOK_LT:
             return "LT";
         case TOK_GT:
@@ -226,6 +234,12 @@ static inline c8 peek_next(fxsh_lexer_t *l) {
     return *(l->cursor + 1);
 }
 
+static inline c8 peek_n(fxsh_lexer_t *l, u32 n) {
+    if (l->cursor + n >= l->source.data + l->source.len)
+        return '\0';
+    return *(l->cursor + n);
+}
+
 static inline c8 advance(fxsh_lexer_t *l) {
     return is_at_end(l) ? '\0' : *l->cursor++;
 }
@@ -255,15 +269,53 @@ static inline fxsh_loc_t make_loc(fxsh_lexer_t *l) {
  * Token Readers
  *=============================================================================*/
 
-static fxsh_error_t read_string(fxsh_lexer_t *l, fxsh_token_t *out) {
-    fxsh_loc_t loc = make_loc(l);
-    advance(l); /* consume opening " */
+static s32 hex_digit(c8 c) {
+    if (c >= '0' && c <= '9')
+        return c - '0';
+    if (c >= 'a' && c <= 'f')
+        return c - 'a' + 10;
+    if (c >= 'A' && c <= 'F')
+        return c - 'A' + 10;
+    return -1;
+}
+
+static fxsh_error_t read_string_core(fxsh_lexer_t *l, fxsh_token_t *out, fxsh_loc_t loc, bool raw,
+                                     bool bytes, bool fstr) {
+    bool triple = peek(l) == '"' && peek_next(l) == '"' && peek_n(l, 2) == '"';
+    if (triple) {
+        advance(l);
+        advance(l);
+        advance(l);
+    } else {
+        advance(l); /* consume opening " */
+    }
     sp_dyn_array(c8) chars = SP_NULLPTR;
 
-    while (!is_at_end(l) && peek(l) != '"') {
-        if (peek(l) == '\\') {
-            advance(l);
+    while (!is_at_end(l)) {
+        if (triple) {
+            if (peek(l) == '"' && peek_next(l) == '"' && peek_n(l, 2) == '"')
+                break;
+        } else if (peek(l) == '"') {
+            break;
+        }
+
+        c8 c = advance(l);
+        if (c == '\n') {
+            l->line++;
+            l->line_start = l->cursor;
+        }
+
+        if (!raw && c == '\\') {
+            if (is_at_end(l)) {
+                out->kind = TOK_ERROR;
+                sp_dyn_array_free(chars);
+                return ERR_SYNTAX_ERROR;
+            }
             c8 e = advance(l);
+            if (e == '\n') {
+                l->line++;
+                l->line_start = l->cursor;
+            }
             switch (e) {
                 case 'n':
                     sp_dyn_array_push(chars, '\n');
@@ -283,18 +335,29 @@ static fxsh_error_t read_string(fxsh_lexer_t *l, fxsh_token_t *out) {
                 case '0':
                     sp_dyn_array_push(chars, '\0');
                     break;
+                case 'x': {
+                    s32 h1 = hex_digit(peek(l));
+                    s32 h2 = hex_digit(peek_next(l));
+                    if (h1 < 0 || h2 < 0) {
+                        fprintf(stderr, "Lexer error at %d:%u: invalid hex escape\n", l->line,
+                                (u32)(l->cursor - l->line_start));
+                        out->kind = TOK_ERROR;
+                        sp_dyn_array_free(chars);
+                        return ERR_SYNTAX_ERROR;
+                    }
+                    advance(l);
+                    advance(l);
+                    sp_dyn_array_push(chars, (c8)((h1 << 4) | h2));
+                    break;
+                }
                 default:
                     sp_dyn_array_push(chars, e);
                     break;
             }
-        } else {
-            c8 c = advance(l);
-            if (c == '\n') {
-                l->line++;
-                l->line_start = l->cursor;
-            }
-            sp_dyn_array_push(chars, c);
+            continue;
         }
+
+        sp_dyn_array_push(chars, c);
     }
 
     if (is_at_end(l)) {
@@ -304,7 +367,13 @@ static fxsh_error_t read_string(fxsh_lexer_t *l, fxsh_token_t *out) {
         sp_dyn_array_free(chars);
         return ERR_SYNTAX_ERROR;
     }
-    advance(l); /* consume closing " */
+    if (triple) {
+        advance(l);
+        advance(l);
+        advance(l);
+    } else {
+        advance(l); /* consume closing " */
+    }
 
     u32 len = chars ? (u32)sp_dyn_array_size(chars) : 0;
     c8 *buf = (c8 *)sp_alloc(len + 1);
@@ -312,11 +381,30 @@ static fxsh_error_t read_string(fxsh_lexer_t *l, fxsh_token_t *out) {
         memcpy(buf, chars, len);
     buf[len] = '\0';
 
-    out->kind = TOK_STRING;
+    (void)bytes; /* bytes literal reuses string runtime representation */
+    out->kind = fstr ? TOK_FSTRING : TOK_STRING;
     out->loc = loc;
     out->data.str_val = (sp_str_t){.data = buf, .len = len};
     sp_dyn_array_free(chars);
     return ERR_OK;
+}
+
+static fxsh_error_t read_string(fxsh_lexer_t *l, fxsh_token_t *out) {
+    return read_string_core(l, out, make_loc(l), false, false, false);
+}
+
+static fxsh_error_t read_prefixed_string(fxsh_lexer_t *l, fxsh_token_t *out) {
+    fxsh_loc_t loc = make_loc(l);
+    c8 p = advance(l); /* consume prefix char: r/b/f */
+    bool raw = (p == 'r');
+    bool bytes = (p == 'b');
+    bool fstr = (p == 'f');
+    if (peek(l) != '"') {
+        out->kind = TOK_ERROR;
+        out->loc = loc;
+        return ERR_SYNTAX_ERROR;
+    }
+    return read_string_core(l, out, loc, raw, bytes, fstr);
 }
 
 static fxsh_error_t read_number(fxsh_lexer_t *l, fxsh_token_t *out) {
@@ -456,6 +544,10 @@ fxsh_error_t fxsh_lexer_next(fxsh_lexer_t *l, fxsh_token_t *out) {
     if (isdigit((unsigned char)c))
         return read_number(l, out);
 
+    /* ── String prefixes: r"", b"", f"" ─────── */
+    if ((c == 'r' || c == 'b' || c == 'f') && peek_next(l) == '"')
+        return read_prefixed_string(l, out);
+
     /* ── Identifier / Keyword ────────────────── */
     if (isalpha((unsigned char)c) || c == '_')
         return read_identifier(l, out);
@@ -515,9 +607,14 @@ fxsh_error_t fxsh_lexer_next(fxsh_lexer_t *l, fxsh_token_t *out) {
                 out->loc = loc;
                 return ERR_OK;
             }
-            out->kind = TOK_ERROR;
+            out->kind = TOK_BANG;
             out->loc = loc;
-            return ERR_SYNTAX_ERROR;
+            return ERR_OK;
+        case '?':
+            advance(l);
+            out->kind = TOK_QMARK;
+            out->loc = loc;
+            return ERR_OK;
         case '<':
             advance(l);
             if (match_char(l, '='))

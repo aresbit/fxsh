@@ -1,0 +1,5 @@
+# libuv FFI demo (requires libuv installed and link flag -luv)
+# run:
+#   FXSH_LDFLAGS='-luv' ./bin/fxsh --native-codegen examples/ffi_uv_version.fxsh
+let uv_version : unit -> int = "c:uv_version"
+let _ver = uv_version ()

@@ -69,6 +69,7 @@ typedef enum {
     TOK_INT,
     TOK_FLOAT,
     TOK_STRING,
+    TOK_FSTRING,
     TOK_BOOL,
     TOK_UNIT,
 
@@ -103,6 +104,7 @@ typedef enum {
     TOK_OR,
     TOK_NOT,
     TOK_REC,
+    TOK_DO,
 
     /* Operators */
     TOK_PLUS,      /* + */
@@ -116,6 +118,8 @@ typedef enum {
     TOK_ASSIGN,    /* = */
     TOK_EQ,        /* == */
     TOK_NEQ,       /* != */
+    TOK_BANG,      /* ! */
+    TOK_QMARK,     /* ? */
     TOK_LT,        /* < */
     TOK_GT,        /* > */
     TOK_LEQ,       /* <= */
@@ -222,11 +226,19 @@ typedef enum {
     AST_TYPE_RECORD, /* {x: t} */
 
     /* Compile-time type operators */
-    AST_CT_TYPE_OF,   /* @typeOf expr */
-    AST_CT_SIZE_OF,   /* @sizeOf type */
-    AST_CT_ALIGN_OF,  /* @alignOf type */
-    AST_CT_FIELDS_OF, /* @fieldsOf type */
-    AST_CT_HAS_FIELD, /* @hasField(type, "name") */
+    AST_CT_TYPE_OF,       /* @typeOf expr */
+    AST_CT_SIZE_OF,       /* @sizeOf type */
+    AST_CT_ALIGN_OF,      /* @alignOf type */
+    AST_CT_FIELDS_OF,     /* @fieldsOf type */
+    AST_CT_HAS_FIELD,     /* @hasField(type, "name") */
+    AST_CT_JSON_SCHEMA,   /* @jsonSchema(type) */
+    AST_CT_QUOTE,         /* @quote(expr) */
+    AST_CT_UNQUOTE,       /* @unquote(ast_expr) */
+    AST_CT_SPLICE,        /* @splice(ast_expr) */
+    AST_CT_EVAL,          /* comptime { expr } / comptime expr */
+    AST_CT_COMPILE_ERROR, /* @compileError(msg) */
+    AST_CT_COMPILE_LOG,   /* @compileLog(msg) */
+    AST_CT_PANIC,         /* @panic(msg) */
 
     /* Type Definition (ADT) */
     AST_TYPE_DEF,    /* type 'a option = None | Some of 'a */
@@ -343,7 +355,7 @@ struct fxsh_ct_value {
         struct {
             fxsh_ast_node_t **params;
             fxsh_ast_node_t *body;
-            fxsh_type_env_t closure;
+            void *closure;
         } func_val;
         struct {
             fxsh_ct_value_t **items;
@@ -449,6 +461,7 @@ struct fxsh_ast_node {
         struct {
             fxsh_ast_node_t *object;
             sp_str_t field;
+            fxsh_ast_node_t *type; /* optional field annotation for record literals */
         } field;
 
         /* Type expressions */
@@ -472,7 +485,7 @@ struct fxsh_ast_node {
         } ct_type_op;
 
         struct {
-            fxsh_ct_value_t *type_val;
+            fxsh_ast_node_t *type_expr;
             sp_str_t field_name;
         } ct_has_field;
 
@@ -503,6 +516,10 @@ struct fxsh_ast_node {
             fxsh_ast_node_t *body;
             bool is_comptime;
         } decl_fn;
+
+        struct {
+            sp_str_t module_name;
+        } decl_import;
 
         /* Program */
         fxsh_ast_list_t decls;
@@ -535,14 +552,22 @@ struct fxsh_type {
 };
 
 /* Type constructors */
-#define TYPE_UNIT   ((sp_str_t){.data = "unit", .len = 4})
-#define TYPE_BOOL   ((sp_str_t){.data = "bool", .len = 4})
-#define TYPE_INT    ((sp_str_t){.data = "int", .len = 3})
-#define TYPE_FLOAT  ((sp_str_t){.data = "float", .len = 5})
-#define TYPE_STRING ((sp_str_t){.data = "string", .len = 6})
-#define TYPE_LIST   ((sp_str_t){.data = "list", .len = 4})
-#define TYPE_OPTION ((sp_str_t){.data = "option", .len = 6})
-#define TYPE_RESULT ((sp_str_t){.data = "result", .len = 6})
+#define TYPE_UNIT    ((sp_str_t){.data = "unit", .len = 4})
+#define TYPE_BOOL    ((sp_str_t){.data = "bool", .len = 4})
+#define TYPE_INT     ((sp_str_t){.data = "int", .len = 3})
+#define TYPE_FLOAT   ((sp_str_t){.data = "float", .len = 5})
+#define TYPE_STRING  ((sp_str_t){.data = "string", .len = 6})
+#define TYPE_LIST    ((sp_str_t){.data = "list", .len = 4})
+#define TYPE_PTR     ((sp_str_t){.data = "ptr", .len = 3})
+#define TYPE_C_INT   ((sp_str_t){.data = "c_int", .len = 5})
+#define TYPE_C_UINT  ((sp_str_t){.data = "c_uint", .len = 6})
+#define TYPE_C_LONG  ((sp_str_t){.data = "c_long", .len = 6})
+#define TYPE_C_ULONG ((sp_str_t){.data = "c_ulong", .len = 7})
+#define TYPE_C_SIZE  ((sp_str_t){.data = "c_size", .len = 6})
+#define TYPE_C_SSIZE ((sp_str_t){.data = "c_ssize", .len = 7})
+#define TYPE_TENSOR  ((sp_str_t){.data = "tensor", .len = 6})
+#define TYPE_OPTION  ((sp_str_t){.data = "option", .len = 6})
+#define TYPE_RESULT  ((sp_str_t){.data = "result", .len = 6})
 
 /*=============================================================================
  * Substitution (for unification)
@@ -562,6 +587,9 @@ typedef sp_dyn_array(fxsh_subst_entry_t) fxsh_subst_t;
 typedef struct {
     fxsh_token_array_t tokens;
     u32 pos;
+    sp_dyn_array(sp_str_t) modules;
+    sp_dyn_array(sp_str_t) imports;
+    bool had_error;
 } fxsh_parser_t;
 
 /*=============================================================================
@@ -680,6 +708,8 @@ fxsh_ct_value_t *fxsh_ct_ast(fxsh_ast_node_t *ast);
 void fxsh_comptime_ctx_init(fxsh_comptime_ctx_t *ctx);
 fxsh_ct_result_t fxsh_ct_eval(fxsh_ast_node_t *ast, fxsh_comptime_ctx_t *ctx);
 fxsh_ct_value_t *fxsh_ct_eval_expr(fxsh_ast_node_t *ast, fxsh_comptime_ctx_t *ctx);
+const c8 *fxsh_ct_last_error(void);
+fxsh_error_t fxsh_ct_expand_program(fxsh_ast_node_t *ast, fxsh_type_env_t type_env);
 
 /* Type reflection */
 fxsh_type_info_t *fxsh_ct_type_info(fxsh_type_t *type);
@@ -735,6 +765,7 @@ fxsh_ct_value_t *fxsh_ct_op_size_of(fxsh_ct_value_t *type_val);
 fxsh_ct_value_t *fxsh_ct_op_align_of(fxsh_ct_value_t *type_val);
 fxsh_ct_value_t *fxsh_ct_op_fields_of(fxsh_ct_value_t *type_val);
 fxsh_ct_value_t *fxsh_ct_op_has_field(fxsh_ct_value_t *type_val, sp_str_t field_name);
+fxsh_ct_value_t *fxsh_ct_op_json_schema(fxsh_ct_value_t *type_val);
 
 /* Generic type instantiation */
 fxsh_type_t *fxsh_ct_instantiate_generic(fxsh_type_constructor_t *ctor,
@@ -758,6 +789,8 @@ typedef enum {
     FXSH_RT_CONSTR,
     FXSH_RT_RECORD,
     FXSH_RT_TUPLE,
+    FXSH_RT_LIST,
+    FXSH_RT_TENSOR,
 } fxsh_rt_kind_t;
 
 typedef struct fxsh_rt_value fxsh_rt_value_t;
@@ -768,6 +801,7 @@ typedef struct {
     fxsh_ast_node_t *body;
     fxsh_rt_env_t *env;
     sp_dyn_array(fxsh_rt_value_t *) bound_args;
+    sp_str_t self_name; /* interpreter TCO for self-recursive functions */
 } fxsh_rt_func_t;
 
 typedef struct {
@@ -784,6 +818,18 @@ typedef struct {
     sp_dyn_array(fxsh_rt_value_t *) items;
 } fxsh_rt_tuple_t;
 
+typedef struct {
+    bool is_nil;
+    fxsh_rt_value_t *head;
+    fxsh_rt_value_t *tail;
+} fxsh_rt_list_t;
+
+typedef struct {
+    s64 rows;
+    s64 cols;
+    f64 *data;
+} fxsh_rt_tensor_t;
+
 struct fxsh_rt_value {
     fxsh_rt_kind_t kind;
     union {
@@ -795,6 +841,8 @@ struct fxsh_rt_value {
         fxsh_rt_constr_t constr;
         fxsh_rt_record_t record;
         fxsh_rt_tuple_t tuple;
+        fxsh_rt_list_t list;
+        fxsh_rt_tensor_t tensor;
     } as;
 };
 
@@ -817,12 +865,30 @@ fxsh_rt_value_t *fxsh_rt_record(sp_dyn_array(sp_str_t) names,
 fxsh_rt_value_t *fxsh_rt_record_get(fxsh_rt_value_t *record, sp_str_t field_name);
 fxsh_rt_value_t *fxsh_rt_tuple(sp_dyn_array(fxsh_rt_value_t *) items);
 fxsh_rt_value_t *fxsh_rt_tuple_get(fxsh_rt_value_t *tuple, u32 idx);
+fxsh_rt_value_t *fxsh_rt_list_nil(void);
+fxsh_rt_value_t *fxsh_rt_list_cons(fxsh_rt_value_t *head, fxsh_rt_value_t *tail);
+bool fxsh_rt_list_is_nil(fxsh_rt_value_t *list);
+fxsh_rt_value_t *fxsh_rt_list_head(fxsh_rt_value_t *list);
+fxsh_rt_value_t *fxsh_rt_list_tail(fxsh_rt_value_t *list);
+fxsh_rt_value_t *fxsh_rt_tensor_new2(s64 rows, s64 cols, f64 fill);
+fxsh_rt_value_t *fxsh_rt_tensor_from_list2(s64 rows, s64 cols, fxsh_rt_value_t *list);
+fxsh_rt_value_t *fxsh_rt_tensor_shape2(fxsh_rt_value_t *t);
+fxsh_rt_value_t *fxsh_rt_tensor_get2(fxsh_rt_value_t *t, s64 i, s64 j);
+fxsh_rt_value_t *fxsh_rt_tensor_set2(fxsh_rt_value_t *t, s64 i, s64 j, f64 value);
+fxsh_rt_value_t *fxsh_rt_tensor_add(fxsh_rt_value_t *a, fxsh_rt_value_t *b);
+fxsh_rt_value_t *fxsh_rt_tensor_dot(fxsh_rt_value_t *a, fxsh_rt_value_t *b);
 fxsh_rt_env_t *fxsh_rt_env_bind(fxsh_rt_env_t *env, sp_str_t name, fxsh_rt_value_t *value);
 fxsh_rt_value_t *fxsh_rt_env_lookup(fxsh_rt_env_t *env, sp_str_t name);
 bool fxsh_rt_equal(fxsh_rt_value_t *a, fxsh_rt_value_t *b);
 sp_str_t fxsh_rt_to_string(fxsh_rt_value_t *v);
 
 fxsh_error_t fxsh_interp_eval(fxsh_ast_node_t *ast, sp_str_t *out_value_str);
+
+/*=============================================================================
+ * Forward Declarations - ANF IR (MVP)
+ *=============================================================================*/
+
+char *fxsh_anf_dump(fxsh_ast_node_t *ast);
 
 /*=============================================================================
  * Forward Declarations - Code Generation
@@ -837,5 +903,42 @@ fxsh_error_t fxsh_codegen_to_file(fxsh_ast_node_t *ast, sp_str_t path);
 
 sp_str_t fxsh_read_file(sp_str_t path);
 fxsh_error_t fxsh_write_file(sp_str_t path, sp_str_t content);
+sp_str_t fxsh_getenv_rt(sp_str_t key);
+bool fxsh_file_exists_rt(sp_str_t path);
+s64 fxsh_exec_rt(sp_str_t cmd);
+s64 fxsh_exec_code_rt(sp_str_t cmd);
+sp_str_t fxsh_exec_stdout_rt(sp_str_t cmd);
+sp_str_t fxsh_exec_stderr_rt(sp_str_t cmd);
+s64 fxsh_exec_capture_rt(sp_str_t cmd);
+s64 fxsh_capture_code_rt(s64 capture_id);
+sp_str_t fxsh_capture_stdout_rt(s64 capture_id);
+sp_str_t fxsh_capture_stderr_rt(s64 capture_id);
+bool fxsh_capture_release_rt(s64 capture_id);
+sp_str_t fxsh_exec_stdin_rt(sp_str_t cmd, sp_str_t input);
+s64 fxsh_exec_stdin_code_rt(sp_str_t cmd, sp_str_t input);
+s64 fxsh_exec_stdin_capture_rt(sp_str_t cmd, sp_str_t input);
+sp_str_t fxsh_exec_stdin_stderr_rt(sp_str_t cmd, sp_str_t input);
+sp_str_t fxsh_exec_pipe_rt(sp_str_t left, sp_str_t right);
+s64 fxsh_exec_pipe_code_rt(sp_str_t left, sp_str_t right);
+s64 fxsh_exec_pipe_capture_rt(sp_str_t left, sp_str_t right);
+s64 fxsh_exec_pipefail_capture_rt(sp_str_t left, sp_str_t right);
+s64 fxsh_exec_pipefail3_capture_rt(sp_str_t c1, sp_str_t c2, sp_str_t c3);
+s64 fxsh_exec_pipefail4_capture_rt(sp_str_t c1, sp_str_t c2, sp_str_t c3, sp_str_t c4);
+sp_str_t fxsh_exec_pipe_stderr_rt(sp_str_t left, sp_str_t right);
+sp_str_t fxsh_glob_rt(sp_str_t pattern);
+sp_str_t fxsh_replace_once(sp_str_t s, sp_str_t old_t, sp_str_t new_t);
+char *fxsh_cstr_dup(sp_str_t s);
+sp_str_t fxsh_from_cstr(const char *p);
+bool fxsh_str_eq(sp_str_t a, sp_str_t b);
+sp_str_t fxsh_str_concat(sp_str_t a, sp_str_t b);
+bool fxsh_json_validate(sp_str_t json);
+sp_str_t fxsh_json_compact(sp_str_t json);
+bool fxsh_json_has(sp_str_t json, sp_str_t path);
+sp_str_t fxsh_json_get(sp_str_t json, sp_str_t path);
+sp_str_t fxsh_json_get_string(sp_str_t json, sp_str_t path);
+s64 fxsh_json_get_int(sp_str_t json, sp_str_t path, bool *ok);
+f64 fxsh_json_get_float(sp_str_t json, sp_str_t path, bool *ok);
+bool fxsh_json_get_bool(sp_str_t json, sp_str_t path, bool *ok);
+sp_str_t fxsh_grep_lines_regex(sp_str_t pattern, sp_str_t text);
 
 #endif /* FXSH_H */

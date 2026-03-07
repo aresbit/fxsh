@@ -1,0 +1,9 @@
+import Shell
+
+let r3 = Shell.pipeline3_pipefail "sh -c \"exit 5\"" "cat >/dev/null" "cat >/dev/null"
+let r4 = Shell.pipeline4_pipefail "cat >/dev/null" "sh -c \"exit 7\"" "cat >/dev/null" "cat >/dev/null"
+
+if r3.code == 5 then
+  if r4.code == 7 then "ok" else "bad_r4_code"
+else
+  "bad_r3_code"

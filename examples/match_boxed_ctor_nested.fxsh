@@ -1,0 +1,17 @@
+type tree = Leaf of int | Node of tree * tree
+type 'a box = Box of 'a | Nope
+
+let score = fn v ->
+  match v with
+  | Box (Node (Leaf 1, _)) -> 10
+  | Box (Node (_, Leaf 2)) -> 20
+  | Box (Leaf 0) -> 30
+  | Nope -> 40
+  | _ -> 50
+  end
+
+let a = score (Box (Node (Leaf 1, Leaf 9)))
+let b = score (Box (Node (Leaf 8, Leaf 2)))
+let c = score (Box (Leaf 0))
+let d = score Nope
+let e = score (Box (Leaf 7))

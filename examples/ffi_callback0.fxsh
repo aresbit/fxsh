@@ -1,0 +1,3 @@
+# Callback pointer smoke: convert top-level callback function to opaque C pointer
+let on_tick = fn _ -> ()
+let cbp : unit ptr = c_callback0 on_tick

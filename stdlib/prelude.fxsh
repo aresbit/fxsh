@@ -1,66 +1,43 @@
-# prelude.fxsh - fxsh standard library prelude
-# This file is automatically imported by all fxsh programs
+# prelude.fxsh - executable prelude subset for current fxsh
 
 #==============================================================================
-# Boolean Operations
+# Boolean / Comparison
 #==============================================================================
 
-let not = fn b -> if b then false else true end
-
-let and = fn a b -> if a then b else false end
-
-let or = fn a b -> if a then true else b end
-
-#==============================================================================
-# Comparison Operations
-#==============================================================================
+let bool_not = fn b -> if b then false else true
 
 let eq = fn a b -> a == b
-
 let neq = fn a b -> a != b
-
 let lt = fn a b -> a < b
-
 let gt = fn a b -> a > b
-
 let leq = fn a b -> a <= b
-
 let geq = fn a b -> a >= b
 
 #==============================================================================
-# Arithmetic Operations
+# Arithmetic
 #==============================================================================
 
 let add = fn a b -> a + b
-
 let sub = fn a b -> a - b
-
 let mul = fn a b -> a * b
-
 let div = fn a b -> a / b
-
 let mod = fn a b -> a % b
-
 let negate = fn x -> -x
-
-let abs = fn x -> if x < 0 then -x else x end
+let abs = fn x -> if x < 0 then -x else x
 
 #==============================================================================
-# Function Composition
+# Function helpers
 #==============================================================================
 
 let compose = fn f g x -> f (g x)
-
 let pipe = fn x f -> f x
-
 let flip = fn f a b -> f b a
-
 let const = fn x _ -> x
-
 let id = fn x -> x
+let apply = fn f x -> f x
 
 #==============================================================================
-# Option Type
+# Option
 #==============================================================================
 
 type 'a option = None | Some of 'a
@@ -77,12 +54,6 @@ let is_some = fn opt ->
   | Some _ -> true
   end
 
-let unwrap = fn opt ->
-  match opt with
-  | Some x -> x
-  | None -> panic "unwrap called on None"
-  end
-
 let unwrap_or = fn opt default ->
   match opt with
   | Some x -> x
@@ -96,10 +67,10 @@ let map_option = fn f opt ->
   end
 
 #==============================================================================
-# Result Type
+# Result (single-parameter error variant used by current stdlib)
 #==============================================================================
 
-type ('a, 'b) result = Ok of 'a | Err of 'b
+type 'a result = Ok of 'a | Err of string
 
 let is_ok = fn res ->
   match res with
@@ -113,28 +84,10 @@ let is_err = fn res ->
   | Err _ -> true
   end
 
-let unwrap_ok = fn res ->
-  match res with
-  | Ok x -> x
-  | Err _ -> panic "unwrap_ok called on Err"
-  end
-
-let unwrap_err = fn res ->
-  match res with
-  | Ok _ -> panic "unwrap_err called on Ok"
-  | Err e -> e
-  end
-
 let map_result = fn f res ->
   match res with
   | Ok x -> Ok (f x)
   | Err e -> Err e
-  end
-
-let map_err = fn f res ->
-  match res with
-  | Ok x -> Ok x
-  | Err e -> Err (f e)
   end
 
 let bind_result = fn res f ->
@@ -144,7 +97,7 @@ let bind_result = fn res f ->
   end
 
 #==============================================================================
-# Tuple Operations
+# Tuple helpers
 #==============================================================================
 
 let fst = fn p ->
@@ -162,19 +115,9 @@ let swap = fn p ->
   | (x, y) -> (y, x)
   end
 
-#==============================================================================
-# Higher-Order Functions
-#==============================================================================
-
 let curry = fn f a b -> f (a, b)
 
 let uncurry = fn f p ->
   match p with
   | (a, b) -> f a b
   end
-
-let apply = fn f x -> f x
-
-let fix = fn f ->
-  let rec loop = fn x -> f (loop x) in
-  loop

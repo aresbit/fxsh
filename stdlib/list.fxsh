@@ -1,230 +1,37 @@
-# list.fxsh - fxsh list operations module
+# list.fxsh - core list stdlib subset for current fxsh runtime
 
-#==============================================================================
-# List Type Definition
-#==============================================================================
-
-type 'a list = Nil | Cons of 'a * 'a list
-
-#==============================================================================
-# Basic Operations
-#==============================================================================
-
-let is_empty = fn xs ->
-  match xs with
-  | Nil -> true
-  | Cons _ -> false
-  end
+type 'a option = None | Some of 'a
 
 let head = fn xs ->
   match xs with
-  | Cons(x, _) -> Some x
-  | Nil -> None
-  end
+  | x :: _ -> Some x
+  | [] -> None
+end
 
 let tail = fn xs ->
   match xs with
-  | Cons(_, xs') -> Some xs'
-  | Nil -> None
-  end
-
-let length = fn xs ->
-  let rec len = fn acc ys ->
-    match ys with
-    | Nil -> acc
-    | Cons(_, ys') -> len (acc + 1) ys'
-    end
-  in
-  len 0 xs
-
-#==============================================================================
-# List Construction
-#==============================================================================
-
-let cons = fn x xs -> Cons(x, xs)
-
-let singleton = fn x -> Cons(x, Nil)
-
-let rec range = fn start end_ ->
-  if start > end_ then
-    Nil
-  else
-    Cons(start, range (start + 1) end_)
-  end
-
-let rec repeat = fn n x ->
-  if n <= 0 then
-    Nil
-  else
-    Cons(x, repeat (n - 1) x)
-  end
-
-#==============================================================================
-# Transformations
-#==============================================================================
+  | _ :: xs1 -> Some xs1
+  | [] -> None
+end
 
 let rec map = fn f xs ->
   match xs with
-  | Nil -> Nil
-  | Cons(x, xs') -> Cons(f x, map f xs')
-  end
+  | [] -> []
+  | x :: xs1 -> (f x) :: (map f xs1)
+end
+
+let rec fold = fn f acc xs ->
+  match xs with
+  | [] -> acc
+  | x :: xs1 -> fold f (f acc x) xs1
+end
 
 let rec filter = fn pred xs ->
   match xs with
-  | Nil -> Nil
-  | Cons(x, xs') ->
+  | [] -> []
+  | x :: xs1 ->
       if pred x then
-        Cons(x, filter pred xs')
+        x :: (filter pred xs1)
       else
-        filter pred xs'
-      end
-  end
-
-let rec fold_left = fn f acc xs ->
-  match xs with
-  | Nil -> acc
-  | Cons(x, xs') -> fold_left f (f acc x) xs'
-  end
-
-let rec fold_right = fn f xs acc ->
-  match xs with
-  | Nil -> acc
-  | Cons(x, xs') -> f x (fold_right f xs' acc)
-  end
-
-let reduce = fn f xs ->
-  match xs with
-  | Nil -> None
-  | Cons(x, xs') -> Some (fold_left f x xs')
-  end
-
-#==============================================================================
-# Searching
-#==============================================================================
-
-let rec find = fn pred xs ->
-  match xs with
-  | Nil -> None
-  | Cons(x, xs') ->
-      if pred x then Some x else find pred xs' end
-  end
-
-let rec exists = fn pred xs ->
-  match xs with
-  | Nil -> false
-  | Cons(x, xs') ->
-      if pred x then true else exists pred xs' end
-  end
-
-let rec forall = fn pred xs ->
-  match xs with
-  | Nil -> true
-  | Cons(x, xs') ->
-      if pred x then forall pred xs' else false end
-  end
-
-let mem = fn x xs -> exists (fn y -> x == y) xs
-
-#==============================================================================
-# Sublists
-#==============================================================================
-
-let rec take = fn n xs ->
-  if n <= 0 then
-    Nil
-  else
-    match xs with
-    | Nil -> Nil
-    | Cons(x, xs') -> Cons(x, take (n - 1) xs')
-    end
-  end
-
-let rec drop = fn n xs ->
-  if n <= 0 then
-    xs
-  else
-    match xs with
-    | Nil -> Nil
-    | Cons(_, xs') -> drop (n - 1) xs'
-    end
-  end
-
-let rec nth = fn n xs ->
-  if n < 0 then
-    None
-  else
-    match xs with
-    | Nil -> None
-    | Cons(x, xs') -> if n == 0 then Some x else nth (n - 1) xs' end
-    end
-  end
-
-#==============================================================================
-# Combining Lists
-#==============================================================================
-
-let rec append = fn xs ys ->
-  match xs with
-  | Nil -> ys
-  | Cons(x, xs') -> Cons(x, append xs' ys)
-  end
-
-let rec concat = fn xss ->
-  match xss with
-  | Nil -> Nil
-  | Cons(xs, xss') -> append xs (concat xss')
-  end
-
-let rec flatten = fn xs -> concat xs
-
-let rec zip = fn xs ys ->
-  match xs with
-  | Nil -> Nil
-  | Cons(x, xs') ->
-      match ys with
-      | Nil -> Nil
-      | Cons(y, ys') -> Cons((x, y), zip xs' ys')
-      end
-  end
-
-#==============================================================================
-# Sorting (Quicksort)
-#==============================================================================
-
-let rec sort = fn cmp xs ->
-  match xs with
-  | Nil -> Nil
-  | Cons(pivot, xs') ->
-      let lesser = filter (fn x -> cmp x pivot) xs' in
-      let greater = filter (fn x -> not (cmp x pivot)) xs' in
-      append (sort cmp lesser) (Cons(pivot, sort cmp greater))
-  end
-
-#==============================================================================
-# Utilities
-#==============================================================================
-
-let rec reverse = fn xs ->
-  let rec rev = fn acc ys ->
-    match ys with
-    | Nil -> acc
-    | Cons(y, ys') -> rev (Cons(y, acc)) ys'
-    end
-  in
-  rev Nil xs
-
-let sum = fn xs -> fold_left add 0 xs
-
-let product = fn xs -> fold_left mul 1 xs
-
-let max = fn cmp xs ->
-  match xs with
-  | Nil -> None
-  | Cons(x, xs') -> Some (fold_left (fn a b -> if cmp a b then b else a end) x xs')
-  end
-
-let min = fn cmp xs ->
-  match xs with
-  | Nil -> None
-  | Cons(x, xs') -> Some (fold_left (fn a b -> if cmp a b then a else b end) x xs')
-  end
+        filter pred xs1
+end

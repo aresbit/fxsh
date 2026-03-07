@@ -1,0 +1,5 @@
+let id = fn x -> x
+
+let vi = id 7
+let vs = id "ok"
+

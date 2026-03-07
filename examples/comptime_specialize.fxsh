@@ -1,0 +1,10 @@
+let comptime add = fn a b -> a + b
+
+# Specialize at compile time, inject as normal runtime let value.
+let add1 = comptime { add 1 }
+let y = comptime { @unquote(@quote(123)) }
+
+# Ensure later comptime declarations can reference expanded top-level lets.
+let comptime CHECK = comptime { add1 41 }
+let comptime CHECK2 = comptime { y }
+

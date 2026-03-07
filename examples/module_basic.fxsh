@@ -1,0 +1,9 @@
+module Math = struct
+let two = 2
+let inc = fn x -> x + 1
+end
+
+import Math
+
+let value = Math.inc Math.two
+

@@ -1,0 +1,10 @@
+# JSON builtin smoke example
+let doc = "{ \"agent\": { \"name\": \"fx\", \"ok\": true, \"steps\": [1, 2, 3] } }"
+let c = json_compact doc
+let name = json_get_string c "agent.name"
+let ok = json_get_bool c "agent.ok"
+let step1 = json_get_int c "agent.steps[1]"
+let _ = print name
+let _ = print (if ok then "true" else "false")
+let _ = print (if step1 == 2 then "2" else "bad")
+let out = "done"

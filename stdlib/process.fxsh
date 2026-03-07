@@ -1,87 +1,36 @@
-# process.fxsh - fxsh process management module
+# process.fxsh - compatibility layer (prefer stdlib/os.fxsh)
 
-#==============================================================================
-# Command Execution
-#==============================================================================
+type 'a result = Ok of 'a | Err of string
 
-let run = fn cmd args -> @run cmd args
+let run = fn cmd ->
+  let rc = exec_code cmd in
+  if rc == 0 then Ok rc else Err "process failed"
 
-let run_output = fn cmd args -> @run_output cmd args
+let run_code = fn cmd -> exec_code cmd
 
-let run_status = fn cmd args -> @run_status cmd args
+let stdout = fn cmd -> exec_stdout cmd
 
-#==============================================================================
-# Shell Commands
-#==============================================================================
+let stderr = fn cmd -> exec_stderr cmd
 
-let sh = fn command -> @shell command
+let capture = fn cmd -> exec_capture cmd
+let cap_code = fn cap -> capture_code cap
+let cap_stdout = fn cap -> capture_stdout cap
+let cap_stderr = fn cap -> capture_stderr cap
+let cap_release = fn cap -> capture_release cap
 
-let sh_output = fn command -> @shell_output command
+let with_stdin = fn cmd input -> exec_stdin cmd input
+let with_stdin_code = fn cmd input -> exec_stdin_code cmd input
+let with_stdin_stderr = fn cmd input -> exec_stdin_stderr cmd input
+let with_stdin_capture = fn cmd input -> exec_stdin_capture cmd input
 
-let sh_status = fn command -> @shell_status command
+let pipe = fn left right -> exec_pipe left right
+let pipe_code = fn left right -> exec_pipe_code left right
+let pipe_stderr = fn left right -> exec_pipe_stderr left right
+let pipe_capture = fn left right -> exec_pipe_capture left right
+let pipefail_capture = fn left right -> exec_pipefail_capture left right
+let pipefail3_capture = fn c1 c2 c3 -> exec_pipefail3_capture c1 c2 c3
+let pipefail4_capture = fn c1 c2 c3 c4 -> exec_pipefail4_capture c1 c2 c3 c4
 
-#==============================================================================
-# Process Management
-#==============================================================================
+let glob_paths = fn pattern -> glob pattern
 
-type pid = int
-
-let spawn = fn cmd args -> @spawn cmd args
-
-let wait = fn pid -> @wait pid
-
-let wait_all = fn pids -> @wait_all pids
-
-let kill = fn pid signal -> @kill pid signal
-
-let get_pid = fn -> @get_pid
-
-let get_ppid = fn -> @get_ppid
-
-#==============================================================================
-# Environment
-#==============================================================================
-
-let get_env = fn name -> @get_env name
-
-let set_env = fn name value -> @set_env name value
-
-let unset_env = fn name -> @unset_env name
-
-let env_vars = fn -> @env_vars
-
-#==============================================================================
-# Working Directory
-#==============================================================================
-
-let get_cwd = fn -> @get_cwd
-
-let set_cwd = fn path -> @set_cwd path
-
-#==============================================================================
-# Pipelines
-#==============================================================================
-
-let pipe = fn cmd1 cmd2 -> @pipe cmd1 cmd2
-
-let pipeline = fn cmds -> @pipeline cmds
-
-#==============================================================================
-# Higher-Level Functions
-#==============================================================================
-
-let try_run = fn cmd args ->
-  match run cmd args with
-  | Ok output -> Ok output
-  | Err (code, stderr) -> Err ("Command failed with exit code " ++ from_int code ++ ": " ++ stderr)
-  end
-
-let run_or_default = fn cmd args default ->
-  match run cmd args with
-  | Ok output -> output
-  | Err _ -> default
-  end
-
-let which = fn program -> @which program
-
-let is_executable = fn path -> @is_executable path
+let grep_text = fn needle haystack -> grep_lines needle haystack

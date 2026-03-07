@@ -1,0 +1,12 @@
+type 'a result = Ok of 'a | Err of string
+
+let pick = fn r ->
+  match r with
+  | Ok 1 -> 10
+  | Ok _ -> 20
+  | Err _ -> 30
+  end
+
+let a = pick (Ok 1)
+let b = pick (Ok 2)
+let c = pick (Err "x")

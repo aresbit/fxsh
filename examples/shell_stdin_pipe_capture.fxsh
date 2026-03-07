@@ -1,0 +1,17 @@
+import Shell
+
+let r1 = Shell.run_stdin "sh -c \"cat; echo e 1>&2\"" "in"
+let r2 = Shell.pipe "printf \"a\\nb\\n\"" "grep b"
+
+if r1.code == 0 then
+  if r1.stdout == "in" then
+    if r1.stderr == "e\n" then
+      if r2.code == 0 then
+        if r2.stdout == "b\n" then
+          if r2.stderr == "" then "ok" else "bad_pipe_stderr"
+        else "bad_pipe_stdout"
+      else "bad_pipe_code"
+    else "bad_stdin_stderr"
+  else "bad_stdin_stdout"
+else
+  "bad_stdin_code"

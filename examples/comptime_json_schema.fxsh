@@ -1,0 +1,5 @@
+# comptime JSON schema generation from type
+let user = { id = 1, name = "fx", ok = true }
+let comptime USER_SCHEMA = @jsonSchema(@typeOf(user))
+let _ = print USER_SCHEMA
+let out = USER_SCHEMA

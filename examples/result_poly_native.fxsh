@@ -1,0 +1,7 @@
+type 'a result = Ok of 'a | Err of string
+
+let r1 = Ok 42
+let r2 = Ok "hello"
+let r3 = Ok true
+let r4 = Ok ()
+let r5 = Err "oops"

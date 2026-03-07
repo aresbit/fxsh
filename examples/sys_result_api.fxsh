@@ -1,0 +1,16 @@
+type 'a result = Ok of 'a | Err of string
+
+let path_exists = fn p -> Ok (file_exists p)
+let path_write_text = fn p c -> if write_file p c then Ok () else Err "write failed"
+let path_read_text = fn p ->
+  let s = read_file p in
+  if s == "" then Err "read failed or empty" else Ok s
+
+let process_run = fn cmd ->
+  let rc = exec cmd in
+  if rc == 0 then Ok rc else Err "process failed"
+
+let _w = path_write_text "build/fxsh_sys_result.txt" "hello"
+let _r = path_read_text "build/fxsh_sys_result.txt"
+let _p = process_run "true"
+let _e = path_exists "build/fxsh_sys_result.txt"

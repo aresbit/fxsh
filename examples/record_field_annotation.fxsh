@@ -1,0 +1,2 @@
+let p = { age: int = 42, name: string = "fx" }
+p.age

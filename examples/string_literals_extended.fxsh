@@ -1,0 +1,13 @@
+let multi = """
+line1
+line2
+"""
+
+let path = r"C:\Users\fxsh\demo"
+let bytes = b"\x41\x42\x43"
+let who = "fxsh"
+
+print (f"hello {who}")
+print path
+print bytes
+print multi

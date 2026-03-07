@@ -1,0 +1,4 @@
+# FFI MVP: top-level external C symbol declaration
+# let <name> : <fn-type> = "c:<symbol>"
+let c_labs : int -> int = "c:labs"
+let _v = c_labs (-7)

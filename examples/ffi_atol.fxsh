@@ -1,0 +1,3 @@
+# libc atol(const char*) via FFI string ABI bridge
+let atol : string -> int = "c:atol"
+let _ = atol "12345"

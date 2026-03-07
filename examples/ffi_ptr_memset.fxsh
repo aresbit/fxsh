@@ -1,0 +1,5 @@
+# Pointer-level FFI smoke (no extra libs)
+# Type application uses argument-first style: `unit ptr`
+let p : unit ptr = c_malloc 16
+let z : unit ptr = c_null ()
+let p2 : unit ptr = c_cast_ptr p

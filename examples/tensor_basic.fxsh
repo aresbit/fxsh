@@ -1,0 +1,6 @@
+# Tensor MVP: 2D float tensor + dot
+let a = tensor_from_list2 2 3 [1.0; 2.0; 3.0; 4.0; 5.0; 6.0]
+let b = tensor_from_list2 3 2 [7.0; 8.0; 9.0; 10.0; 11.0; 12.0]
+let c = tensor_dot a b
+let _shape = tensor_shape2 c
+let out = tensor_get2 c 1 1

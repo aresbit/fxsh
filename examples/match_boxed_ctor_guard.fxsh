@@ -1,0 +1,15 @@
+type tree = Leaf of int | Node of tree * tree
+type 'a box = Box of 'a | Nope
+
+let eval = fn v ->
+  match v with
+  | Box (Node (Leaf n, _)) if n == 1 -> 10
+  | Box (Leaf n) if n == 0 -> 20
+  | Nope -> 30
+  | _ -> 40
+  end
+
+let a = eval (Box (Node (Leaf 1, Leaf 9)))
+let b = eval (Box (Leaf 0))
+let c = eval Nope
+let d = eval (Box (Leaf 7))

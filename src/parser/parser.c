@@ -4,6 +4,7 @@
 
 #include "fxsh.h"
 
+#include <stdarg.h>
 #include <stdio.h>
 #include <string.h>
 
@@ -14,6 +15,32 @@
 void fxsh_parser_init(fxsh_parser_t *parser, fxsh_token_array_t tokens) {
     parser->tokens = tokens;
     parser->pos = 0;
+    parser->modules = SP_NULLPTR;
+    parser->imports = SP_NULLPTR;
+    parser->had_error = false;
+}
+
+static bool parser_has_name(sp_dyn_array(sp_str_t) names, sp_str_t name) {
+    sp_dyn_array_for(names, i) {
+        if (sp_str_equal(names[i], name))
+            return true;
+    }
+    return false;
+}
+
+static void parser_add_name(sp_dyn_array(sp_str_t) * names, sp_str_t name) {
+    if (!parser_has_name(*names, name))
+        sp_dyn_array_push(*names, name);
+}
+
+static sp_str_t mk_qualified_name(sp_str_t mod, sp_str_t name) {
+    u32 len = mod.len + 2 + name.len;
+    c8 *buf = (c8 *)fxsh_alloc0(len + 1);
+    memcpy(buf, mod.data, mod.len);
+    buf[mod.len] = '_';
+    buf[mod.len + 1] = '_';
+    memcpy(buf + mod.len + 2, name.data, name.len);
+    return (sp_str_t){.data = buf, .len = len};
 }
 
 static inline fxsh_token_t *current(fxsh_parser_t *parser) {
@@ -66,6 +93,7 @@ static inline fxsh_token_t *consume(fxsh_parser_t *parser, fxsh_token_kind_t kin
     }
     fprintf(stderr, "Parse error at %d:%d: expected %s, got %s\n", current(parser)->loc.line,
             current(parser)->loc.column, msg, fxsh_token_kind_name(current(parser)->kind));
+    parser->had_error = true;
     return NULL;
 }
 
@@ -75,7 +103,18 @@ static inline fxsh_token_t *consume_name_token(fxsh_parser_t *parser, const char
     }
     fprintf(stderr, "Parse error at %d:%d: expected %s, got %s\n", current(parser)->loc.line,
             current(parser)->loc.column, msg, fxsh_token_kind_name(current(parser)->kind));
+    parser->had_error = true;
     return NULL;
+}
+
+static void parser_error_at(fxsh_parser_t *parser, fxsh_loc_t loc, const char *fmt, ...) {
+    va_list ap;
+    va_start(ap, fmt);
+    fprintf(stderr, "Parse error at %d:%d: ", loc.line, loc.column);
+    vfprintf(stderr, fmt, ap);
+    fprintf(stderr, "\n");
+    va_end(ap);
+    parser->had_error = true;
 }
 
 static inline void skip_newlines(fxsh_parser_t *parser) {
@@ -178,7 +217,8 @@ fxsh_ast_node_t *fxsh_ast_let(sp_str_t name, fxsh_ast_node_t *value, bool is_com
                               fxsh_loc_t loc) {
     fxsh_ast_node_t *node = alloc_node(AST_DECL_LET, loc);
     node->data.let.name = name;
-    node->data.let.pattern = fxsh_ast_ident(name, loc);
+    node->data.let.pattern = alloc_node(AST_PAT_VAR, loc);
+    node->data.let.pattern->data.ident = name;
     node->data.let.type = NULL;
     node->data.let.value = value;
     node->data.let.is_comptime = is_comptime;
@@ -278,6 +318,7 @@ void fxsh_ast_free(fxsh_ast_node_t *node) {
             break;
         case AST_FIELD_ACCESS:
             fxsh_ast_free(node->data.field.object);
+            fxsh_ast_free(node->data.field.type);
             break;
         case AST_TYPE_ARROW:
             fxsh_ast_free(node->data.type_arrow.param);
@@ -288,6 +329,25 @@ void fxsh_ast_free(fxsh_ast_node_t *node) {
                 fxsh_ast_free(node->data.type_con.args[i]);
             }
             sp_dyn_array_free(node->data.type_con.args);
+            break;
+        case AST_CT_TYPE_OF:
+        case AST_CT_QUOTE:
+        case AST_CT_UNQUOTE:
+        case AST_CT_SPLICE:
+        case AST_CT_EVAL:
+        case AST_CT_COMPILE_ERROR:
+        case AST_CT_COMPILE_LOG:
+        case AST_CT_PANIC:
+            fxsh_ast_free(node->data.ct_type_of.operand);
+            break;
+        case AST_CT_SIZE_OF:
+        case AST_CT_ALIGN_OF:
+        case AST_CT_FIELDS_OF:
+        case AST_CT_JSON_SCHEMA:
+            fxsh_ast_free(node->data.ct_type_op.type_expr);
+            break;
+        case AST_CT_HAS_FIELD:
+            fxsh_ast_free(node->data.ct_has_field.type_expr);
             break;
         case AST_PROGRAM:
             sp_dyn_array_for(node->data.decls, i) {
@@ -308,10 +368,217 @@ void fxsh_ast_free(fxsh_ast_node_t *node) {
 
 static fxsh_ast_node_t *parse_expr(fxsh_parser_t *parser);
 static fxsh_ast_node_t *parse_pattern(fxsh_parser_t *parser);
+
+static fxsh_ast_node_t *make_pat_cons_node(fxsh_loc_t loc, fxsh_ast_node_t *head,
+                                           fxsh_ast_node_t *tail) {
+    fxsh_ast_node_t *node = alloc_node(AST_PAT_CONS, loc);
+    node->data.elements = SP_NULLPTR;
+    sp_dyn_array_push(node->data.elements, head);
+    sp_dyn_array_push(node->data.elements, tail);
+    return node;
+}
+
+static fxsh_ast_node_t *lower_list_pattern_to_cons(fxsh_loc_t loc, fxsh_ast_list_t elems) {
+    fxsh_ast_node_t *cur = alloc_node(AST_LIST, loc);
+    cur->data.elements = SP_NULLPTR;
+    for (s32 i = (s32)sp_dyn_array_size(elems) - 1; i >= 0; i--) {
+        cur = make_pat_cons_node(loc, elems[i], cur);
+    }
+    return cur;
+}
+static fxsh_ast_node_t *parse_pattern(fxsh_parser_t *parser);
 static fxsh_ast_node_t *parse_decl(fxsh_parser_t *parser);
 static fxsh_ast_node_t *parse_primary(fxsh_parser_t *parser);
 static fxsh_ast_node_t *parse_type_expr(fxsh_parser_t *parser);
 static bool is_type_expr_start(fxsh_token_kind_t kind);
+typedef struct {
+    sp_str_t from;
+    sp_str_t to;
+} name_map_t;
+
+static sp_str_t map_lookup(sp_dyn_array(name_map_t) map, sp_str_t key) {
+    sp_dyn_array_for(map, i) {
+        if (sp_str_equal(map[i].from, key))
+            return map[i].to;
+    }
+    return (sp_str_t){0};
+}
+
+static void rewrite_module_type_refs(fxsh_ast_node_t *type_ast, sp_dyn_array(name_map_t) map) {
+    if (!type_ast)
+        return;
+    switch (type_ast->kind) {
+        case AST_IDENT: {
+            sp_str_t q = map_lookup(map, type_ast->data.ident);
+            if (q.data)
+                type_ast->data.ident = q;
+            return;
+        }
+        case AST_TYPE_VAR:
+            return;
+        case AST_TYPE_ARROW:
+            rewrite_module_type_refs(type_ast->data.type_arrow.param, map);
+            rewrite_module_type_refs(type_ast->data.type_arrow.ret, map);
+            return;
+        case AST_TYPE_APP:
+            sp_dyn_array_for(type_ast->data.type_con.args, i)
+                rewrite_module_type_refs(type_ast->data.type_con.args[i], map);
+            return;
+        case AST_TYPE_RECORD:
+            sp_dyn_array_for(type_ast->data.elements, i) {
+                fxsh_ast_node_t *f = type_ast->data.elements[i];
+                if (f && f->kind == AST_FIELD_ACCESS)
+                    rewrite_module_type_refs(f->data.field.object, map);
+            }
+            return;
+        default:
+            return;
+    }
+}
+
+static void collect_pattern_bound(fxsh_ast_node_t *pat, sp_dyn_array(sp_str_t) * out) {
+    if (!pat)
+        return;
+    switch (pat->kind) {
+        case AST_PAT_VAR:
+            sp_dyn_array_push(*out, pat->data.ident);
+            return;
+        case AST_PAT_TUPLE:
+        case AST_PAT_RECORD:
+        case AST_PAT_CONS:
+            sp_dyn_array_for(pat->data.elements, i)
+                collect_pattern_bound(pat->data.elements[i], out);
+            return;
+        case AST_PAT_CONSTR:
+            sp_dyn_array_for(pat->data.constr_appl.args, i)
+                collect_pattern_bound(pat->data.constr_appl.args[i], out);
+            return;
+        default:
+            return;
+    }
+}
+
+static bool bound_has(sp_dyn_array(sp_str_t) bound, sp_str_t name) {
+    sp_dyn_array_for(bound, i) {
+        if (sp_str_equal(bound[i], name))
+            return true;
+    }
+    return false;
+}
+
+static void rewrite_module_refs(fxsh_ast_node_t *ast, sp_dyn_array(name_map_t) map,
+                                sp_dyn_array(sp_str_t) * bound) {
+    if (!ast)
+        return;
+    switch (ast->kind) {
+        case AST_IDENT: {
+            if (bound_has(*bound, ast->data.ident))
+                return;
+            sp_str_t q = map_lookup(map, ast->data.ident);
+            if (q.data)
+                ast->data.ident = q;
+            return;
+        }
+        case AST_BINARY:
+            rewrite_module_refs(ast->data.binary.left, map, bound);
+            rewrite_module_refs(ast->data.binary.right, map, bound);
+            return;
+        case AST_UNARY:
+            rewrite_module_refs(ast->data.unary.operand, map, bound);
+            return;
+        case AST_CALL:
+            rewrite_module_refs(ast->data.call.func, map, bound);
+            sp_dyn_array_for(ast->data.call.args, i)
+                rewrite_module_refs(ast->data.call.args[i], map, bound);
+            return;
+        case AST_LAMBDA: {
+            u32 mark = (u32)sp_dyn_array_size(*bound);
+            sp_dyn_array_for(ast->data.lambda.params, i) {
+                collect_pattern_bound(ast->data.lambda.params[i], bound);
+            }
+            rewrite_module_refs(ast->data.lambda.body, map, bound);
+            while (sp_dyn_array_size(*bound) > mark)
+                sp_dyn_array_pop(*bound);
+            return;
+        }
+        case AST_LET:
+        case AST_DECL_LET: {
+            rewrite_module_refs(ast->data.let.value, map, bound);
+            return;
+        }
+        case AST_LET_IN: {
+            u32 mark = (u32)sp_dyn_array_size(*bound);
+            sp_dyn_array_for(ast->data.let_in.bindings, i) {
+                fxsh_ast_node_t *b = ast->data.let_in.bindings[i];
+                if (!b || (b->kind != AST_LET && b->kind != AST_DECL_LET))
+                    continue;
+                rewrite_module_refs(b->data.let.value, map, bound);
+                sp_dyn_array_push(*bound, b->data.let.name);
+            }
+            rewrite_module_refs(ast->data.let_in.body, map, bound);
+            while (sp_dyn_array_size(*bound) > mark)
+                sp_dyn_array_pop(*bound);
+            return;
+        }
+        case AST_IF:
+            rewrite_module_refs(ast->data.if_expr.cond, map, bound);
+            rewrite_module_refs(ast->data.if_expr.then_branch, map, bound);
+            rewrite_module_refs(ast->data.if_expr.else_branch, map, bound);
+            return;
+        case AST_MATCH:
+            rewrite_module_refs(ast->data.match_expr.expr, map, bound);
+            sp_dyn_array_for(ast->data.match_expr.arms, i)
+                rewrite_module_refs(ast->data.match_expr.arms[i], map, bound);
+            return;
+        case AST_MATCH_ARM: {
+            u32 mark = (u32)sp_dyn_array_size(*bound);
+            rewrite_module_refs(ast->data.match_arm.pattern, map, bound);
+            collect_pattern_bound(ast->data.match_arm.pattern, bound);
+            rewrite_module_refs(ast->data.match_arm.guard, map, bound);
+            rewrite_module_refs(ast->data.match_arm.body, map, bound);
+            while (sp_dyn_array_size(*bound) > mark)
+                sp_dyn_array_pop(*bound);
+            return;
+        }
+        case AST_PIPE:
+            rewrite_module_refs(ast->data.pipe.left, map, bound);
+            rewrite_module_refs(ast->data.pipe.right, map, bound);
+            return;
+        case AST_TUPLE:
+        case AST_LIST:
+        case AST_RECORD:
+        case AST_PAT_TUPLE:
+        case AST_PAT_RECORD:
+        case AST_PAT_CONS:
+            sp_dyn_array_for(ast->data.elements, i)
+                rewrite_module_refs(ast->data.elements[i], map, bound);
+            return;
+        case AST_FIELD_ACCESS:
+            rewrite_module_refs(ast->data.field.object, map, bound);
+            rewrite_module_type_refs(ast->data.field.type, map);
+            return;
+        case AST_CONSTR_APPL:
+            if (!bound_has(*bound, ast->data.constr_appl.constr_name)) {
+                sp_str_t q = map_lookup(map, ast->data.constr_appl.constr_name);
+                if (q.data)
+                    ast->data.constr_appl.constr_name = q;
+            }
+            sp_dyn_array_for(ast->data.constr_appl.args, i)
+                rewrite_module_refs(ast->data.constr_appl.args[i], map, bound);
+            return;
+        case AST_PAT_CONSTR:
+            if (!bound_has(*bound, ast->data.constr_appl.constr_name)) {
+                sp_str_t q = map_lookup(map, ast->data.constr_appl.constr_name);
+                if (q.data)
+                    ast->data.constr_appl.constr_name = q;
+            }
+            sp_dyn_array_for(ast->data.constr_appl.args, i)
+                rewrite_module_refs(ast->data.constr_appl.args[i], map, bound);
+            return;
+        default:
+            return;
+    }
+}
 
 /*=============================================================================
  * Pattern Parsing
@@ -417,7 +684,7 @@ static fxsh_ast_node_t *parse_type_expr(fxsh_parser_t *parser) {
     return lhs;
 }
 
-static fxsh_ast_node_t *parse_pattern(fxsh_parser_t *parser) {
+static fxsh_ast_node_t *parse_pattern_atom(fxsh_parser_t *parser) {
     fxsh_token_t *tok = current(parser);
 
     /* Wildcard pattern: _ */
@@ -446,15 +713,30 @@ static fxsh_ast_node_t *parse_pattern(fxsh_parser_t *parser) {
     if (tok->kind == TOK_TYPE_IDENT) {
         advance(parser);
         sp_str_t constr_name = tok->data.ident;
+        if (check(parser, TOK_DOT)) {
+            fxsh_token_t *mod_tok = tok;
+            advance(parser); /* consume '.' */
+            fxsh_token_t *name_tok = consume_name_token(parser, "constructor name");
+            if (!name_tok)
+                return NULL;
+            if (parser_has_name(parser->modules, mod_tok->data.ident) ||
+                parser_has_name(parser->imports, mod_tok->data.ident)) {
+                constr_name = mk_qualified_name(mod_tok->data.ident, name_tok->data.ident);
+            } else {
+                /* fall back: keep right part as constructor name */
+                constr_name = name_tok->data.ident;
+            }
+        }
 
         /* Parse nested patterns for constructor arguments */
         fxsh_ast_list_t args = SP_NULLPTR;
         while (!check(parser, TOK_NEWLINE) && !check(parser, TOK_EOF) &&
                !check(parser, TOK_PIPE_SYM) && !check(parser, TOK_WITH) &&
                !check(parser, TOK_END) && !check(parser, TOK_ELSE) && !check(parser, TOK_IN) &&
-               !check(parser, TOK_THEN) && !check(parser, TOK_RPAREN) &&
+               !check(parser, TOK_IF) && !check(parser, TOK_THEN) && !check(parser, TOK_RPAREN) &&
                !check(parser, TOK_RBRACKET) && !check(parser, TOK_RBRACE) &&
-               !check(parser, TOK_COMMA) && !check(parser, TOK_ARROW) &&
+               !check(parser, TOK_COMMA) && !check(parser, TOK_SEMICOLON) &&
+               !check(parser, TOK_DOT) && !check(parser, TOK_ARROW) &&
                !check(parser, TOK_FAT_ARROW)) {
             fxsh_ast_node_t *arg = parse_pattern(parser);
             if (!arg)
@@ -517,8 +799,25 @@ static fxsh_ast_node_t *parse_pattern(fxsh_parser_t *parser) {
         }
     }
 
-    /* List cons pattern: p1 :: p2 (right-associative) */
-    /* TODO: implement later */
+    /* List pattern: [p1; p2; ...] */
+    if (tok->kind == TOK_LBRACKET) {
+        advance(parser); /* consume [ */
+        skip_newlines(parser);
+
+        fxsh_ast_list_t elems = SP_NULLPTR;
+        while (!check(parser, TOK_RBRACKET) && !check(parser, TOK_EOF)) {
+            fxsh_ast_node_t *e = parse_pattern(parser);
+            if (!e)
+                break;
+            sp_dyn_array_push(elems, e);
+            skip_newlines(parser);
+            if (!match(parser, TOK_SEMICOLON) && !match(parser, TOK_COMMA))
+                break;
+            skip_newlines(parser);
+        }
+        consume(parser, TOK_RBRACKET, "']'");
+        return lower_list_pattern_to_cons(tok->loc, elems);
+    }
 
     /* Record pattern: {field1 = p1, field2 = p2} */
     if (tok->kind == TOK_LBRACE) {
@@ -551,11 +850,23 @@ static fxsh_ast_node_t *parse_pattern(fxsh_parser_t *parser) {
     return parse_primary(parser);
 }
 
+static fxsh_ast_node_t *parse_pattern(fxsh_parser_t *parser) {
+    fxsh_ast_node_t *lhs = parse_pattern_atom(parser);
+    if (!lhs)
+        return NULL;
+    if (match(parser, TOK_APPEND)) {
+        fxsh_ast_node_t *rhs = parse_pattern(parser); /* right-associative */
+        return make_pat_cons_node(lhs->loc, lhs, rhs);
+    }
+    return lhs;
+}
+
 static bool is_app_arg_start(fxsh_token_kind_t kind) {
     switch (kind) {
         case TOK_INT:
         case TOK_FLOAT:
         case TOK_STRING:
+        case TOK_FSTRING:
         case TOK_TRUE:
         case TOK_FALSE:
         case TOK_IDENT:
@@ -567,11 +878,440 @@ static bool is_app_arg_start(fxsh_token_kind_t kind) {
         case TOK_LET:
         case TOK_MATCH:
         case TOK_FN:
+        case TOK_DO:
         case TOK_AT:
+        case TOK_COMPTIME:
             return true;
         default:
             return false;
     }
+}
+
+static sp_str_t fresh_do_tmp_name(void) {
+    static u32 seq = 0;
+    c8 *buf = (c8 *)fxsh_alloc0(32);
+    if (!buf)
+        return (sp_str_t){.data = "__do_tmp_oom", .len = 12};
+    int n = snprintf((char *)buf, 32, "__do_tmp_%u", (unsigned)seq++);
+    if (n < 0)
+        n = 0;
+    return (sp_str_t){.data = buf, .len = (u32)n};
+}
+
+static bool is_do_stmt_boundary(fxsh_parser_t *parser) {
+    return check(parser, TOK_SEMICOLON) || check(parser, TOK_NEWLINE) ||
+           check(parser, TOK_RBRACE) || check(parser, TOK_EOF);
+}
+
+typedef enum { DO_STMT_LET, DO_STMT_BIND } do_stmt_kind_t;
+typedef enum { DO_BIND_RESULT, DO_BIND_OPTION } do_bind_mode_t;
+
+typedef struct {
+    do_stmt_kind_t kind;
+    fxsh_ast_node_t *let_node; /* DO_STMT_LET */
+    sp_str_t bind_name;        /* DO_STMT_BIND */
+    fxsh_ast_node_t *bind_rhs; /* DO_STMT_BIND */
+    do_bind_mode_t bind_mode;  /* DO_STMT_BIND */
+    fxsh_loc_t loc;            /* DO_STMT_BIND */
+} do_stmt_t;
+
+static fxsh_ast_node_t *make_pat_var_node(sp_str_t name, fxsh_loc_t loc) {
+    fxsh_ast_node_t *n = alloc_node(AST_PAT_VAR, loc);
+    n->data.ident = name;
+    return n;
+}
+
+static fxsh_ast_node_t *make_pat_constr1(sp_str_t cname, fxsh_ast_node_t *arg, fxsh_loc_t loc) {
+    fxsh_ast_node_t *n = alloc_node(AST_PAT_CONSTR, loc);
+    n->data.constr_appl.constr_name = cname;
+    n->data.constr_appl.args = SP_NULLPTR;
+    if (arg)
+        sp_dyn_array_push(n->data.constr_appl.args, arg);
+    return n;
+}
+
+static fxsh_ast_node_t *make_constr_appl1(sp_str_t cname, fxsh_ast_node_t *arg, fxsh_loc_t loc) {
+    fxsh_ast_node_t *n = alloc_node(AST_CONSTR_APPL, loc);
+    n->data.constr_appl.constr_name = cname;
+    n->data.constr_appl.args = SP_NULLPTR;
+    if (arg)
+        sp_dyn_array_push(n->data.constr_appl.args, arg);
+    return n;
+}
+
+static fxsh_ast_node_t *make_match_arm(fxsh_ast_node_t *pat, fxsh_ast_node_t *body,
+                                       fxsh_loc_t loc) {
+    fxsh_ast_node_t *arm = alloc_node(AST_MATCH_ARM, loc);
+    arm->data.match_arm.pattern = pat;
+    arm->data.match_arm.guard = NULL;
+    arm->data.match_arm.body = body;
+    return arm;
+}
+
+/* let! x = rhs  ==>  match rhs with | Ok x -> cont | Err e -> Err e */
+static fxsh_ast_node_t *lower_do_bind_result(sp_str_t name, fxsh_ast_node_t *rhs,
+                                             fxsh_ast_node_t *cont, fxsh_loc_t loc) {
+    sp_str_t ok_name = sp_str_lit("Ok");
+    sp_str_t err_name = sp_str_lit("Err");
+    sp_str_t err_var = fresh_do_tmp_name();
+
+    fxsh_ast_node_t *pat_ok = make_pat_constr1(ok_name, make_pat_var_node(name, loc), loc);
+    fxsh_ast_node_t *pat_err = make_pat_constr1(err_name, make_pat_var_node(err_var, loc), loc);
+
+    fxsh_ast_node_t *err_body = make_constr_appl1(err_name, fxsh_ast_ident(err_var, loc), loc);
+
+    fxsh_ast_node_t *m = alloc_node(AST_MATCH, loc);
+    m->data.match_expr.expr = rhs;
+    m->data.match_expr.arms = SP_NULLPTR;
+    sp_dyn_array_push(m->data.match_expr.arms, make_match_arm(pat_ok, cont, loc));
+    sp_dyn_array_push(m->data.match_expr.arms, make_match_arm(pat_err, err_body, loc));
+    return m;
+}
+
+/* let? x = rhs  ==>  match rhs with | Some x -> cont | None -> None */
+static fxsh_ast_node_t *lower_do_bind_option(sp_str_t name, fxsh_ast_node_t *rhs,
+                                             fxsh_ast_node_t *cont, fxsh_loc_t loc) {
+    sp_str_t some_name = sp_str_lit("Some");
+    sp_str_t none_name = sp_str_lit("None");
+
+    fxsh_ast_node_t *pat_some = make_pat_constr1(some_name, make_pat_var_node(name, loc), loc);
+    fxsh_ast_node_t *pat_none = make_pat_constr1(none_name, NULL, loc);
+    fxsh_ast_node_t *none_body = make_constr_appl1(none_name, NULL, loc);
+
+    fxsh_ast_node_t *m = alloc_node(AST_MATCH, loc);
+    m->data.match_expr.expr = rhs;
+    m->data.match_expr.arms = SP_NULLPTR;
+    sp_dyn_array_push(m->data.match_expr.arms, make_match_arm(pat_some, cont, loc));
+    sp_dyn_array_push(m->data.match_expr.arms, make_match_arm(pat_none, none_body, loc));
+    return m;
+}
+
+static fxsh_ast_node_t *do_block_fail_sync(fxsh_parser_t *parser, const c8 *msg) {
+    fxsh_token_t *bad = current(parser);
+    parser_error_at(parser, bad->loc, "%s, got %s", msg, fxsh_token_kind_name(bad->kind));
+    while (!check(parser, TOK_RBRACE) && !check(parser, TOK_EOF))
+        advance(parser);
+    if (check(parser, TOK_RBRACE))
+        advance(parser);
+    return NULL;
+}
+
+static fxsh_ast_node_t *parse_do_block(fxsh_parser_t *parser, fxsh_loc_t loc) {
+    consume(parser, TOK_LBRACE, "'{'");
+    skip_newlines(parser);
+
+    sp_dyn_array(do_stmt_t) stmts = SP_NULLPTR;
+    fxsh_ast_node_t *body = NULL;
+
+    while (!check(parser, TOK_RBRACE) && !check(parser, TOK_EOF)) {
+        skip_newlines(parser);
+        if (check(parser, TOK_RBRACE))
+            break;
+
+        if (match(parser, TOK_LET)) {
+            if (check(parser, TOK_BANG) || check(parser, TOK_QMARK)) {
+                do_bind_mode_t bind_mode = DO_BIND_RESULT;
+                if (match(parser, TOK_BANG))
+                    bind_mode = DO_BIND_RESULT;
+                else if (match(parser, TOK_QMARK))
+                    bind_mode = DO_BIND_OPTION;
+                if (!check(parser, TOK_IDENT) && !check(parser, TOK_TYPE_IDENT))
+                    return do_block_fail_sync(parser,
+                                              bind_mode == DO_BIND_RESULT
+                                                  ? "expected identifier after let! in do-block"
+                                                  : "expected identifier after let? in do-block");
+                fxsh_token_t *name_tok = advance(parser);
+                if (!match(parser, TOK_ASSIGN))
+                    return do_block_fail_sync(parser,
+                                              bind_mode == DO_BIND_RESULT
+                                                  ? "expected '=' after do-block let! binding"
+                                                  : "expected '=' after do-block let? binding");
+                fxsh_ast_node_t *rhs = parse_expr(parser);
+                if (!is_do_stmt_boundary(parser)) {
+                    return do_block_fail_sync(
+                        parser, bind_mode == DO_BIND_RESULT
+                                    ? "expected ';' or newline after do-block let! statement"
+                                    : "expected ';' or newline after do-block let? statement");
+                }
+                do_stmt_t s = {.kind = DO_STMT_BIND,
+                               .let_node = NULL,
+                               .bind_name = name_tok->data.ident,
+                               .bind_rhs = rhs,
+                               .bind_mode = bind_mode,
+                               .loc = name_tok->loc};
+                sp_dyn_array_push(stmts, s);
+                skip_newlines(parser);
+                (void)match(parser, TOK_SEMICOLON);
+                skip_newlines(parser);
+                continue;
+            }
+
+            bool is_comptime = match(parser, TOK_COMPTIME);
+            bool is_rec = match(parser, TOK_REC);
+
+            if (!check(parser, TOK_IDENT) && !check(parser, TOK_TYPE_IDENT))
+                return do_block_fail_sync(parser, "expected identifier after let in do-block");
+            fxsh_token_t *name_tok = advance(parser);
+
+            fxsh_ast_list_t params = SP_NULLPTR;
+            while (is_pattern_start(current(parser)->kind)) {
+                fxsh_ast_node_t *pat = parse_pattern(parser);
+                if (!pat)
+                    break;
+                sp_dyn_array_push(params, pat);
+                skip_newlines(parser);
+            }
+
+            fxsh_ast_node_t *type_ann = NULL;
+            if (match(parser, TOK_COLON)) {
+                skip_newlines(parser);
+                type_ann = parse_type_expr(parser);
+            }
+
+            if (!match(parser, TOK_ASSIGN))
+                return do_block_fail_sync(parser, "expected '=' after do-block let binding");
+            fxsh_ast_node_t *value = parse_expr(parser);
+            if (!is_do_stmt_boundary(parser)) {
+                return do_block_fail_sync(parser,
+                                          "expected ';' or newline after do-block let statement");
+            }
+
+            if (params && sp_dyn_array_size(params) > 0) {
+                for (int i = (int)sp_dyn_array_size(params) - 1; i >= 0; i--) {
+                    fxsh_ast_list_t single_param = SP_NULLPTR;
+                    sp_dyn_array_push(single_param, params[i]);
+                    value = fxsh_ast_lambda(single_param, value, name_tok->loc);
+                }
+            }
+
+            fxsh_ast_node_t *b =
+                fxsh_ast_let(name_tok->data.ident, value, is_comptime, is_rec, name_tok->loc);
+            b->data.let.type = type_ann;
+            do_stmt_t s = {.kind = DO_STMT_LET,
+                           .let_node = b,
+                           .bind_name = (sp_str_t){0},
+                           .bind_rhs = NULL,
+                           .bind_mode = DO_BIND_RESULT,
+                           .loc = name_tok->loc};
+            sp_dyn_array_push(stmts, s);
+            skip_newlines(parser);
+            (void)match(parser, TOK_SEMICOLON);
+            skip_newlines(parser);
+            continue;
+        }
+
+        fxsh_ast_node_t *expr = parse_expr(parser);
+        bool had_semi = match(parser, TOK_SEMICOLON);
+        skip_newlines(parser);
+        if (had_semi) {
+            fxsh_ast_node_t *b = fxsh_ast_let(fresh_do_tmp_name(), expr, false, false, expr->loc);
+            do_stmt_t s = {.kind = DO_STMT_LET,
+                           .let_node = b,
+                           .bind_name = (sp_str_t){0},
+                           .bind_rhs = NULL,
+                           .bind_mode = DO_BIND_RESULT,
+                           .loc = expr->loc};
+            sp_dyn_array_push(stmts, s);
+            continue;
+        }
+        if (!check(parser, TOK_RBRACE) && !check(parser, TOK_EOF)) {
+            /* Line-separated statement in do-block: discard value and keep parsing. */
+            fxsh_ast_node_t *b = fxsh_ast_let(fresh_do_tmp_name(), expr, false, false, expr->loc);
+            do_stmt_t s = {.kind = DO_STMT_LET,
+                           .let_node = b,
+                           .bind_name = (sp_str_t){0},
+                           .bind_rhs = NULL,
+                           .bind_mode = DO_BIND_RESULT,
+                           .loc = expr->loc};
+            sp_dyn_array_push(stmts, s);
+            continue;
+        }
+        body = expr;
+        break;
+    }
+
+    consume(parser, TOK_RBRACE, "'}'");
+    if (!body)
+        body = alloc_node(AST_LIT_UNIT, loc);
+
+    fxsh_ast_node_t *cur = body;
+    for (s32 i = (s32)sp_dyn_array_size(stmts) - 1; i >= 0; i--) {
+        do_stmt_t s = stmts[i];
+        if (s.kind == DO_STMT_LET) {
+            fxsh_ast_node_t *n = alloc_node(AST_LET_IN, s.let_node ? s.let_node->loc : loc);
+            n->data.let_in.bindings = SP_NULLPTR;
+            if (s.let_node)
+                sp_dyn_array_push(n->data.let_in.bindings, s.let_node);
+            n->data.let_in.body = cur;
+            cur = n;
+        } else {
+            if (s.bind_mode == DO_BIND_OPTION)
+                cur = lower_do_bind_option(s.bind_name, s.bind_rhs, cur, s.loc);
+            else
+                cur = lower_do_bind_result(s.bind_name, s.bind_rhs, cur, s.loc);
+        }
+    }
+    return cur;
+}
+
+static fxsh_ast_node_t *fstring_concat(fxsh_ast_node_t *lhs, fxsh_ast_node_t *rhs, fxsh_loc_t loc) {
+    if (!lhs)
+        return rhs;
+    if (!rhs)
+        return lhs;
+    return fxsh_ast_binary(TOK_CONCAT, lhs, rhs, loc);
+}
+
+static fxsh_ast_node_t *fstring_literal_node(sp_dyn_array(c8) lit_buf, fxsh_loc_t loc) {
+    u32 len = lit_buf ? (u32)sp_dyn_array_size(lit_buf) : 0;
+    c8 *buf = (c8 *)fxsh_alloc0(len + 1);
+    if (len)
+        memcpy(buf, lit_buf, len);
+    buf[len] = '\0';
+    return fxsh_ast_lit_string((sp_str_t){.data = buf, .len = len}, loc);
+}
+
+static fxsh_ast_node_t *parse_fstring_embedded_expr(fxsh_parser_t *parser, const c8 *src, u32 len,
+                                                    fxsh_loc_t loc) {
+    while (len > 0 && (*src == ' ' || *src == '\t' || *src == '\r' || *src == '\n')) {
+        src++;
+        len--;
+    }
+    while (len > 0 && (src[len - 1] == ' ' || src[len - 1] == '\t' || src[len - 1] == '\r' ||
+                       src[len - 1] == '\n')) {
+        len--;
+    }
+    if (len == 0) {
+        parser_error_at(parser, loc, "empty f-string interpolation");
+        return NULL;
+    }
+
+    c8 *buf = (c8 *)fxsh_alloc0(len + 1);
+    memcpy(buf, src, len);
+    buf[len] = '\0';
+    sp_str_t sub_src = {.data = buf, .len = len};
+
+    fxsh_token_array_t sub_tokens = SP_NULLPTR;
+    if (fxsh_lex(sub_src, loc.filename, &sub_tokens) != ERR_OK)
+        return NULL;
+
+    fxsh_parser_t sub_parser;
+    fxsh_parser_init(&sub_parser, sub_tokens);
+    sub_parser.modules = parser->modules;
+    sub_parser.imports = parser->imports;
+
+    fxsh_ast_node_t *expr = parse_expr(&sub_parser);
+    if (!expr)
+        return NULL;
+
+    while (current(&sub_parser)->kind == TOK_NEWLINE)
+        advance(&sub_parser);
+    if (current(&sub_parser)->kind != TOK_EOF) {
+        parser_error_at(parser, loc, "invalid f-string interpolation expression");
+        return NULL;
+    }
+    return expr;
+}
+
+static fxsh_ast_node_t *parse_fstring_expr(fxsh_parser_t *parser, sp_str_t raw, fxsh_loc_t loc) {
+    fxsh_ast_node_t *acc = NULL;
+    sp_dyn_array(c8) lit = SP_NULLPTR;
+
+    for (u32 i = 0; i < raw.len; i++) {
+        c8 c = raw.data[i];
+        if (c == '{') {
+            if (i + 1 < raw.len && raw.data[i + 1] == '{') {
+                sp_dyn_array_push(lit, '{');
+                i++;
+                continue;
+            }
+
+            if (lit && sp_dyn_array_size(lit) > 0) {
+                acc = fstring_concat(acc, fstring_literal_node(lit, loc), loc);
+                sp_dyn_array_free(lit);
+                lit = SP_NULLPTR;
+            }
+
+            u32 start = i + 1;
+            s32 depth = 1;
+            bool in_string = false;
+            bool esc = false;
+            for (i = start; i < raw.len; i++) {
+                c8 ch = raw.data[i];
+                if (in_string) {
+                    if (esc) {
+                        esc = false;
+                        continue;
+                    }
+                    if (ch == '\\') {
+                        esc = true;
+                        continue;
+                    }
+                    if (ch == '"') {
+                        in_string = false;
+                    }
+                    continue;
+                }
+                if (ch == '"') {
+                    in_string = true;
+                    continue;
+                }
+                if (ch == '{') {
+                    depth++;
+                    continue;
+                }
+                if (ch == '}') {
+                    depth--;
+                    if (depth == 0)
+                        break;
+                }
+            }
+            if (depth != 0) {
+                parser_error_at(parser, loc, "unterminated f-string interpolation");
+                if (lit)
+                    sp_dyn_array_free(lit);
+                return NULL;
+            }
+
+            fxsh_ast_node_t *sub =
+                parse_fstring_embedded_expr(parser, raw.data + start, i - start, loc);
+            if (!sub) {
+                if (lit)
+                    sp_dyn_array_free(lit);
+                return NULL;
+            }
+            acc = fstring_concat(acc, sub, loc);
+            continue;
+        }
+
+        if (c == '}') {
+            if (i + 1 < raw.len && raw.data[i + 1] == '}') {
+                sp_dyn_array_push(lit, '}');
+                i++;
+                continue;
+            }
+            parser_error_at(parser, loc, "unmatched '}' in f-string");
+            if (lit)
+                sp_dyn_array_free(lit);
+            return NULL;
+        }
+
+        sp_dyn_array_push(lit, c);
+    }
+
+    if (lit && sp_dyn_array_size(lit) > 0) {
+        acc = fstring_concat(acc, fstring_literal_node(lit, loc), loc);
+        sp_dyn_array_free(lit);
+        lit = SP_NULLPTR;
+    } else if (lit) {
+        sp_dyn_array_free(lit);
+    }
+
+    if (!acc) {
+        c8 *buf = (c8 *)fxsh_alloc0(1);
+        return fxsh_ast_lit_string((sp_str_t){.data = buf, .len = 0}, loc);
+    }
+    return acc;
 }
 
 /*=============================================================================
@@ -593,6 +1333,10 @@ static fxsh_ast_node_t *parse_primary(fxsh_parser_t *parser) {
         case TOK_STRING: {
             advance(parser);
             return fxsh_ast_lit_string(tok->data.str_val, tok->loc);
+        }
+        case TOK_FSTRING: {
+            advance(parser);
+            return parse_fstring_expr(parser, tok->data.str_val, tok->loc);
         }
         case TOK_TRUE: {
             advance(parser);
@@ -616,10 +1360,11 @@ static fxsh_ast_node_t *parse_primary(fxsh_parser_t *parser) {
             while (!check(parser, TOK_NEWLINE) && !check(parser, TOK_EOF) &&
                    !check(parser, TOK_PIPE_SYM) && !check(parser, TOK_WITH) &&
                    !check(parser, TOK_END) && !check(parser, TOK_ELSE) && !check(parser, TOK_IN) &&
-                   !check(parser, TOK_THEN) && !check(parser, TOK_RPAREN) &&
-                   !check(parser, TOK_RBRACKET) && !check(parser, TOK_RBRACE) &&
-                   !check(parser, TOK_COMMA) && !check(parser, TOK_ARROW) &&
-                   !check(parser, TOK_FAT_ARROW)) {
+                   !check(parser, TOK_IF) && !check(parser, TOK_THEN) &&
+                   !check(parser, TOK_RPAREN) && !check(parser, TOK_RBRACKET) &&
+                   !check(parser, TOK_RBRACE) && !check(parser, TOK_COMMA) &&
+                   !check(parser, TOK_SEMICOLON) && !check(parser, TOK_DOT) &&
+                   !check(parser, TOK_ARROW) && !check(parser, TOK_FAT_ARROW)) {
                 fxsh_ast_node_t *arg = parse_primary(parser);
                 if (!arg)
                     break;
@@ -674,6 +1419,83 @@ static fxsh_ast_node_t *parse_primary(fxsh_parser_t *parser) {
                 fxsh_ast_node_t *node = alloc_node(AST_CT_ALIGN_OF, tok->loc);
                 node->data.ct_type_op.type_expr = type_expr;
                 return node;
+            } else if (sp_str_equal(op_name, (sp_str_t){.data = "fieldsOf", .len = 8})) {
+                consume(parser, TOK_LPAREN, "'('");
+                fxsh_ast_node_t *type_expr = parse_expr(parser);
+                consume(parser, TOK_RPAREN, "')'");
+
+                fxsh_ast_node_t *node = alloc_node(AST_CT_FIELDS_OF, tok->loc);
+                node->data.ct_type_op.type_expr = type_expr;
+                return node;
+            } else if (sp_str_equal(op_name, (sp_str_t){.data = "jsonSchema", .len = 10})) {
+                consume(parser, TOK_LPAREN, "'('");
+                fxsh_ast_node_t *type_expr = parse_expr(parser);
+                consume(parser, TOK_RPAREN, "')'");
+
+                fxsh_ast_node_t *node = alloc_node(AST_CT_JSON_SCHEMA, tok->loc);
+                node->data.ct_type_op.type_expr = type_expr;
+                return node;
+            } else if (sp_str_equal(op_name, (sp_str_t){.data = "hasField", .len = 8})) {
+                consume(parser, TOK_LPAREN, "'('");
+                fxsh_ast_node_t *type_expr = parse_expr(parser);
+                consume(parser, TOK_COMMA, "','");
+                fxsh_token_t *field_tok = consume(parser, TOK_STRING, "field name string");
+                consume(parser, TOK_RPAREN, "')'");
+                if (!field_tok)
+                    return NULL;
+
+                fxsh_ast_node_t *node = alloc_node(AST_CT_HAS_FIELD, tok->loc);
+                node->data.ct_has_field.type_expr = type_expr;
+                node->data.ct_has_field.field_name = field_tok->data.str_val;
+                return node;
+            } else if (sp_str_equal(op_name, (sp_str_t){.data = "quote", .len = 5})) {
+                consume(parser, TOK_LPAREN, "'('");
+                fxsh_ast_node_t *expr = parse_expr(parser);
+                consume(parser, TOK_RPAREN, "')'");
+
+                fxsh_ast_node_t *node = alloc_node(AST_CT_QUOTE, tok->loc);
+                node->data.ct_type_of.operand = expr;
+                return node;
+            } else if (sp_str_equal(op_name, (sp_str_t){.data = "unquote", .len = 7})) {
+                consume(parser, TOK_LPAREN, "'('");
+                fxsh_ast_node_t *expr = parse_expr(parser);
+                consume(parser, TOK_RPAREN, "')'");
+
+                fxsh_ast_node_t *node = alloc_node(AST_CT_UNQUOTE, tok->loc);
+                node->data.ct_type_of.operand = expr;
+                return node;
+            } else if (sp_str_equal(op_name, (sp_str_t){.data = "splice", .len = 6})) {
+                consume(parser, TOK_LPAREN, "'('");
+                fxsh_ast_node_t *expr = parse_expr(parser);
+                consume(parser, TOK_RPAREN, "')'");
+
+                fxsh_ast_node_t *node = alloc_node(AST_CT_SPLICE, tok->loc);
+                node->data.ct_type_of.operand = expr;
+                return node;
+            } else if (sp_str_equal(op_name, (sp_str_t){.data = "compileError", .len = 12})) {
+                consume(parser, TOK_LPAREN, "'('");
+                fxsh_ast_node_t *expr = parse_expr(parser);
+                consume(parser, TOK_RPAREN, "')'");
+
+                fxsh_ast_node_t *node = alloc_node(AST_CT_COMPILE_ERROR, tok->loc);
+                node->data.ct_type_of.operand = expr;
+                return node;
+            } else if (sp_str_equal(op_name, (sp_str_t){.data = "compileLog", .len = 10})) {
+                consume(parser, TOK_LPAREN, "'('");
+                fxsh_ast_node_t *expr = parse_expr(parser);
+                consume(parser, TOK_RPAREN, "')'");
+
+                fxsh_ast_node_t *node = alloc_node(AST_CT_COMPILE_LOG, tok->loc);
+                node->data.ct_type_of.operand = expr;
+                return node;
+            } else if (sp_str_equal(op_name, (sp_str_t){.data = "panic", .len = 5})) {
+                consume(parser, TOK_LPAREN, "'('");
+                fxsh_ast_node_t *expr = parse_expr(parser);
+                consume(parser, TOK_RPAREN, "')'");
+
+                fxsh_ast_node_t *node = alloc_node(AST_CT_PANIC, tok->loc);
+                node->data.ct_type_of.operand = expr;
+                return node;
             } else {
                 fprintf(stderr, "Unknown compile-time operator: %.*s\n", op_name.len, op_name.data);
                 return NULL;
@@ -725,7 +1547,7 @@ static fxsh_ast_node_t *parse_primary(fxsh_parser_t *parser) {
             while (!check(parser, TOK_RBRACKET) && !check(parser, TOK_EOF)) {
                 sp_dyn_array_push(elements, parse_expr(parser));
                 skip_newlines(parser);
-                if (!match(parser, TOK_COMMA))
+                if (!match(parser, TOK_SEMICOLON) && !match(parser, TOK_COMMA))
                     break;
                 skip_newlines(parser);
             }
@@ -749,8 +1571,10 @@ static fxsh_ast_node_t *parse_primary(fxsh_parser_t *parser) {
                     return NULL;
 
                 sp_str_t field_name = field_tok->data.ident;
-
-                /* TODO: Parse field type annotation if present */
+                fxsh_ast_node_t *field_type = NULL;
+                if (match(parser, TOK_COLON)) {
+                    field_type = parse_type_expr(parser);
+                }
 
                 consume(parser, TOK_ASSIGN, "'='");
 
@@ -759,10 +1583,11 @@ static fxsh_ast_node_t *parse_primary(fxsh_parser_t *parser) {
                 fxsh_ast_node_t *field_node = alloc_node(AST_FIELD_ACCESS, field_tok->loc);
                 field_node->data.field.object = field_value;
                 field_node->data.field.field = field_name;
+                field_node->data.field.type = field_type;
                 sp_dyn_array_push(fields, field_node);
 
                 skip_newlines(parser);
-                if (!match(parser, TOK_COMMA))
+                if (!match(parser, TOK_COMMA) && !match(parser, TOK_SEMICOLON))
                     break;
                 skip_newlines(parser);
             }
@@ -809,9 +1634,33 @@ static fxsh_ast_node_t *parse_primary(fxsh_parser_t *parser) {
             if (match(parser, TOK_ELSE)) {
                 else_branch = parse_expr(parser);
             }
-            maybe_consume_block_end(parser);
+            /* Avoid stealing enclosing `end` (e.g. module/match) for single-line if-expressions. */
+            if (tok->loc.line != cond->loc.line ||
+                (then_branch && tok->loc.line != then_branch->loc.line) ||
+                (else_branch && tok->loc.line != else_branch->loc.line)) {
+                maybe_consume_block_end(parser);
+            }
 
             return fxsh_ast_if(cond, then_branch, else_branch, tok->loc);
+        }
+        case TOK_COMPTIME: {
+            advance(parser); /* consume comptime */
+            fxsh_ast_node_t *expr = NULL;
+            if (match(parser, TOK_LBRACE)) {
+                skip_newlines(parser);
+                expr = parse_expr(parser);
+                skip_newlines(parser);
+                consume(parser, TOK_RBRACE, "'}'");
+            } else {
+                expr = parse_expr(parser);
+            }
+            fxsh_ast_node_t *node = alloc_node(AST_CT_EVAL, tok->loc);
+            node->data.ct_type_of.operand = expr;
+            return node;
+        }
+        case TOK_DO: {
+            advance(parser); /* consume do */
+            return parse_do_block(parser, tok->loc);
         }
         case TOK_LET: {
             advance(parser); /* consume let */
@@ -830,9 +1679,10 @@ static fxsh_ast_node_t *parse_primary(fxsh_parser_t *parser) {
                 /* Parse function parameters if present (function definition sugar: let f x y = ...)
                  */
                 fxsh_ast_list_t params = SP_NULLPTR;
-                while (check(parser, TOK_IDENT) || check(parser, TOK_TYPE_IDENT)) {
-                    fxsh_token_t *param_tok = advance(parser);
-                    fxsh_ast_node_t *pat = fxsh_ast_ident(param_tok->data.ident, param_tok->loc);
+                while (is_pattern_start(current(parser)->kind)) {
+                    fxsh_ast_node_t *pat = parse_pattern(parser);
+                    if (!pat)
+                        break;
                     sp_dyn_array_push(params, pat);
                     skip_newlines(parser);
                 }
@@ -867,7 +1717,6 @@ static fxsh_ast_node_t *parse_primary(fxsh_parser_t *parser) {
             consume(parser, TOK_IN, "'in'");
 
             fxsh_ast_node_t *body = parse_expr(parser);
-            maybe_consume_block_end(parser);
 
             fxsh_ast_node_t *node = alloc_node(AST_LET_IN, tok->loc);
             node->data.let_in.bindings = bindings;
@@ -915,8 +1764,7 @@ static fxsh_ast_node_t *parse_primary(fxsh_parser_t *parser) {
             return node;
         }
         default:
-            fprintf(stderr, "Parse error at %d:%d: unexpected %s\n", tok->loc.line, tok->loc.column,
-                    fxsh_token_kind_name(tok->kind));
+            parser_error_at(parser, tok->loc, "unexpected %s", fxsh_token_kind_name(tok->kind));
             if (!check(parser, TOK_EOF))
                 advance(parser);
             return NULL;
@@ -941,12 +1789,17 @@ static fxsh_ast_node_t *parse_postfix(fxsh_parser_t *parser) {
             fxsh_ast_list_t args = SP_NULLPTR;
             skip_newlines(parser);
 
-            while (!check(parser, TOK_RPAREN) && !check(parser, TOK_EOF)) {
-                sp_dyn_array_push(args, parse_expr(parser));
-                skip_newlines(parser);
-                if (!match(parser, TOK_COMMA))
-                    break;
-                skip_newlines(parser);
+            if (check(parser, TOK_RPAREN)) {
+                /* f() desugars to f(()) so unit-arity functions can be called naturally. */
+                sp_dyn_array_push(args, alloc_node(AST_LIT_UNIT, loc));
+            } else {
+                while (!check(parser, TOK_RPAREN) && !check(parser, TOK_EOF)) {
+                    sp_dyn_array_push(args, parse_expr(parser));
+                    skip_newlines(parser);
+                    if (!match(parser, TOK_COMMA))
+                        break;
+                    skip_newlines(parser);
+                }
             }
 
             consume(parser, TOK_RPAREN, "')'");
@@ -955,9 +1808,30 @@ static fxsh_ast_node_t *parse_postfix(fxsh_parser_t *parser) {
         } else if (match(parser, TOK_DOT)) {
             /* Field access */
             fxsh_loc_t loc = current(parser)->loc;
-            fxsh_token_t *field = consume(parser, TOK_IDENT, "field name");
+            fxsh_token_t *field = consume_name_token(parser, "field name");
             if (!field)
                 return NULL;
+
+            sp_str_t mod_name = (sp_str_t){0};
+            if (expr->kind == AST_IDENT) {
+                mod_name = expr->data.ident;
+            } else if (expr->kind == AST_CONSTR_APPL &&
+                       sp_dyn_array_size(expr->data.constr_appl.args) == 0) {
+                mod_name = expr->data.constr_appl.constr_name;
+            }
+            if (mod_name.data && (parser_has_name(parser->modules, mod_name) ||
+                                  parser_has_name(parser->imports, mod_name))) {
+                sp_str_t qn = mk_qualified_name(mod_name, field->data.ident);
+                if (field->kind == TOK_TYPE_IDENT) {
+                    fxsh_ast_node_t *cn = alloc_node(AST_CONSTR_APPL, loc);
+                    cn->data.constr_appl.constr_name = qn;
+                    cn->data.constr_appl.args = SP_NULLPTR;
+                    expr = cn;
+                } else {
+                    expr = fxsh_ast_ident(qn, loc);
+                }
+                continue;
+            }
 
             fxsh_ast_node_t *node = alloc_node(AST_FIELD_ACCESS, loc);
             node->data.field.object = expr;
@@ -969,9 +1843,65 @@ static fxsh_ast_node_t *parse_postfix(fxsh_parser_t *parser) {
             fxsh_ast_node_t *arg = parse_primary(parser);
             if (!arg)
                 return expr;
-            fxsh_ast_list_t args = SP_NULLPTR;
-            sp_dyn_array_push(args, arg);
-            expr = fxsh_ast_call(expr, args, loc);
+            while (true) {
+                if (check(parser, TOK_LPAREN)) {
+                    fxsh_loc_t cloc = current(parser)->loc;
+                    advance(parser);
+                    fxsh_ast_list_t cargs = SP_NULLPTR;
+                    skip_newlines(parser);
+                    if (check(parser, TOK_RPAREN)) {
+                        sp_dyn_array_push(cargs, alloc_node(AST_LIT_UNIT, cloc));
+                    } else {
+                        while (!check(parser, TOK_RPAREN) && !check(parser, TOK_EOF)) {
+                            sp_dyn_array_push(cargs, parse_expr(parser));
+                            skip_newlines(parser);
+                            if (!match(parser, TOK_COMMA))
+                                break;
+                            skip_newlines(parser);
+                        }
+                    }
+                    consume(parser, TOK_RPAREN, "')'");
+                    arg = fxsh_ast_call(arg, cargs, cloc);
+                } else if (match(parser, TOK_DOT)) {
+                    fxsh_loc_t floc = current(parser)->loc;
+                    fxsh_token_t *field = consume_name_token(parser, "field name");
+                    if (!field)
+                        return expr;
+                    sp_str_t mod_name = (sp_str_t){0};
+                    if (arg->kind == AST_IDENT) {
+                        mod_name = arg->data.ident;
+                    } else if (arg->kind == AST_CONSTR_APPL &&
+                               sp_dyn_array_size(arg->data.constr_appl.args) == 0) {
+                        mod_name = arg->data.constr_appl.constr_name;
+                    }
+                    if (mod_name.data && (parser_has_name(parser->modules, mod_name) ||
+                                          parser_has_name(parser->imports, mod_name))) {
+                        sp_str_t qn = mk_qualified_name(mod_name, field->data.ident);
+                        if (field->kind == TOK_TYPE_IDENT) {
+                            fxsh_ast_node_t *cn = alloc_node(AST_CONSTR_APPL, floc);
+                            cn->data.constr_appl.constr_name = qn;
+                            cn->data.constr_appl.args = SP_NULLPTR;
+                            arg = cn;
+                        } else {
+                            arg = fxsh_ast_ident(qn, floc);
+                        }
+                    } else {
+                        fxsh_ast_node_t *node = alloc_node(AST_FIELD_ACCESS, floc);
+                        node->data.field.object = arg;
+                        node->data.field.field = field->data.ident;
+                        arg = node;
+                    }
+                } else {
+                    break;
+                }
+            }
+            if (expr->kind == AST_CONSTR_APPL) {
+                sp_dyn_array_push(expr->data.constr_appl.args, arg);
+            } else {
+                fxsh_ast_list_t args = SP_NULLPTR;
+                sp_dyn_array_push(args, arg);
+                expr = fxsh_ast_call(expr, args, loc);
+            }
         } else {
             break;
         }
@@ -1035,11 +1965,27 @@ static fxsh_ast_node_t *parse_additive(fxsh_parser_t *parser) {
 }
 
 /*=============================================================================
+ * List Cons Expressions (right-associative)
+ *=============================================================================*/
+
+static fxsh_ast_node_t *parse_append_expr(fxsh_parser_t *parser) {
+    fxsh_ast_node_t *left = parse_additive(parser);
+    if (!left)
+        return NULL;
+    if (match(parser, TOK_APPEND)) {
+        fxsh_token_t *tok = &parser->tokens[parser->pos - 1];
+        fxsh_ast_node_t *right = parse_append_expr(parser);
+        return fxsh_ast_binary(tok->kind, left, right, tok->loc);
+    }
+    return left;
+}
+
+/*=============================================================================
  * Comparison Expressions
  *=============================================================================*/
 
 static fxsh_ast_node_t *parse_comparison(fxsh_parser_t *parser) {
-    fxsh_ast_node_t *left = parse_additive(parser);
+    fxsh_ast_node_t *left = parse_append_expr(parser);
     if (!left)
         return NULL;
 
@@ -1047,7 +1993,7 @@ static fxsh_ast_node_t *parse_comparison(fxsh_parser_t *parser) {
 
     while (check_any(parser, cmp_ops, 6)) {
         fxsh_token_t *tok = advance(parser);
-        fxsh_ast_node_t *right = parse_additive(parser);
+        fxsh_ast_node_t *right = parse_append_expr(parser);
         left = fxsh_ast_binary(tok->kind, left, right, tok->loc);
     }
 
@@ -1116,6 +2062,7 @@ static fxsh_ast_node_t *parse_type_def(fxsh_parser_t *parser) {
     while (check(parser, TOK_IDENT) && current(parser)->data.ident.data[0] == '\'') {
         fxsh_token_t *param = advance(parser);
         fxsh_ast_node_t *param_node = alloc_node(AST_TYPE_VAR, param->loc);
+        param_node->data.ident = param->data.ident;
         sp_dyn_array_push(type_params, param_node);
         skip_newlines(parser);
     }
@@ -1151,16 +2098,7 @@ static fxsh_ast_node_t *parse_type_def(fxsh_parser_t *parser) {
             /* Parse at least one argument type */
             do {
                 skip_newlines(parser);
-                /* Parse simple type identifiers, not full expressions */
-                /* This handles 'int', 'list', etc. as type names */
-                fxsh_ast_node_t *arg_type = NULL;
-                if (check(parser, TOK_IDENT) || check(parser, TOK_TYPE_IDENT)) {
-                    fxsh_token_t *type_tok = advance(parser);
-                    arg_type = fxsh_ast_ident(type_tok->data.ident, type_tok->loc);
-                } else {
-                    /* Fall back to expression parsing for complex types */
-                    arg_type = parse_expr(parser);
-                }
+                fxsh_ast_node_t *arg_type = parse_type_expr(parser);
                 if (arg_type)
                     sp_dyn_array_push(arg_types, arg_type);
 
@@ -1188,6 +2126,8 @@ static fxsh_ast_node_t *parse_type_def(fxsh_parser_t *parser) {
  *=============================================================================*/
 
 static fxsh_ast_node_t *parse_let_decl(fxsh_parser_t *parser);
+static fxsh_ast_node_t *parse_module_decl(fxsh_parser_t *parser);
+static fxsh_ast_node_t *parse_import_decl(fxsh_parser_t *parser);
 
 static fxsh_ast_node_t *parse_decl(fxsh_parser_t *parser) {
     skip_newlines(parser);
@@ -1199,6 +2139,14 @@ static fxsh_ast_node_t *parse_decl(fxsh_parser_t *parser) {
     /* Type definition */
     if (check(parser, TOK_TYPE)) {
         return parse_type_def(parser);
+    }
+
+    if (check(parser, TOK_MODULE)) {
+        return parse_module_decl(parser);
+    }
+
+    if (check(parser, TOK_IMPORT)) {
+        return parse_import_decl(parser);
     }
 
     /* Let declaration at top level */
@@ -1217,6 +2165,115 @@ static fxsh_ast_node_t *parse_decl(fxsh_parser_t *parser) {
     return parse_expr(parser);
 }
 
+static fxsh_ast_node_t *parse_import_decl(fxsh_parser_t *parser) {
+    fxsh_token_t *tok = advance(parser); /* import */
+    skip_newlines(parser);
+    fxsh_token_t *name_tok = consume_name_token(parser, "module name");
+    if (!name_tok)
+        return NULL;
+    parser_add_name(&parser->imports, name_tok->data.ident);
+
+    fxsh_ast_node_t *n = alloc_node(AST_DECL_IMPORT, tok->loc);
+    n->data.decl_import.module_name = name_tok->data.ident;
+    return n;
+}
+
+static fxsh_ast_node_t *parse_module_decl(fxsh_parser_t *parser) {
+    fxsh_token_t *tok = advance(parser); /* module */
+    skip_newlines(parser);
+    fxsh_token_t *name_tok = consume_name_token(parser, "module name");
+    if (!name_tok)
+        return NULL;
+    skip_newlines(parser);
+    consume(parser, TOK_ASSIGN, "'='");
+    skip_newlines(parser);
+    consume(parser, TOK_STRUCT, "'struct'");
+    skip_newlines(parser);
+
+    sp_str_t mname = name_tok->data.ident;
+    parser_add_name(&parser->modules, mname);
+
+    fxsh_ast_list_t members = SP_NULLPTR;
+    while (!check(parser, TOK_END) && !check(parser, TOK_EOF)) {
+        fxsh_ast_node_t *d = parse_decl(parser);
+        if (!d)
+            break;
+        if ((d->kind == AST_DECL_LET || d->kind == AST_LET) && d->data.let.name.data) {
+            sp_dyn_array_push(members, d);
+        } else if (d->kind == AST_TYPE_DEF && d->data.type_def.name.data) {
+            sp_dyn_array_push(members, d);
+        } else if (d->kind == AST_PROGRAM) {
+            sp_dyn_array_for(d->data.decls, i) {
+                fxsh_ast_node_t *id = d->data.decls[i];
+                if ((id->kind == AST_DECL_LET || id->kind == AST_LET) && id->data.let.name.data) {
+                    sp_dyn_array_push(members, id);
+                } else if (id->kind == AST_TYPE_DEF && id->data.type_def.name.data) {
+                    sp_dyn_array_push(members, id);
+                }
+            }
+        }
+        skip_newlines(parser);
+    }
+    consume(parser, TOK_END, "'end'");
+
+    sp_dyn_array(name_map_t) map = SP_NULLPTR;
+    sp_dyn_array_for(members, i) {
+        fxsh_ast_node_t *d = members[i];
+        if (d->kind == AST_DECL_LET || d->kind == AST_LET) {
+            sp_str_t old_name = d->data.let.name;
+            sp_str_t new_name = mk_qualified_name(mname, old_name);
+            name_map_t e = {.from = old_name, .to = new_name};
+            sp_dyn_array_push(map, e);
+        } else if (d->kind == AST_TYPE_DEF) {
+            sp_str_t old_t = d->data.type_def.name;
+            sp_str_t new_t = mk_qualified_name(mname, old_t);
+            name_map_t te = {.from = old_t, .to = new_t};
+            sp_dyn_array_push(map, te);
+            sp_dyn_array_for(d->data.type_def.constructors, ci) {
+                fxsh_ast_node_t *c = d->data.type_def.constructors[ci];
+                if (!c || c->kind != AST_DATA_CONSTR)
+                    continue;
+                sp_str_t old_c = c->data.data_constr.name;
+                sp_str_t new_c = mk_qualified_name(mname, old_c);
+                name_map_t ce = {.from = old_c, .to = new_c};
+                sp_dyn_array_push(map, ce);
+            }
+        }
+    }
+
+    sp_dyn_array(sp_str_t) bound = SP_NULLPTR;
+    sp_dyn_array_for(members, i) {
+        fxsh_ast_node_t *d = members[i];
+        if (d->kind == AST_DECL_LET || d->kind == AST_LET) {
+            rewrite_module_refs(d->data.let.value, map, &bound);
+            sp_str_t q = map_lookup(map, d->data.let.name);
+            if (q.data) {
+                d->data.let.name = q;
+                if (d->data.let.pattern && d->data.let.pattern->kind == AST_PAT_VAR)
+                    d->data.let.pattern->data.ident = q;
+            }
+        } else if (d->kind == AST_TYPE_DEF) {
+            sp_str_t q = map_lookup(map, d->data.type_def.name);
+            if (q.data)
+                d->data.type_def.name = q;
+            sp_dyn_array_for(d->data.type_def.constructors, ci) {
+                fxsh_ast_node_t *c = d->data.type_def.constructors[ci];
+                if (!c || c->kind != AST_DATA_CONSTR)
+                    continue;
+                sp_str_t cq = map_lookup(map, c->data.data_constr.name);
+                if (cq.data)
+                    c->data.data_constr.name = cq;
+                sp_dyn_array_for(c->data.data_constr.arg_types, ai)
+                    rewrite_module_type_refs(c->data.data_constr.arg_types[ai], map);
+            }
+        }
+    }
+
+    fxsh_ast_node_t *prog = alloc_node(AST_PROGRAM, tok->loc);
+    prog->data.decls = members;
+    return prog;
+}
+
 /* Parse top-level let declaration (without 'in' part) */
 static fxsh_ast_node_t *parse_let_decl(fxsh_parser_t *parser) {
     advance(parser); /* consume let */
@@ -1231,9 +2288,10 @@ static fxsh_ast_node_t *parse_let_decl(fxsh_parser_t *parser) {
 
     /* Parse function parameters if present (function definition sugar: let f x y = ...) */
     fxsh_ast_list_t params = SP_NULLPTR;
-    while (check(parser, TOK_IDENT) || check(parser, TOK_TYPE_IDENT)) {
-        fxsh_token_t *param_tok = advance(parser);
-        fxsh_ast_node_t *pat = fxsh_ast_ident(param_tok->data.ident, param_tok->loc);
+    while (is_pattern_start(current(parser)->kind)) {
+        fxsh_ast_node_t *pat = parse_pattern(parser);
+        if (!pat)
+            break;
         sp_dyn_array_push(params, pat);
         skip_newlines(parser);
     }
@@ -1276,7 +2334,15 @@ fxsh_ast_node_t *fxsh_parse_program(fxsh_parser_t *parser) {
         u32 start_pos = parser->pos;
         fxsh_ast_node_t *decl = parse_decl(parser);
         if (decl) {
-            sp_dyn_array_push(decls, decl);
+            if (decl->kind == AST_PROGRAM) {
+                sp_dyn_array_for(decl->data.decls, i) {
+                    sp_dyn_array_push(decls, decl->data.decls[i]);
+                }
+            } else if (decl->kind == AST_DECL_IMPORT) {
+                /* Import is currently a parser-level name-resolution directive. */
+            } else {
+                sp_dyn_array_push(decls, decl);
+            }
         }
         if (parser->pos == start_pos) {
             synchronize(parser);

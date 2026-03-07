@@ -1,0 +1,2 @@
+let comptime BAD = @compileError("boom")
+

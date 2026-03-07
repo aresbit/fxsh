@@ -1,0 +1,6 @@
+import Os
+
+let out = Os.stdout "printf \"hello\\n\""
+let rc = Os.run_code "true"
+let _ = rc
+out

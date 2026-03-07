@@ -1,0 +1,4 @@
+let comptime A = comptime { 1 + 2 }
+let comptime B = comptime { let x = 40 in x + 2 }
+let comptime _LOG = @compileLog("ct-log")
+
