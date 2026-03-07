@@ -8,6 +8,8 @@
   - rewrites tail-recursive self-calls into `for (;;)` + parallel temp rebind + `continue`.
   - supports tail positions through `if` branches, `match` branches, and `let-in` wrapper
     passthrough.
+  - tail-position `match` now uses constructor `switch(tag)` fastpath when arms are unguarded,
+    and automatically falls back to condition-chain when guards exist.
   - added `examples/tco_sum_tail.fxsh`.
   - added `examples/tco_match_int_tail.fxsh`.
 
