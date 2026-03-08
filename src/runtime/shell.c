@@ -1,5 +1,6 @@
 #include "fxsh.h"
 
+#include <dirent.h>
 #include <glob.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -16,6 +17,10 @@ static s64 wait_status_to_code(int status) {
     return (s64)status;
 }
 
+static sp_str_t g_fxsh_argv0 = {.data = "", .len = 0};
+static s64 g_fxsh_argc = 0;
+static char **g_fxsh_argv = NULL;
+
 static char *dup_sp_str(sp_str_t s) {
     char *p = (char *)malloc((size_t)s.len + 1);
     if (!p)
@@ -24,6 +29,26 @@ static char *dup_sp_str(sp_str_t s) {
         memcpy(p, s.data, s.len);
     p[s.len] = '\0';
     return p;
+}
+
+void fxsh_set_argv_rt(sp_str_t argv0, s64 argc, char **argv) {
+    g_fxsh_argv0 = argv0.data ? argv0 : (sp_str_t){.data = "", .len = 0};
+    g_fxsh_argc = argc >= 0 ? argc : 0;
+    g_fxsh_argv = argv;
+}
+
+sp_str_t fxsh_argv0_rt(void) {
+    return g_fxsh_argv0;
+}
+
+s64 fxsh_argc_rt(void) {
+    return g_fxsh_argc;
+}
+
+sp_str_t fxsh_argv_at_rt(s64 index) {
+    if (index < 0 || index >= g_fxsh_argc || !g_fxsh_argv)
+        return (sp_str_t){.data = "", .len = 0};
+    return fxsh_from_cstr(g_fxsh_argv[index]);
 }
 
 sp_str_t fxsh_getenv_rt(sp_str_t key) {
@@ -43,6 +68,100 @@ bool fxsh_file_exists_rt(sp_str_t path) {
         return false;
     bool ok = access(p, F_OK) == 0;
     free(p);
+    return ok;
+}
+
+sp_str_t fxsh_getcwd_rt(void) {
+    char buf[4096];
+    if (!getcwd(buf, sizeof(buf)))
+        return (sp_str_t){.data = "", .len = 0};
+    return fxsh_from_cstr(buf);
+}
+
+bool fxsh_is_dir_rt(sp_str_t path) {
+    char *p = dup_sp_str(path);
+    if (!p)
+        return false;
+    struct stat st;
+    bool ok = stat(p, &st) == 0 && S_ISDIR(st.st_mode);
+    free(p);
+    return ok;
+}
+
+bool fxsh_is_file_rt(sp_str_t path) {
+    char *p = dup_sp_str(path);
+    if (!p)
+        return false;
+    struct stat st;
+    bool ok = stat(p, &st) == 0 && S_ISREG(st.st_mode);
+    free(p);
+    return ok;
+}
+
+s64 fxsh_file_size_rt(sp_str_t path) {
+    char *p = dup_sp_str(path);
+    if (!p)
+        return -1;
+    struct stat st;
+    s64 size = (stat(p, &st) == 0 && S_ISREG(st.st_mode)) ? (s64)st.st_size : -1;
+    free(p);
+    return size;
+}
+
+bool fxsh_mkdir_p_rt(sp_str_t path) {
+    char *p = dup_sp_str(path);
+    if (!p)
+        return false;
+    size_t n = strlen(p);
+    if (n == 0) {
+        free(p);
+        return false;
+    }
+
+    for (size_t i = 1; i <= n; i++) {
+        if (p[i] != '/' && p[i] != '\0')
+            continue;
+        char saved = p[i];
+        p[i] = '\0';
+        if (p[0] != '\0') {
+            struct stat st;
+            if (stat(p, &st) != 0) {
+                if (mkdir(p, 0755) != 0) {
+                    free(p);
+                    return false;
+                }
+            } else if (!S_ISDIR(st.st_mode)) {
+                free(p);
+                return false;
+            }
+        }
+        p[i] = saved;
+    }
+
+    free(p);
+    return true;
+}
+
+bool fxsh_remove_file_rt(sp_str_t path) {
+    char *p = dup_sp_str(path);
+    if (!p)
+        return false;
+    bool ok = unlink(p) == 0;
+    free(p);
+    return ok;
+}
+
+bool fxsh_rename_path_rt(sp_str_t src, sp_str_t dst) {
+    char *s = dup_sp_str(src);
+    char *d = dup_sp_str(dst);
+    if (!s || !d) {
+        free(s);
+        free(d);
+        return false;
+    }
+    bool ok = rename(s, d) == 0;
+    free(s);
+    free(d);
     return ok;
 }
 
@@ -201,6 +320,102 @@ static capture_slot_t *capture_get(s64 id) {
     if (!g_capture_slots[id].used)
         return NULL;
     return &g_capture_slots[id];
+}
+
+static int cmp_sp_str_lex(const void *a, const void *b) {
+    const sp_str_t *sa = (const sp_str_t *)a;
+    const sp_str_t *sb = (const sp_str_t *)b;
+    u32 min_len = sa->len < sb->len ? sa->len : sb->len;
+    int cmp = min_len > 0 ? memcmp(sa->data, sb->data, min_len) : 0;
+    if (cmp != 0)
+        return cmp;
+    if (sa->len < sb->len)
+        return -1;
+    if (sa->len > sb->len)
+        return 1;
+    return 0;
+}
+
+static bool dir_entry_is_dot(const char *name) {
+    return name && ((name[0] == '.' && name[1] == '\0') ||
+                    (name[0] == '.' && name[1] == '.' && name[2] == '\0'));
+}
+
+static char *path_join_owned(const char *base, const char *name) {
+    if (!base || !name)
+        return NULL;
+    size_t base_len = strlen(base);
+    size_t name_len = strlen(name);
+    bool add_sep = base_len > 0 && base[base_len - 1] != '/';
+    char *out = (char *)malloc(base_len + (add_sep ? 1 : 0) + name_len + 1);
+    if (!out)
+        return NULL;
+    memcpy(out, base, base_len);
+    size_t off = base_len;
+    if (add_sep)
+        out[off++] = '/';
+    memcpy(out + off, name, name_len);
+    out[off + name_len] = '\0';
+    return out;
+}
+
+static bool path_is_walkable_dir(const char *path) {
+    struct stat st;
+    if (!path || lstat(path, &st) != 0)
+        return false;
+    return S_ISDIR(st.st_mode) && !S_ISLNK(st.st_mode);
+}
+
+static void free_path_items(sp_dyn_array(sp_str_t) items) {
+    sp_dyn_array_for(items, i) {
+        if (items[i].data)
+            free((void *)items[i].data);
+    }
+}
+
+static sp_str_t join_path_items(sp_dyn_array(sp_str_t) items) {
+    if (!items || sp_dyn_array_size(items) == 0)
+        return (sp_str_t){.data = "", .len = 0};
+    qsort(items, sp_dyn_array_size(items), sizeof(sp_str_t), cmp_sp_str_lex);
+    size_t total = 0;
+    sp_dyn_array_for(items, i) {
+        total += items[i].len;
+        if (i + 1 < sp_dyn_array_size(items))
+            total += 1;
+    }
+    char *buf = (char *)malloc(total + 1);
+    if (!buf)
+        return (sp_str_t){.data = "", .len = 0};
+    size_t off = 0;
+    sp_dyn_array_for(items, i) {
+        if (items[i].len > 0)
+            memcpy(buf + off, items[i].data, items[i].len);
+        off += items[i].len;
+        if (i + 1 < sp_dyn_array_size(items))
+            buf[off++] = '\n';
+    }
+    buf[off] = '\0';
+    return (sp_str_t){.data = buf, .len = (u32)off};
+}
+
+static void collect_dir_paths(const char *root, bool recursive, sp_dyn_array(sp_str_t) * out) {
+    DIR *dir = opendir(root);
+    if (!dir)
+        return;
+
+    struct dirent *ent = NULL;
+    while ((ent = readdir(dir)) != NULL) {
+        if (dir_entry_is_dot(ent->d_name))
+            continue;
+        char *joined = path_join_owned(root, ent->d_name);
+        if (!joined)
+            continue;
+        sp_str_t item = {.data = joined, .len = (u32)strlen(joined)};
+        sp_dyn_array_push(*out, item);
+        if (recursive && path_is_walkable_dir(joined))
+            collect_dir_paths(joined, true, out);
+    }
+    closedir(dir);
 }
 
 static sp_str_t join_glob_results(glob_t *g) {
@@ -725,4 +940,34 @@ sp_str_t fxsh_glob_rt(sp_str_t pattern) {
     sp_str_t joined = join_glob_results(&g);
     globfree(&g);
     return joined;
+}
+
+sp_str_t fxsh_list_dir_text_rt(sp_str_t path) {
+    char *root = dup_sp_str(path);
+    if (!root)
+        return (sp_str_t){.data = "", .len = 0};
+    sp_dyn_array(sp_str_t) items = SP_NULLPTR;
+    if (path_is_walkable_dir(root))
+        collect_dir_paths(root, false, &items);
+    sp_str_t out = join_path_items(items);
+    free_path_items(items);
+    if (items)
+        sp_dyn_array_free(items);
+    free(root);
+    return out;
+}
+
+sp_str_t fxsh_walk_dir_text_rt(sp_str_t path) {
+    char *root = dup_sp_str(path);
+    if (!root)
+        return (sp_str_t){.data = "", .len = 0};
+    sp_dyn_array(sp_str_t) items = SP_NULLPTR;
+    if (path_is_walkable_dir(root))
+        collect_dir_paths(root, true, &items);
+    sp_str_t out = join_path_items(items);
+    free_path_items(items);
+    if (items)
+        sp_dyn_array_free(items);
+    free(root);
+    return out;
 }

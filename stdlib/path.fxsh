@@ -1,8 +1,30 @@
 # path.fxsh - compatibility layer (prefer stdlib/os.fxsh)
 
+import Fs
+
 type 'a result = Ok of 'a | Err of string
 
 let exists = fn p -> Ok (file_exists p)
+let is_dir_path = fn p -> Ok (is_dir p)
+let is_file_path = fn p -> Ok (is_file p)
+let list = fn p -> Ok (list_dir p)
+let walk = fn p -> Ok (walk_dir p)
+let join = fn base name -> Ok (Fs.path_join base name)
+let dirname = fn p -> Ok (Fs.dirname p)
+let basename = fn p -> Ok (Fs.basename p)
+let extension = fn p -> Ok (Fs.extension p)
+let stem = fn p -> Ok (Fs.stem p)
+let has_extension = fn ext p -> Ok (Fs.has_extension ext p)
+let replace_extension = fn ext p -> Ok (Fs.replace_extension ext p)
+let replace_basename = fn base p -> Ok (Fs.replace_basename base p)
+let is_abs_path = fn p -> Ok (Fs.is_abs_path p)
+let is_hidden_name = fn p -> Ok (Fs.is_hidden_name p)
+let parent_or_self = fn p -> Ok (Fs.parent_or_self p)
+let size = fn p -> Ok (file_size p)
+let ensure_dir = fn p -> Ok (mkdir_p p)
+let ensure_parent_dir = fn p -> Ok (Fs.ensure_parent_dir p)
+let delete_file = fn p -> Ok (remove_file p)
+let move = fn src dst -> Ok (rename_path src dst)
 
 let read_text = fn p ->
   let s = read_file p in

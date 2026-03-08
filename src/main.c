@@ -15,8 +15,8 @@ static void print_usage(const char *program) {
     printf("fxsh - Functional Core Minimal Bash\n");
     printf("Version: %d.%d.%d\n\n", FXSH_VERSION_MAJOR, FXSH_VERSION_MINOR, FXSH_VERSION_PATCH);
     printf("Usage:\n");
-    printf("  %s [options] <file.fxsh>\n", program);
-    printf("  %s [options] -e <expression>\n\n", program);
+    printf("  %s [options] <file.fxsh> [args...]\n", program);
+    printf("  %s [options] -e <expression> [args...]\n\n", program);
     printf("Options:\n");
     printf("  -e, --eval <expr>    Evaluate expression\n");
     printf("  -c, --codegen        Generate C code\n");
@@ -95,6 +95,23 @@ static sp_str_t sb_take(sb_t *sb) {
         return (sp_str_t){.data = "", .len = 0};
     sb->buf[sb->len] = '\0';
     return (sp_str_t){.data = sb->buf, .len = (u32)sb->len};
+}
+
+static bool sb_append_shell_quoted(sb_t *sb, const char *s) {
+    if (!sb || !s)
+        return false;
+    if (!sb_append_cstr(sb, "'"))
+        return false;
+    for (const char *p = s; *p; p++) {
+        if (*p == '\'') {
+            if (!sb_append_cstr(sb, "'\\''"))
+                return false;
+        } else {
+            if (!sb_append_n(sb, p, 1))
+                return false;
+        }
+    }
+    return sb_append_cstr(sb, "'");
 }
 
 static bool parse_line_keyword_name(const char *line, size_t n, const char *kw,
@@ -400,7 +417,8 @@ typedef enum {
     MODE_NATIVE_CODEGEN,
 } run_mode_t;
 
-static fxsh_error_t run_native_interp_harness(sp_str_t source) {
+static fxsh_error_t run_native_interp_harness(sp_str_t source, int script_argc, char **script_argv,
+                                              const char *argv0) {
     long pid = (long)getpid();
     char c_path[128];
     char bin_path[128];
@@ -422,7 +440,10 @@ static fxsh_error_t run_native_interp_harness(sp_str_t source) {
         fprintf(f, "%u,", (unsigned)(u8)source.data[i]);
     }
     fprintf(f, "0};\n\n");
-    fprintf(f, "int main(void) {\n");
+    fprintf(f, "int main(int argc, char **argv) {\n");
+    fprintf(f, "  fxsh_set_argv_rt(argc > 1 ? fxsh_from_cstr(argv[1]) : (argc > 0 ? "
+               "fxsh_from_cstr(argv[0]) : fxsh_from_cstr(\"\")), argc > 2 ? (s64)(argc - 2) : 0, "
+               "argc > 2 ? argv + 2 : NULL);\n");
     fprintf(f, "  fxsh_arena_t *arena = arena_create(NULL, 64 * 1024);\n");
     fprintf(f, "  fxsh_current_arena = arena;\n");
     fprintf(f, "  sp_str_t src = { .data = (const char *)fxsh_src, .len = %u };\n", source.len);
@@ -457,9 +478,18 @@ static fxsh_error_t run_native_interp_harness(sp_str_t source) {
         return ERR_INTERNAL;
     }
 
-    char run_cmd[192];
-    snprintf(run_cmd, sizeof(run_cmd), "./%s", bin_path);
-    int rc = system(run_cmd);
+    sb_t run_cmd = {0};
+    sb_append_cstr(&run_cmd, "./");
+    sb_append_cstr(&run_cmd, bin_path);
+    if (argv0 && argv0[0]) {
+        sb_append_cstr(&run_cmd, " ");
+        sb_append_shell_quoted(&run_cmd, argv0);
+    }
+    for (int i = 0; i < script_argc; i++) {
+        sb_append_cstr(&run_cmd, " ");
+        sb_append_shell_quoted(&run_cmd, script_argv[i]);
+    }
+    int rc = system(run_cmd.buf ? run_cmd.buf : "");
     if (rc != 0) {
         fprintf(stderr, "Native fallback run failed (exit=%d)\n", rc);
         return ERR_INTERNAL;
@@ -467,7 +497,8 @@ static fxsh_error_t run_native_interp_harness(sp_str_t source) {
     return ERR_OK;
 }
 
-static fxsh_error_t run_native_codegen(fxsh_ast_node_t *ast) {
+static fxsh_error_t run_native_codegen(fxsh_ast_node_t *ast, int script_argc, char **script_argv,
+                                       const char *argv0) {
     char *code = fxsh_codegen(ast);
     if (!code)
         return ERR_OUT_OF_MEMORY;
@@ -536,9 +567,18 @@ static fxsh_error_t run_native_codegen(fxsh_ast_node_t *ast) {
         return ERR_INTERNAL;
     }
 
-    char run_cmd[192];
-    snprintf(run_cmd, sizeof(run_cmd), "./%s", bin_path_buf);
-    int rc = system(run_cmd);
+    sb_t run_cmd = {0};
+    sb_append_cstr(&run_cmd, "./");
+    sb_append_cstr(&run_cmd, bin_path_buf);
+    if (argv0 && argv0[0]) {
+        sb_append_cstr(&run_cmd, " ");
+        sb_append_shell_quoted(&run_cmd, argv0);
+    }
+    for (int i = 0; i < script_argc; i++) {
+        sb_append_cstr(&run_cmd, " ");
+        sb_append_shell_quoted(&run_cmd, script_argv[i]);
+    }
+    int rc = system(run_cmd.buf ? run_cmd.buf : "");
     if (rc != 0) {
         fprintf(stderr, "Native run failed (exit=%d)\n", rc);
         return ERR_INTERNAL;
@@ -559,8 +599,31 @@ int main(int argc, char **argv) {
     run_mode_t mode = MODE_COMPILE;
     const char *input = NULL;
     bool input_is_eval = false;
+    bool end_of_options = false;
+    char **script_argv = (char **)calloc((size_t)argc, sizeof(char *));
+    int script_argc = 0;
+    if (!script_argv) {
+        fprintf(stderr, "Error: Out of memory\n");
+        return 1;
+    }
 
     for (int i = 1; i < argc; i++) {
+        if (!end_of_options && strcmp(argv[i], "--") == 0) {
+            end_of_options = true;
+            continue;
+        }
+        if (input && (end_of_options || argv[i][0] != '-')) {
+            script_argv[script_argc++] = argv[i];
+            continue;
+        }
+        if (input && !end_of_options && argv[i][0] == '-') {
+            script_argv[script_argc++] = argv[i];
+            continue;
+        }
+        if (end_of_options) {
+            input = argv[i];
+            continue;
+        }
         if (strcmp(argv[i], "-h") == 0 || strcmp(argv[i], "--help") == 0) {
             print_usage(argv[0]);
             return 0;
@@ -629,6 +692,8 @@ int main(int argc, char **argv) {
         filename = sp_str_view(input);
         source = expand_imports(source, input);
     }
+    fxsh_set_argv_rt(input_is_eval ? sp_str_lit("<eval>") : sp_str_view(input), (s64)script_argc,
+                     script_argv);
 
     /* Tokenize */
     fxsh_token_array_t tokens = SP_NULLPTR;
@@ -697,9 +762,9 @@ int main(int argc, char **argv) {
         fxsh_token_array_free(tokens);
         return 1;
     }
-    printf("Type: %s\n", fxsh_type_to_string(type));
 
     if (mode == MODE_ANF) {
+        printf("Type: %s\n", fxsh_type_to_string(type));
         char *anf = fxsh_anf_dump(ast);
         if (!anf) {
             fprintf(stderr, "ANF lower error\n");
@@ -721,61 +786,20 @@ int main(int argc, char **argv) {
         fxsh_token_array_free(tokens);
         return 1;
     }
-    /* Comptime evaluation */
-    printf("\nComptime evaluation:\n");
-    fxsh_comptime_ctx_t ctx;
-    fxsh_comptime_ctx_init(&ctx);
-    ctx.type_env = type_env;
-
-    if (ast->kind == AST_PROGRAM) {
-        sp_dyn_array_for(ast->data.decls, i) {
-            fxsh_ast_node_t *decl = ast->data.decls[i];
-            if (decl->kind == AST_TYPE_DEF) {
-                (void)fxsh_ct_eval(decl, &ctx);
-                continue;
-            }
-            if (decl->kind == AST_DECL_LET || decl->kind == AST_LET) {
-                if (!decl->data.let.is_comptime) {
-                    fxsh_ast_node_t fake = {0};
-                    fake.kind = AST_DECL_LET;
-                    fake.loc = decl->loc;
-                    fake.data.let.name = decl->data.let.name;
-                    fake.data.let.value = decl->data.let.value;
-                    fake.data.let.is_comptime = true;
-                    fake.data.let.is_rec = false;
-                    (void)fxsh_ct_eval(&fake, &ctx);
-                    continue;
-                }
-
-                fxsh_ct_result_t ct_result = fxsh_ct_eval(decl, &ctx);
-                if (ct_result.error == ERR_OK && ct_result.value) {
-                    printf("  comptime %.*s = %s\n", decl->data.let.name.len,
-                           decl->data.let.name.data, fxsh_ct_value_to_string(ct_result.value));
-                } else if (ct_result.error != ERR_OK) {
-                    const c8 *ct_err = fxsh_ct_last_error();
-                    fprintf(stderr, "Comptime error in `%.*s`: %s\n", decl->data.let.name.len,
-                            decl->data.let.name.data, ct_err ? ct_err : "unknown error");
-                    fxsh_ast_free(ast);
-                    fxsh_token_array_free(tokens);
-                    return 1;
-                }
-            }
-        }
-    }
 
     if (mode == MODE_NATIVE || mode == MODE_NATIVE_CODEGEN) {
-        printf("\nNative:\n");
         if (mode == MODE_NATIVE) {
-            err = run_native_interp_harness(source);
+            err = run_native_interp_harness(source, script_argc, script_argv,
+                                            input_is_eval ? "<eval>" : input);
         } else {
-            err = run_native_codegen(ast);
+            err =
+                run_native_codegen(ast, script_argc, script_argv, input_is_eval ? "<eval>" : input);
         }
         if (err != ERR_OK) {
             fxsh_ast_free(ast);
             fxsh_token_array_free(tokens);
             return 1;
         }
-        printf("  => native run success\n");
     }
 
     /* Interpreter execution (MVP runtime path) */
@@ -788,13 +812,13 @@ int main(int argc, char **argv) {
             fxsh_token_array_free(tokens);
             return 1;
         }
-        printf("\nInterpreter:\n");
-        printf("  => %.*s\n", interp_result.len, interp_result.data);
+        if (mode == MODE_EVAL) {
+            printf("%.*s\n", interp_result.len, interp_result.data);
+        }
     }
 
     /* Code generation */
     if (mode == MODE_CODEGEN) {
-        printf("\n/* Generated C code */\n\n");
         char *code = fxsh_codegen(ast);
         if (code) {
             printf("%s\n", code);
@@ -805,7 +829,5 @@ int main(int argc, char **argv) {
     /* Cleanup */
     fxsh_ast_free(ast);
     fxsh_token_array_free(tokens);
-
-    printf("\nSuccess!\n");
     return 0;
 }

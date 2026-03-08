@@ -55,6 +55,27 @@ typedef fxsh_rt_env_t rv_env_t;
 
 static rv_value_t *eval_expr(fxsh_ast_node_t *ast, rv_env_t *env, fxsh_error_t *err);
 
+static rv_value_t *rv_string_list_from_lines(sp_str_t text) {
+    if (!text.data || text.len == 0)
+        return rv_list_nil();
+
+    rv_value_t *list = rv_list_nil();
+    u32 end = text.len;
+    while (end > 0) {
+        u32 start = end;
+        while (start > 0 && text.data[start - 1] != '\n')
+            start--;
+        if (end > start) {
+            sp_str_t line = {.data = text.data + start, .len = end - start};
+            list = rv_list_cons(rv_string(line), list);
+        }
+        if (start == 0)
+            break;
+        end = start - 1;
+    }
+    return list;
+}
+
 static rv_value_t *rv_from_ct(fxsh_ct_value_t *v, fxsh_error_t *err) {
     if (!v)
         return NULL;
@@ -378,6 +399,30 @@ static rv_value_t *eval_builtin_call(sp_str_t name, fxsh_ast_list_t args, rv_env
         printf("%.*s\n", av[0]->as.s.len, av[0]->as.s.data);
         return rv_unit();
     }
+    if (builtin_name_eq(name, "argv0")) {
+        if (sp_dyn_array_size(av) != 1 || av[0]->kind != RV_UNIT) {
+            *err = ERR_INVALID_INPUT;
+            fprintf(stderr, "Runtime error: argv0 expects unit\n");
+            return NULL;
+        }
+        return rv_string(fxsh_argv0_rt());
+    }
+    if (builtin_name_eq(name, "argc")) {
+        if (sp_dyn_array_size(av) != 1 || av[0]->kind != RV_UNIT) {
+            *err = ERR_INVALID_INPUT;
+            fprintf(stderr, "Runtime error: argc expects unit\n");
+            return NULL;
+        }
+        return rv_int(fxsh_argc_rt());
+    }
+    if (builtin_name_eq(name, "argv_at")) {
+        if (sp_dyn_array_size(av) != 1 || av[0]->kind != RV_INT) {
+            *err = ERR_INVALID_INPUT;
+            fprintf(stderr, "Runtime error: argv_at expects int\n");
+            return NULL;
+        }
+        return rv_string(fxsh_argv_at_rt(av[0]->as.i));
+    }
     if (builtin_name_eq(name, "getenv")) {
         if (sp_dyn_array_size(av) != 1 || av[0]->kind != RV_STRING) {
             *err = ERR_INVALID_INPUT;
@@ -385,6 +430,14 @@ static rv_value_t *eval_builtin_call(sp_str_t name, fxsh_ast_list_t args, rv_env
             return NULL;
         }
         return rv_string(fxsh_getenv_rt(av[0]->as.s));
+    }
+    if (builtin_name_eq(name, "cwd")) {
+        if (sp_dyn_array_size(av) != 1 || av[0]->kind != RV_UNIT) {
+            *err = ERR_INVALID_INPUT;
+            fprintf(stderr, "Runtime error: cwd expects unit\n");
+            return NULL;
+        }
+        return rv_string(fxsh_getcwd_rt());
     }
     if (builtin_name_eq(name, "file_exists")) {
         if (sp_dyn_array_size(av) != 1 || av[0]->kind != RV_STRING) {
@@ -394,6 +447,22 @@ static rv_value_t *eval_builtin_call(sp_str_t name, fxsh_ast_list_t args, rv_env
         }
         return rv_bool(fxsh_file_exists_rt(av[0]->as.s));
     }
+    if (builtin_name_eq(name, "is_dir")) {
+        if (sp_dyn_array_size(av) != 1 || av[0]->kind != RV_STRING) {
+            *err = ERR_INVALID_INPUT;
+            fprintf(stderr, "Runtime error: is_dir expects string\n");
+            return NULL;
+        }
+        return rv_bool(fxsh_is_dir_rt(av[0]->as.s));
+    }
+    if (builtin_name_eq(name, "is_file")) {
+        if (sp_dyn_array_size(av) != 1 || av[0]->kind != RV_STRING) {
+            *err = ERR_INVALID_INPUT;
+            fprintf(stderr, "Runtime error: is_file expects string\n");
+            return NULL;
+        }
+        return rv_bool(fxsh_is_file_rt(av[0]->as.s));
+    }
     if (builtin_name_eq(name, "read_file")) {
         if (sp_dyn_array_size(av) != 1 || av[0]->kind != RV_STRING) {
             *err = ERR_INVALID_INPUT;
@@ -402,6 +471,112 @@ static rv_value_t *eval_builtin_call(sp_str_t name, fxsh_ast_list_t args, rv_env
         }
         sp_str_t s = fxsh_read_file(av[0]->as.s);
         return rv_string(s.data ? s : (sp_str_t){.data = "", .len = 0});
+    }
+    if (builtin_name_eq(name, "file_size")) {
+        if (sp_dyn_array_size(av) != 1 || av[0]->kind != RV_STRING) {
+            *err = ERR_INVALID_INPUT;
+            fprintf(stderr, "Runtime error: file_size expects string\n");
+            return NULL;
+        }
+        return rv_int(fxsh_file_size_rt(av[0]->as.s));
+    }
+    if (builtin_name_eq(name, "mkdir_p")) {
+        if (sp_dyn_array_size(av) != 1 || av[0]->kind != RV_STRING) {
+            *err = ERR_INVALID_INPUT;
+            fprintf(stderr, "Runtime error: mkdir_p expects string\n");
+            return NULL;
+        }
+        return rv_bool(fxsh_mkdir_p_rt(av[0]->as.s));
+    }
+    if (builtin_name_eq(name, "remove_file")) {
+        if (sp_dyn_array_size(av) != 1 || av[0]->kind != RV_STRING) {
+            *err = ERR_INVALID_INPUT;
+            fprintf(stderr, "Runtime error: remove_file expects string\n");
+            return NULL;
+        }
+        return rv_bool(fxsh_remove_file_rt(av[0]->as.s));
+    }
+    if (builtin_name_eq(name, "rename_path")) {
+        if (sp_dyn_array_size(av) != 2 || av[0]->kind != RV_STRING || av[1]->kind != RV_STRING) {
+            *err = ERR_INVALID_INPUT;
+            fprintf(stderr, "Runtime error: rename_path expects (string, string)\n");
+            return NULL;
+        }
+        return rv_bool(fxsh_rename_path_rt(av[0]->as.s, av[1]->as.s));
+    }
+    if (builtin_name_eq(name, "string_length")) {
+        if (sp_dyn_array_size(av) != 1 || av[0]->kind != RV_STRING) {
+            *err = ERR_INVALID_INPUT;
+            fprintf(stderr, "Runtime error: string_length expects string\n");
+            return NULL;
+        }
+        return rv_int(fxsh_str_len_rt(av[0]->as.s));
+    }
+    if (builtin_name_eq(name, "string_slice")) {
+        if (sp_dyn_array_size(av) != 3 || av[0]->kind != RV_STRING || av[1]->kind != RV_INT ||
+            av[2]->kind != RV_INT) {
+            *err = ERR_INVALID_INPUT;
+            fprintf(stderr, "Runtime error: string_slice expects (string, int, int)\n");
+            return NULL;
+        }
+        return rv_string(fxsh_str_slice_rt(av[0]->as.s, av[1]->as.i, av[2]->as.i));
+    }
+    if (builtin_name_eq(name, "string_find")) {
+        if (sp_dyn_array_size(av) != 2 || av[0]->kind != RV_STRING || av[1]->kind != RV_STRING) {
+            *err = ERR_INVALID_INPUT;
+            fprintf(stderr, "Runtime error: string_find expects (string, string)\n");
+            return NULL;
+        }
+        return rv_int(fxsh_str_find_rt(av[0]->as.s, av[1]->as.s));
+    }
+    if (builtin_name_eq(name, "string_find_from")) {
+        if (sp_dyn_array_size(av) != 3 || av[0]->kind != RV_STRING || av[1]->kind != RV_STRING ||
+            av[2]->kind != RV_INT) {
+            *err = ERR_INVALID_INPUT;
+            fprintf(stderr, "Runtime error: string_find_from expects (string, string, int)\n");
+            return NULL;
+        }
+        return rv_int(fxsh_str_find_from_rt(av[0]->as.s, av[1]->as.s, av[2]->as.i));
+    }
+    if (builtin_name_eq(name, "string_starts_with")) {
+        if (sp_dyn_array_size(av) != 2 || av[0]->kind != RV_STRING || av[1]->kind != RV_STRING) {
+            *err = ERR_INVALID_INPUT;
+            fprintf(stderr, "Runtime error: string_starts_with expects (string, string)\n");
+            return NULL;
+        }
+        return rv_bool(fxsh_str_starts_with_rt(av[0]->as.s, av[1]->as.s));
+    }
+    if (builtin_name_eq(name, "string_ends_with")) {
+        if (sp_dyn_array_size(av) != 2 || av[0]->kind != RV_STRING || av[1]->kind != RV_STRING) {
+            *err = ERR_INVALID_INPUT;
+            fprintf(stderr, "Runtime error: string_ends_with expects (string, string)\n");
+            return NULL;
+        }
+        return rv_bool(fxsh_str_ends_with_rt(av[0]->as.s, av[1]->as.s));
+    }
+    if (builtin_name_eq(name, "string_trim")) {
+        if (sp_dyn_array_size(av) != 1 || av[0]->kind != RV_STRING) {
+            *err = ERR_INVALID_INPUT;
+            fprintf(stderr, "Runtime error: string_trim expects string\n");
+            return NULL;
+        }
+        return rv_string(fxsh_str_trim_rt(av[0]->as.s));
+    }
+    if (builtin_name_eq(name, "byte_at")) {
+        if (sp_dyn_array_size(av) != 2 || av[0]->kind != RV_STRING || av[1]->kind != RV_INT) {
+            *err = ERR_INVALID_INPUT;
+            fprintf(stderr, "Runtime error: byte_at expects (string, int)\n");
+            return NULL;
+        }
+        return rv_int(fxsh_byte_at_rt(av[0]->as.s, av[1]->as.i));
+    }
+    if (builtin_name_eq(name, "byte_to_string")) {
+        if (sp_dyn_array_size(av) != 1 || av[0]->kind != RV_INT) {
+            *err = ERR_INVALID_INPUT;
+            fprintf(stderr, "Runtime error: byte_to_string expects int\n");
+            return NULL;
+        }
+        return rv_string(fxsh_byte_to_string_rt(av[0]->as.i));
     }
     if (builtin_name_eq(name, "write_file")) {
         if (sp_dyn_array_size(av) != 2 || av[0]->kind != RV_STRING || av[1]->kind != RV_STRING) {
@@ -577,6 +752,38 @@ static rv_value_t *eval_builtin_call(sp_str_t name, fxsh_ast_list_t args, rv_env
         }
         return rv_string(fxsh_glob_rt(av[0]->as.s));
     }
+    if (builtin_name_eq(name, "list_dir")) {
+        if (sp_dyn_array_size(av) != 1 || av[0]->kind != RV_STRING) {
+            *err = ERR_INVALID_INPUT;
+            fprintf(stderr, "Runtime error: list_dir expects string\n");
+            return NULL;
+        }
+        return rv_string_list_from_lines(fxsh_list_dir_text_rt(av[0]->as.s));
+    }
+    if (builtin_name_eq(name, "walk_dir")) {
+        if (sp_dyn_array_size(av) != 1 || av[0]->kind != RV_STRING) {
+            *err = ERR_INVALID_INPUT;
+            fprintf(stderr, "Runtime error: walk_dir expects string\n");
+            return NULL;
+        }
+        return rv_string_list_from_lines(fxsh_walk_dir_text_rt(av[0]->as.s));
+    }
+    if (builtin_name_eq(name, "split_lines")) {
+        if (sp_dyn_array_size(av) != 1 || av[0]->kind != RV_STRING) {
+            *err = ERR_INVALID_INPUT;
+            fprintf(stderr, "Runtime error: split_lines expects string\n");
+            return NULL;
+        }
+        return rv_string_list_from_lines(av[0]->as.s);
+    }
+    if (builtin_name_eq(name, "split_words")) {
+        if (sp_dyn_array_size(av) != 1 || av[0]->kind != RV_STRING) {
+            *err = ERR_INVALID_INPUT;
+            fprintf(stderr, "Runtime error: split_words expects string\n");
+            return NULL;
+        }
+        return rv_string_list_from_lines(fxsh_split_words_rt(av[0]->as.s));
+    }
     if (builtin_name_eq(name, "grep_lines")) {
         if (sp_dyn_array_size(av) != 2 || av[0]->kind != RV_STRING || av[1]->kind != RV_STRING) {
             *err = ERR_INVALID_INPUT;
@@ -617,6 +824,22 @@ static rv_value_t *eval_builtin_call(sp_str_t name, fxsh_ast_list_t args, rv_env
             return NULL;
         }
         return rv_string(fxsh_json_compact(av[0]->as.s));
+    }
+    if (builtin_name_eq(name, "json_kind")) {
+        if (sp_dyn_array_size(av) != 1 || av[0]->kind != RV_STRING) {
+            *err = ERR_INVALID_INPUT;
+            fprintf(stderr, "Runtime error: json_kind expects string\n");
+            return NULL;
+        }
+        return rv_string(fxsh_json_kind(av[0]->as.s));
+    }
+    if (builtin_name_eq(name, "json_quote_string")) {
+        if (sp_dyn_array_size(av) != 1 || av[0]->kind != RV_STRING) {
+            *err = ERR_INVALID_INPUT;
+            fprintf(stderr, "Runtime error: json_quote_string expects string\n");
+            return NULL;
+        }
+        return rv_string(fxsh_json_quote_string(av[0]->as.s));
     }
     if (builtin_name_eq(name, "json_has")) {
         if (sp_dyn_array_size(av) != 2 || av[0]->kind != RV_STRING || av[1]->kind != RV_STRING) {

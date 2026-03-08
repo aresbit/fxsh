@@ -1,0 +1,123 @@
+# fs.fxsh - filesystem helpers over fxsh length-delimited text/bytes
+
+import Text
+
+let path_join : string -> string -> string = fn base name ->
+  if base == "" then name
+  else if base == "." then name
+  else if Text.ends_with "/" base then base ++ name
+  else base ++ "/" ++ name
+
+let exists : string -> bool = fn path -> file_exists path
+
+let is_dir_path : string -> bool = fn path -> is_dir path
+
+let is_file_path : string -> bool = fn path -> is_file path
+
+let list_dir_paths : string -> string list = fn path -> list_dir path
+
+let walk_dir_paths : string -> string list = fn path -> walk_dir path
+
+let current_dir = cwd()
+
+let size : string -> int = fn path -> file_size path
+
+let ensure_dir : string -> bool = fn path -> mkdir_p path
+
+let delete_file : string -> bool = fn path -> remove_file path
+
+let move_path : string -> string -> bool = fn src dst -> rename_path src dst
+
+let read_text : string -> string = fn path -> read_file path
+
+let write_text : string -> string -> bool = fn path content -> write_file path content
+
+let read_bytes : string -> string = fn path -> read_file path
+
+let write_bytes : string -> string -> bool = fn path content -> write_file path content
+
+let read_lines : string -> string list = fn path -> Text.split_lines_text (read_text path)
+
+let rec last_sep_idx : string -> int -> int = fn path idx ->
+  if idx < 0 then -1
+  else if byte_at path idx == 47 then idx
+  else
+    let prev = idx - 1 in
+    last_sep_idx path prev
+
+let dirname : string -> string = fn path ->
+  let n = string_length path in
+  if n == 0 then "."
+  else
+    let last = n - 1 in
+    let idx = last_sep_idx path last in
+    if idx < 0 then "."
+    else if idx == 0 then "/"
+    else string_slice path 0 idx
+
+let ensure_parent_dir : string -> bool = fn path ->
+  let parent = dirname path in
+  if parent == "." then true else ensure_dir parent
+
+let write_text_ensured : string -> string -> bool = fn path content ->
+  if ensure_parent_dir path then write_text path content else false
+
+let write_bytes_ensured : string -> string -> bool = fn path content ->
+  if ensure_parent_dir path then write_bytes path content else false
+
+let basename : string -> string = fn path ->
+  let n = string_length path in
+  if n == 0 then ""
+  else
+    let last = n - 1 in
+    let idx = last_sep_idx path last in
+    if idx < 0 then path
+    else
+      let start = idx + 1 in
+      let len = n - start in
+      string_slice path start len
+
+let extension : string -> string = fn path ->
+  let base = basename path in
+  let dot = Text.last_index_of "." base in
+  if dot <= 0 then ""
+  else
+    let start = dot + 1 in
+    let len = Text.length base - start in
+    Text.slice base start len
+
+let stem : string -> string = fn path ->
+  let base = basename path in
+  let dot = Text.last_index_of "." base in
+  if dot <= 0 then base
+  else Text.slice base 0 dot
+
+let has_extension : string -> string -> bool = fn ext path -> extension path == ext
+
+let replace_extension : string -> string -> string = fn ext path ->
+  let dir = dirname path in
+  let root = stem path in
+  let base = if ext == "" then root else root ++ "." ++ ext in
+  if dir == "." then base else path_join dir base
+
+let replace_basename : string -> string -> string = fn new_base path ->
+  let dir = dirname path in
+  if dir == "." then new_base else path_join dir new_base
+
+let is_abs_path : string -> bool = fn path ->
+  (Text.length path > 0) and (Text.char_at path 0 == "/")
+
+let is_hidden_name : string -> bool = fn path ->
+  let base = basename path in
+  (Text.length base > 1) and (Text.char_at base 0 == ".")
+
+let parent_or_self : string -> string = fn path ->
+  let dir = dirname path in
+  if dir == "." then path else dir
+
+let copy_text : string -> string -> bool = fn src dst ->
+  let s = read_file src in
+  if s == "" then false
+  else write_file dst s
+
+let copy_bytes : string -> string -> bool = fn src dst -> copy_text src dst

@@ -1,15 +1,42 @@
 # io.fxsh - compatibility layer (prefer stdlib/os.fxsh)
 
+import Fs
+
 type 'a result = Ok of 'a | Err of string
 
 let exists = fn path -> Ok (file_exists path)
+let is_dir_path = fn path -> Ok (is_dir path)
+let is_file_path = fn path -> Ok (is_file path)
+let list_dir_paths = fn path -> Ok (list_dir path)
+let walk_dir_paths = fn path -> Ok (walk_dir path)
+let current_dir = Ok (cwd())
+let file_size_bytes = fn path -> Ok (file_size path)
+let ensure_dir = fn path -> Ok (mkdir_p path)
+let delete_file = fn path -> Ok (remove_file path)
+let move_path = fn src dst -> Ok (rename_path src dst)
+let basename = fn path -> Ok (Fs.basename path)
+let dirname = fn path -> Ok (Fs.dirname path)
+let extension = fn path -> Ok (Fs.extension path)
+let stem = fn path -> Ok (Fs.stem path)
+let has_extension = fn ext path -> Ok (Fs.has_extension ext path)
+let replace_extension = fn ext path -> Ok (Fs.replace_extension ext path)
+let replace_basename = fn base path -> Ok (Fs.replace_basename base path)
+let parent_or_self = fn path -> Ok (Fs.parent_or_self path)
+let ensure_parent_dir = fn path -> Ok (Fs.ensure_parent_dir path)
 
 let read_text = fn path ->
   let s = read_file path in
   if s == "" then Err "read failed or empty" else Ok s
 
+let read_bytes = fn path -> Ok (read_file path)
+
 let write_text = fn path content ->
   if write_file path content then Ok () else Err "write failed"
+
+let write_bytes = fn path content ->
+  if write_file path content then Ok () else Err "write failed"
+
+let read_lines = fn path -> Ok (Fs.read_lines path)
 
 let copy_text = fn src dst ->
   let s = read_file src in

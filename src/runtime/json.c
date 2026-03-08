@@ -724,6 +724,115 @@ sp_str_t fxsh_json_compact(sp_str_t json) {
     return sb_take(&out);
 }
 
+sp_str_t fxsh_json_kind(sp_str_t json) {
+    json_cur_t c = {.p = json.data, .end = json.data + json.len};
+    json_skip_ws(&c);
+    if (c.p >= c.end)
+        return json_empty();
+
+    const char *kind = NULL;
+    switch (*c.p) {
+        case '{':
+            kind = "object";
+            break;
+        case '[':
+            kind = "array";
+            break;
+        case '"':
+            kind = "string";
+            break;
+        case 't':
+        case 'f':
+            kind = "bool";
+            break;
+        case 'n':
+            kind = "null";
+            break;
+        default:
+            kind = "number";
+            break;
+    }
+    if (!json_skip_value(&c))
+        return json_empty();
+    json_skip_ws(&c);
+    if (c.p != c.end)
+        return json_empty();
+    return fxsh_from_cstr(kind);
+}
+
+sp_str_t fxsh_json_quote_string(sp_str_t s) {
+    static const char hex[] = "0123456789abcdef";
+    json_sb_t out = {0};
+    if (!sb_push_char(&out, '"')) {
+        free(out.buf);
+        return json_empty();
+    }
+    for (u32 i = 0; i < s.len; i++) {
+        unsigned char ch = (unsigned char)s.data[i];
+        switch (ch) {
+            case '"':
+                if (!sb_push_span(&out, "\\\"", 2)) {
+                    free(out.buf);
+                    return json_empty();
+                }
+                break;
+            case '\\':
+                if (!sb_push_span(&out, "\\\\", 2)) {
+                    free(out.buf);
+                    return json_empty();
+                }
+                break;
+            case '\b':
+                if (!sb_push_span(&out, "\\b", 2)) {
+                    free(out.buf);
+                    return json_empty();
+                }
+                break;
+            case '\f':
+                if (!sb_push_span(&out, "\\f", 2)) {
+                    free(out.buf);
+                    return json_empty();
+                }
+                break;
+            case '\n':
+                if (!sb_push_span(&out, "\\n", 2)) {
+                    free(out.buf);
+                    return json_empty();
+                }
+                break;
+            case '\r':
+                if (!sb_push_span(&out, "\\r", 2)) {
+                    free(out.buf);
+                    return json_empty();
+                }
+                break;
+            case '\t':
+                if (!sb_push_span(&out, "\\t", 2)) {
+                    free(out.buf);
+                    return json_empty();
+                }
+                break;
+            default:
+                if (ch < 0x20) {
+                    char esc[6] = {'\\', 'u', '0', '0', hex[(ch >> 4) & 0xF], hex[ch & 0xF]};
+                    if (!sb_push_span(&out, esc, 6)) {
+                        free(out.buf);
+                        return json_empty();
+                    }
+                } else if (!sb_push_char(&out, (char)ch)) {
+                    free(out.buf);
+                    return json_empty();
+                }
+                break;
+        }
+    }
+    if (!sb_push_char(&out, '"')) {
+        free(out.buf);
+        return json_empty();
+    }
+    return sb_take(&out);
+}
+
 bool fxsh_json_has(sp_str_t json, sp_str_t path) {
     json_path_seg_t *segs = NULL;
     u32 nsegs = 0;

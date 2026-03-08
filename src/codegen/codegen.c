@@ -172,6 +172,8 @@ static void collect_mono_specs(fxsh_ast_node_t *ast);
 static fxsh_type_t *infer_expr_type_strict_for_codegen(fxsh_ast_node_t *expr);
 static fxsh_type_t *if_result_type_hint(fxsh_ast_node_t *if_ast);
 static void emit_zero_init_for_type(codegen_ctx_t *ctx, fxsh_type_t *t);
+static fxsh_type_t *record_field_type_hint(fxsh_type_t *t, sp_str_t field);
+static void emit_unbox_from_boxed(codegen_ctx_t *ctx, fxsh_type_t *hint_t, const char *boxed_expr);
 static bool tco_has_only_var_params(fxsh_ast_list_t params);
 static bool tco_has_tail_self_call(fxsh_ast_node_t *expr, sp_str_t self_name, u32 arity);
 static void gen_tail_dispatch(codegen_ctx_t *ctx, fxsh_ast_node_t *expr, sp_str_t self_name,
@@ -208,6 +210,7 @@ typedef struct {
     sp_str_t constr_name;
     sp_str_t type_name;
     fxsh_ast_list_t arg_types;
+    fxsh_ast_list_t type_params;
 } adt_constr_sig_t;
 static sp_dyn_array(adt_constr_sig_t) g_adt_constr_sigs = SP_NULLPTR;
 static sp_dyn_array(sp_str_t) g_lambda_fn_names = SP_NULLPTR;
@@ -274,8 +277,10 @@ typedef struct {
 static sp_dyn_array(adt_init_t) g_adt_inits = SP_NULLPTR;
 
 typedef struct {
+    bool is_stmt;
     sp_str_t c_name;
     sp_str_t rhs_expr;
+    fxsh_ast_node_t *expr;
 } global_init_t;
 static sp_dyn_array(global_init_t) g_global_inits = SP_NULLPTR;
 
@@ -300,6 +305,64 @@ static adt_constr_sig_t *constr_sig_lookup(sp_str_t constr) {
             return &g_adt_constr_sigs[i];
     }
     return NULL;
+}
+
+static fxsh_type_t *cg_type_from_type_ast_with_params(fxsh_ast_node_t *ast,
+                                                      fxsh_ast_list_t param_names,
+                                                      sp_dyn_array(fxsh_type_t *) param_types) {
+    if (!ast)
+        return fxsh_type_var(g_pat_tvar_counter--);
+    switch (ast->kind) {
+        case AST_IDENT:
+            return fxsh_type_con(ast->data.ident);
+        case AST_TYPE_VAR:
+            sp_dyn_array_for(param_names, i) {
+                fxsh_ast_node_t *pn = param_names[i];
+                if (!pn)
+                    continue;
+                if (sp_str_equal(pn->data.ident, ast->data.ident) &&
+                    i < sp_dyn_array_size(param_types) && param_types[i]) {
+                    return param_types[i];
+                }
+            }
+            return fxsh_type_var(g_pat_tvar_counter--);
+        case AST_TYPE_ARROW:
+            return fxsh_type_arrow(cg_type_from_type_ast_with_params(ast->data.type_arrow.param,
+                                                                     param_names, param_types),
+                                   cg_type_from_type_ast_with_params(ast->data.type_arrow.ret,
+                                                                     param_names, param_types));
+        case AST_TYPE_APP:
+            if (!ast->data.type_con.args || sp_dyn_array_size(ast->data.type_con.args) != 2)
+                return fxsh_type_var(g_pat_tvar_counter--);
+            return fxsh_type_apply(cg_type_from_type_ast_with_params(ast->data.type_con.args[1],
+                                                                     param_names, param_types),
+                                   cg_type_from_type_ast_with_params(ast->data.type_con.args[0],
+                                                                     param_names, param_types));
+        case AST_TYPE_RECORD: {
+            sp_dyn_array(fxsh_field_t) fields = SP_NULLPTR;
+            fxsh_type_var_t row_var = -1;
+            sp_dyn_array_for(ast->data.elements, i) {
+                fxsh_ast_node_t *e = ast->data.elements[i];
+                if (!e)
+                    continue;
+                if (e->kind == AST_FIELD_ACCESS) {
+                    fxsh_field_t f = {.name = e->data.field.field,
+                                      .type = cg_type_from_type_ast_with_params(
+                                          e->data.field.object, param_names, param_types)};
+                    sp_dyn_array_push(fields, f);
+                } else if (e->kind == AST_TYPE_VAR) {
+                    row_var = g_pat_tvar_counter--;
+                }
+            }
+            fxsh_type_t *t = (fxsh_type_t *)fxsh_alloc0(sizeof(fxsh_type_t));
+            t->kind = TYPE_RECORD;
+            t->data.record.fields = fields;
+            t->data.record.row_var = row_var;
+            return t;
+        }
+        default:
+            return fxsh_type_var(g_pat_tvar_counter--);
+    }
 }
 
 static bool ast_type_is_typevar(fxsh_ast_node_t *t) {
@@ -502,45 +565,7 @@ static bool ffi_decl_returns_unit_from_ast(fxsh_ast_node_t *decl) {
 }
 
 static fxsh_type_t *cg_type_from_type_ast(fxsh_ast_node_t *ast) {
-    if (!ast)
-        return fxsh_type_var(g_pat_tvar_counter--);
-    switch (ast->kind) {
-        case AST_IDENT:
-            return fxsh_type_con(ast->data.ident);
-        case AST_TYPE_VAR:
-            return fxsh_type_var(g_pat_tvar_counter--);
-        case AST_TYPE_ARROW:
-            return fxsh_type_arrow(cg_type_from_type_ast(ast->data.type_arrow.param),
-                                   cg_type_from_type_ast(ast->data.type_arrow.ret));
-        case AST_TYPE_APP:
-            if (!ast->data.type_con.args || sp_dyn_array_size(ast->data.type_con.args) != 2)
-                return fxsh_type_var(g_pat_tvar_counter--);
-            return fxsh_type_apply(cg_type_from_type_ast(ast->data.type_con.args[1]),
-                                   cg_type_from_type_ast(ast->data.type_con.args[0]));
-        case AST_TYPE_RECORD: {
-            sp_dyn_array(fxsh_field_t) fields = SP_NULLPTR;
-            fxsh_type_var_t row_var = -1;
-            sp_dyn_array_for(ast->data.elements, i) {
-                fxsh_ast_node_t *e = ast->data.elements[i];
-                if (!e)
-                    continue;
-                if (e->kind == AST_FIELD_ACCESS) {
-                    fxsh_field_t f = {.name = e->data.field.field,
-                                      .type = cg_type_from_type_ast(e->data.field.object)};
-                    sp_dyn_array_push(fields, f);
-                } else if (e->kind == AST_TYPE_VAR) {
-                    row_var = g_pat_tvar_counter--;
-                }
-            }
-            fxsh_type_t *t = (fxsh_type_t *)fxsh_alloc0(sizeof(fxsh_type_t));
-            t->kind = TYPE_RECORD;
-            t->data.record.fields = fields;
-            t->data.record.row_var = row_var;
-            return t;
-        }
-        default:
-            return fxsh_type_var(g_pat_tvar_counter--);
-    }
+    return cg_type_from_type_ast_with_params(ast, SP_NULLPTR, SP_NULLPTR);
 }
 
 static fxsh_type_t *fn_type_from_let_annotation(fxsh_ast_node_t *let_ast) {
@@ -708,6 +733,15 @@ static void emit_c_type_for_type(codegen_ctx_t *ctx, fxsh_type_t *t) {
     emit_raw(ctx, "s64");
 }
 
+static void emit_c_storage_type_for_type(codegen_ctx_t *ctx, fxsh_type_t *t) {
+    t = normalize_codegen_type(t);
+    if (t && is_type_con_named(t, TYPE_UNIT)) {
+        emit_raw(ctx, "s64");
+        return;
+    }
+    emit_c_type_for_type(ctx, t);
+}
+
 static fxsh_type_t *nth_param_type(fxsh_type_t *fn_t, u32 idx) {
     fxsh_type_t *cur = fn_t;
     for (u32 i = 0; i < idx; i++) {
@@ -790,8 +824,12 @@ static fxsh_type_t *expr_mono_type_hint(fxsh_ast_node_t *e) {
             return t;
         }
         default:
-            return NULL;
+            break;
     }
+    fxsh_type_t *t = infer_expr_type_strict_for_codegen(e);
+    if (!t || type_has_var(t))
+        return NULL;
+    return t;
 }
 
 static void type_tag_into(fxsh_type_t *t, char *buf, size_t buf_sz) {
@@ -922,6 +960,9 @@ static void collect_mono_specs_expr(fxsh_ast_node_t *ast) {
     if (!ast)
         return;
     switch (ast->kind) {
+        case AST_PROGRAM:
+            sp_dyn_array_for(ast->data.decls, i) collect_mono_specs_expr(ast->data.decls[i]);
+            return;
         case AST_CALL: {
             fxsh_ast_list_t flat_args = SP_NULLPTR;
             fxsh_ast_node_t *func = ast;
@@ -1002,22 +1043,27 @@ static void collect_mono_specs_expr(fxsh_ast_node_t *ast) {
     }
 }
 
+static void collect_mono_decl_entries(fxsh_ast_node_t *ast) {
+    if (!ast)
+        return;
+    if (ast->kind == AST_PROGRAM) {
+        sp_dyn_array_for(ast->data.decls, i) collect_mono_decl_entries(ast->data.decls[i]);
+        return;
+    }
+    if ((ast->kind == AST_DECL_LET || ast->kind == AST_LET) && ast->data.let.value &&
+        ast->data.let.value->kind == AST_LAMBDA) {
+        mono_decl_entry_t e = {.name = ast->data.let.name, .decl = ast};
+        sp_dyn_array_push(g_mono_decls, e);
+    }
+}
+
 static void collect_mono_specs(fxsh_ast_node_t *ast) {
     g_mono_decls = SP_NULLPTR;
     g_mono_specs = SP_NULLPTR;
     if (!ast || ast->kind != AST_PROGRAM)
         return;
 
-    sp_dyn_array_for(ast->data.decls, i) {
-        fxsh_ast_node_t *d = ast->data.decls[i];
-        if (!d)
-            continue;
-        if ((d->kind == AST_DECL_LET || d->kind == AST_LET) && d->data.let.value &&
-            d->data.let.value->kind == AST_LAMBDA) {
-            mono_decl_entry_t e = {.name = d->data.let.name, .decl = d};
-            sp_dyn_array_push(g_mono_decls, e);
-        }
-    }
+    collect_mono_decl_entries(ast);
 
     sp_dyn_array_for(ast->data.decls, i) {
         collect_mono_specs_expr(ast->data.decls[i]);
@@ -1038,6 +1084,30 @@ static mono_spec_t *mono_spec_lookup_call(sp_str_t fn_name, fxsh_ast_list_t call
             return &g_mono_specs[i];
     }
     return NULL;
+}
+
+static bool flatten_curried_lambda_groups(fxsh_ast_node_t *lam,
+                                          sp_dyn_array(fxsh_ast_list_t) * out_groups,
+                                          fxsh_ast_node_t **out_final_body) {
+    if (!lam || lam->kind != AST_LAMBDA || !out_groups || !out_final_body)
+        return false;
+    fxsh_ast_node_t *cur = lam;
+    fxsh_ast_node_t *final_body = NULL;
+    while (cur && cur->kind == AST_LAMBDA) {
+        if (!cur->data.lambda.params || sp_dyn_array_size(cur->data.lambda.params) == 0)
+            return false;
+        sp_dyn_array_push(*out_groups, cur->data.lambda.params);
+        if (cur->data.lambda.body && cur->data.lambda.body->kind == AST_LAMBDA) {
+            cur = cur->data.lambda.body;
+        } else {
+            final_body = cur->data.lambda.body;
+            break;
+        }
+    }
+    if (!final_body)
+        return false;
+    *out_final_body = final_body;
+    return true;
 }
 
 static bool is_pat_var_node(fxsh_ast_node_t *p) {
@@ -1123,7 +1193,8 @@ static void gen_type_def_struct(codegen_ctx_t *ctx, fxsh_ast_node_t *ast) {
         sp_dyn_array_push(g_adt_constrs, ce);
         adt_constr_sig_t sig = {.constr_name = c->data.data_constr.name,
                                 .type_name = type_name,
-                                .arg_types = c->data.data_constr.arg_types};
+                                .arg_types = c->data.data_constr.arg_types,
+                                .type_params = ast->data.type_def.type_params};
         sp_dyn_array_push(g_adt_constr_sigs, sig);
         emit_indent(ctx);
         emit_raw(ctx, "fxsh_tag_");
@@ -1425,7 +1496,11 @@ static void gen_binary(codegen_ctx_t *ctx, fxsh_ast_node_t *ast) {
         return;
     }
     if (ast->data.binary.op == TOK_EQ || ast->data.binary.op == TOK_NEQ) {
-        bool str_cmp = (ast->data.binary.left && ast->data.binary.left->kind == AST_LIT_STRING) ||
+        fxsh_type_t *left_t = infer_expr_type_strict_for_codegen(ast->data.binary.left);
+        fxsh_type_t *right_t = infer_expr_type_strict_for_codegen(ast->data.binary.right);
+        bool str_cmp = is_type_con_named(left_t, TYPE_STRING) ||
+                       is_type_con_named(right_t, TYPE_STRING) ||
+                       (ast->data.binary.left && ast->data.binary.left->kind == AST_LIT_STRING) ||
                        (ast->data.binary.right && ast->data.binary.right->kind == AST_LIT_STRING);
         if (str_cmp) {
             if (ast->data.binary.op == TOK_NEQ)
@@ -1575,11 +1650,41 @@ static void gen_call(codegen_ctx_t *ctx, fxsh_ast_node_t *ast) {
                 return;
             }
         }
+        if (can_builtin && cg_name_eq(fname, "argv0")) {
+            if (sp_dyn_array_size(flat_args) == 1) {
+                emit_raw(ctx, "fxsh_argv0_rt()");
+                sp_dyn_array_free(flat_args);
+                return;
+            }
+        }
+        if (can_builtin && cg_name_eq(fname, "argc")) {
+            if (sp_dyn_array_size(flat_args) == 1) {
+                emit_raw(ctx, "fxsh_argc_rt()");
+                sp_dyn_array_free(flat_args);
+                return;
+            }
+        }
+        if (can_builtin && cg_name_eq(fname, "argv_at")) {
+            if (sp_dyn_array_size(flat_args) == 1) {
+                emit_raw(ctx, "fxsh_argv_at_rt(");
+                gen_expr(ctx, flat_args[0]);
+                emit_raw(ctx, ")");
+                sp_dyn_array_free(flat_args);
+                return;
+            }
+        }
         if (can_builtin && cg_name_eq(fname, "getenv")) {
             if (sp_dyn_array_size(flat_args) == 1) {
                 emit_raw(ctx, "fxsh_getenv_rt(");
                 gen_expr(ctx, flat_args[0]);
                 emit_raw(ctx, ")");
+                sp_dyn_array_free(flat_args);
+                return;
+            }
+        }
+        if (can_builtin && cg_name_eq(fname, "cwd")) {
+            if (sp_dyn_array_size(flat_args) == 1) {
+                emit_raw(ctx, "fxsh_getcwd_rt()");
                 sp_dyn_array_free(flat_args);
                 return;
             }
@@ -1593,9 +1698,162 @@ static void gen_call(codegen_ctx_t *ctx, fxsh_ast_node_t *ast) {
                 return;
             }
         }
+        if (can_builtin && cg_name_eq(fname, "is_dir")) {
+            if (sp_dyn_array_size(flat_args) == 1) {
+                emit_raw(ctx, "fxsh_is_dir_rt(");
+                gen_expr(ctx, flat_args[0]);
+                emit_raw(ctx, ")");
+                sp_dyn_array_free(flat_args);
+                return;
+            }
+        }
+        if (can_builtin && cg_name_eq(fname, "is_file")) {
+            if (sp_dyn_array_size(flat_args) == 1) {
+                emit_raw(ctx, "fxsh_is_file_rt(");
+                gen_expr(ctx, flat_args[0]);
+                emit_raw(ctx, ")");
+                sp_dyn_array_free(flat_args);
+                return;
+            }
+        }
         if (can_builtin && cg_name_eq(fname, "read_file")) {
             if (sp_dyn_array_size(flat_args) == 1) {
                 emit_raw(ctx, "fxsh_read_file(");
+                gen_expr(ctx, flat_args[0]);
+                emit_raw(ctx, ")");
+                sp_dyn_array_free(flat_args);
+                return;
+            }
+        }
+        if (can_builtin && cg_name_eq(fname, "file_size")) {
+            if (sp_dyn_array_size(flat_args) == 1) {
+                emit_raw(ctx, "fxsh_file_size_rt(");
+                gen_expr(ctx, flat_args[0]);
+                emit_raw(ctx, ")");
+                sp_dyn_array_free(flat_args);
+                return;
+            }
+        }
+        if (can_builtin && cg_name_eq(fname, "mkdir_p")) {
+            if (sp_dyn_array_size(flat_args) == 1) {
+                emit_raw(ctx, "fxsh_mkdir_p_rt(");
+                gen_expr(ctx, flat_args[0]);
+                emit_raw(ctx, ")");
+                sp_dyn_array_free(flat_args);
+                return;
+            }
+        }
+        if (can_builtin && cg_name_eq(fname, "remove_file")) {
+            if (sp_dyn_array_size(flat_args) == 1) {
+                emit_raw(ctx, "fxsh_remove_file_rt(");
+                gen_expr(ctx, flat_args[0]);
+                emit_raw(ctx, ")");
+                sp_dyn_array_free(flat_args);
+                return;
+            }
+        }
+        if (can_builtin && cg_name_eq(fname, "rename_path")) {
+            if (sp_dyn_array_size(flat_args) == 2) {
+                emit_raw(ctx, "fxsh_rename_path_rt(");
+                gen_expr(ctx, flat_args[1]);
+                emit_raw(ctx, ", ");
+                gen_expr(ctx, flat_args[0]);
+                emit_raw(ctx, ")");
+                sp_dyn_array_free(flat_args);
+                return;
+            }
+        }
+        if (can_builtin && cg_name_eq(fname, "string_length")) {
+            if (sp_dyn_array_size(flat_args) == 1) {
+                emit_raw(ctx, "fxsh_str_len_rt(");
+                gen_expr(ctx, flat_args[0]);
+                emit_raw(ctx, ")");
+                sp_dyn_array_free(flat_args);
+                return;
+            }
+        }
+        if (can_builtin && cg_name_eq(fname, "string_slice")) {
+            if (sp_dyn_array_size(flat_args) == 3) {
+                emit_raw(ctx, "fxsh_str_slice_rt(");
+                gen_expr(ctx, flat_args[2]);
+                emit_raw(ctx, ", ");
+                gen_expr(ctx, flat_args[1]);
+                emit_raw(ctx, ", ");
+                gen_expr(ctx, flat_args[0]);
+                emit_raw(ctx, ")");
+                sp_dyn_array_free(flat_args);
+                return;
+            }
+        }
+        if (can_builtin && cg_name_eq(fname, "string_find")) {
+            if (sp_dyn_array_size(flat_args) == 2) {
+                emit_raw(ctx, "fxsh_str_find_rt(");
+                gen_expr(ctx, flat_args[1]);
+                emit_raw(ctx, ", ");
+                gen_expr(ctx, flat_args[0]);
+                emit_raw(ctx, ")");
+                sp_dyn_array_free(flat_args);
+                return;
+            }
+        }
+        if (can_builtin && cg_name_eq(fname, "string_find_from")) {
+            if (sp_dyn_array_size(flat_args) == 3) {
+                emit_raw(ctx, "fxsh_str_find_from_rt(");
+                gen_expr(ctx, flat_args[2]);
+                emit_raw(ctx, ", ");
+                gen_expr(ctx, flat_args[1]);
+                emit_raw(ctx, ", ");
+                gen_expr(ctx, flat_args[0]);
+                emit_raw(ctx, ")");
+                sp_dyn_array_free(flat_args);
+                return;
+            }
+        }
+        if (can_builtin && cg_name_eq(fname, "string_starts_with")) {
+            if (sp_dyn_array_size(flat_args) == 2) {
+                emit_raw(ctx, "fxsh_str_starts_with_rt(");
+                gen_expr(ctx, flat_args[1]);
+                emit_raw(ctx, ", ");
+                gen_expr(ctx, flat_args[0]);
+                emit_raw(ctx, ")");
+                sp_dyn_array_free(flat_args);
+                return;
+            }
+        }
+        if (can_builtin && cg_name_eq(fname, "string_ends_with")) {
+            if (sp_dyn_array_size(flat_args) == 2) {
+                emit_raw(ctx, "fxsh_str_ends_with_rt(");
+                gen_expr(ctx, flat_args[1]);
+                emit_raw(ctx, ", ");
+                gen_expr(ctx, flat_args[0]);
+                emit_raw(ctx, ")");
+                sp_dyn_array_free(flat_args);
+                return;
+            }
+        }
+        if (can_builtin && cg_name_eq(fname, "string_trim")) {
+            if (sp_dyn_array_size(flat_args) == 1) {
+                emit_raw(ctx, "fxsh_str_trim_rt(");
+                gen_expr(ctx, flat_args[0]);
+                emit_raw(ctx, ")");
+                sp_dyn_array_free(flat_args);
+                return;
+            }
+        }
+        if (can_builtin && cg_name_eq(fname, "byte_at")) {
+            if (sp_dyn_array_size(flat_args) == 2) {
+                emit_raw(ctx, "fxsh_byte_at_rt(");
+                gen_expr(ctx, flat_args[1]);
+                emit_raw(ctx, ", ");
+                gen_expr(ctx, flat_args[0]);
+                emit_raw(ctx, ")");
+                sp_dyn_array_free(flat_args);
+                return;
+            }
+        }
+        if (can_builtin && cg_name_eq(fname, "byte_to_string")) {
+            if (sp_dyn_array_size(flat_args) == 1) {
+                emit_raw(ctx, "fxsh_byte_to_string_rt(");
                 gen_expr(ctx, flat_args[0]);
                 emit_raw(ctx, ")");
                 sp_dyn_array_free(flat_args);
@@ -1830,6 +2088,42 @@ static void gen_call(codegen_ctx_t *ctx, fxsh_ast_node_t *ast) {
                 return;
             }
         }
+        if (can_builtin && cg_name_eq(fname, "list_dir")) {
+            if (sp_dyn_array_size(flat_args) == 1) {
+                emit_raw(ctx, "fxsh_lines_to_list(fxsh_list_dir_text_rt(");
+                gen_expr(ctx, flat_args[0]);
+                emit_raw(ctx, "))");
+                sp_dyn_array_free(flat_args);
+                return;
+            }
+        }
+        if (can_builtin && cg_name_eq(fname, "walk_dir")) {
+            if (sp_dyn_array_size(flat_args) == 1) {
+                emit_raw(ctx, "fxsh_lines_to_list(fxsh_walk_dir_text_rt(");
+                gen_expr(ctx, flat_args[0]);
+                emit_raw(ctx, "))");
+                sp_dyn_array_free(flat_args);
+                return;
+            }
+        }
+        if (can_builtin && cg_name_eq(fname, "split_lines")) {
+            if (sp_dyn_array_size(flat_args) == 1) {
+                emit_raw(ctx, "fxsh_lines_to_list(");
+                gen_expr(ctx, flat_args[0]);
+                emit_raw(ctx, ")");
+                sp_dyn_array_free(flat_args);
+                return;
+            }
+        }
+        if (can_builtin && cg_name_eq(fname, "split_words")) {
+            if (sp_dyn_array_size(flat_args) == 1) {
+                emit_raw(ctx, "fxsh_lines_to_list(fxsh_split_words_rt(");
+                gen_expr(ctx, flat_args[0]);
+                emit_raw(ctx, "))");
+                sp_dyn_array_free(flat_args);
+                return;
+            }
+        }
         if (can_builtin && cg_name_eq(fname, "grep_lines")) {
             if (sp_dyn_array_size(flat_args) == 2) {
                 emit_raw(ctx, "fxsh_grep_lines_regex(");
@@ -1866,6 +2160,24 @@ static void gen_call(codegen_ctx_t *ctx, fxsh_ast_node_t *ast) {
         if (can_builtin && cg_name_eq(fname, "json_compact")) {
             if (sp_dyn_array_size(flat_args) == 1) {
                 emit_raw(ctx, "fxsh_json_compact(");
+                gen_expr(ctx, flat_args[0]);
+                emit_raw(ctx, ")");
+                sp_dyn_array_free(flat_args);
+                return;
+            }
+        }
+        if (can_builtin && cg_name_eq(fname, "json_kind")) {
+            if (sp_dyn_array_size(flat_args) == 1) {
+                emit_raw(ctx, "fxsh_json_kind(");
+                gen_expr(ctx, flat_args[0]);
+                emit_raw(ctx, ")");
+                sp_dyn_array_free(flat_args);
+                return;
+            }
+        }
+        if (can_builtin && cg_name_eq(fname, "json_quote_string")) {
+            if (sp_dyn_array_size(flat_args) == 1) {
+                emit_raw(ctx, "fxsh_json_quote_string(");
                 gen_expr(ctx, flat_args[0]);
                 emit_raw(ctx, ")");
                 sp_dyn_array_free(flat_args);
@@ -2090,27 +2402,25 @@ static void gen_call(codegen_ctx_t *ctx, fxsh_ast_node_t *ast) {
                 return;
             }
         }
-        if (!is_closure_fn_name(fname)) {
-            fxsh_ast_list_t args_in_order = SP_NULLPTR;
-            for (s32 i = (s32)sp_dyn_array_size(flat_args) - 1; i >= 0; i--) {
-                sp_dyn_array_push(args_in_order, flat_args[i]);
-            }
-            mono_spec_t *ms = mono_spec_lookup_call(fname, args_in_order);
-            if (ms) {
-                emit_string(ctx, ms->c_name);
-                emit_raw(ctx, "(");
-                for (u32 i = 0; i < (u32)sp_dyn_array_size(args_in_order); i++) {
-                    if (i > 0)
-                        emit_raw(ctx, ", ");
-                    gen_expr(ctx, args_in_order[i]);
-                }
-                emit_raw(ctx, ")");
-                sp_dyn_array_free(args_in_order);
-                sp_dyn_array_free(flat_args);
-                return;
-            }
-            sp_dyn_array_free(args_in_order);
+        fxsh_ast_list_t args_in_order = SP_NULLPTR;
+        for (s32 i = (s32)sp_dyn_array_size(flat_args) - 1; i >= 0; i--) {
+            sp_dyn_array_push(args_in_order, flat_args[i]);
         }
+        mono_spec_t *ms = mono_spec_lookup_call(fname, args_in_order);
+        if (ms) {
+            emit_string(ctx, ms->c_name);
+            emit_raw(ctx, "(");
+            for (u32 i = 0; i < (u32)sp_dyn_array_size(args_in_order); i++) {
+                if (i > 0)
+                    emit_raw(ctx, ", ");
+                gen_expr(ctx, args_in_order[i]);
+            }
+            emit_raw(ctx, ")");
+            sp_dyn_array_free(args_in_order);
+            sp_dyn_array_free(flat_args);
+            return;
+        }
+        sp_dyn_array_free(args_in_order);
 
         if (is_closure_fn_name(fname)) {
             closure_info_t *ci = closure_info_lookup(fname);
@@ -2460,7 +2770,13 @@ static void gen_boxed_expr(codegen_ctx_t *ctx, fxsh_ast_node_t *expr) {
             return;
         }
         case AST_CALL:
-        case AST_FIELD_ACCESS: {
+        case AST_FIELD_ACCESS:
+        case AST_BINARY:
+        case AST_UNARY:
+        case AST_IF:
+        case AST_LET_IN:
+        case AST_MATCH:
+        case AST_PIPE: {
             fxsh_type_t *t = infer_expr_type_strict_for_codegen(expr);
             if (list_type_elem_hint(t, NULL)) {
                 emit_raw(ctx, "fxsh_box_list(");
@@ -2563,11 +2879,14 @@ static void gen_record(codegen_ctx_t *ctx, fxsh_ast_node_t *ast) {
 }
 
 static void gen_field_access(codegen_ctx_t *ctx, fxsh_ast_node_t *ast) {
-    emit_raw(ctx, "fxsh_unbox_i64(fxsh_record_get(");
+    fxsh_type_t *field_t = infer_expr_type_strict_for_codegen(ast);
+    emit_raw(ctx, "({ fxsh_value_t _rf = fxsh_record_get(");
     gen_expr(ctx, ast->data.field.object);
     emit_raw(ctx, ", \"");
     emit_string(ctx, ast->data.field.field);
-    emit_raw(ctx, "\"))");
+    emit_raw(ctx, "\"); ");
+    emit_unbox_from_boxed(ctx, field_t, "_rf");
+    emit_raw(ctx, "; })");
 }
 
 static void gen_let_in(codegen_ctx_t *ctx, fxsh_ast_node_t *ast) {
@@ -2710,6 +3029,42 @@ static fxsh_type_t *record_field_type_hint(fxsh_type_t *t, sp_str_t field) {
     return NULL;
 }
 
+static bool collect_type_app_args(fxsh_type_t *t, sp_dyn_array(fxsh_type_t *) * out_args,
+                                  fxsh_type_t **out_head) {
+    if (!out_args)
+        return false;
+    sp_dyn_array(fxsh_type_t *) rev = SP_NULLPTR;
+    while (t && t->kind == TYPE_APP) {
+        sp_dyn_array_push(rev, t->data.app.arg);
+        t = t->data.app.con;
+    }
+    if (out_head)
+        *out_head = t;
+    for (s32 i = (s32)sp_dyn_array_size(rev) - 1; i >= 0; i--) {
+        sp_dyn_array_push(*out_args, rev[i]);
+    }
+    sp_dyn_array_free(rev);
+    return true;
+}
+
+static fxsh_type_t *constr_arg_type_hint(sp_str_t constr, u32 idx, fxsh_type_t *scrutinee_t) {
+    adt_constr_sig_t *sig = constr_sig_lookup(constr);
+    if (!sig || !sig->arg_types || idx >= sp_dyn_array_size(sig->arg_types))
+        return NULL;
+
+    sp_dyn_array(fxsh_type_t *) param_types = SP_NULLPTR;
+    if (sig->type_params && scrutinee_t) {
+        fxsh_type_t *head = NULL;
+        collect_type_app_args(scrutinee_t, &param_types, &head);
+        head = normalize_codegen_type(head);
+        if (!head || head->kind != TYPE_CON || !sp_str_equal(head->data.con, sig->type_name)) {
+            sp_dyn_array_free(param_types);
+            param_types = SP_NULLPTR;
+        }
+    }
+    return cg_type_from_type_ast_with_params(sig->arg_types[idx], sig->type_params, param_types);
+}
+
 static fxsh_type_t *list_elem_type_hint(fxsh_type_t *t) {
     fxsh_type_t *elem = NULL;
     return list_type_elem_hint(t, &elem) ? elem : NULL;
@@ -2756,6 +3111,63 @@ static fxsh_type_t *pat_var_type_lookup(sp_str_t name) {
 static void pat_var_types_push_local_types(void) {
     sp_dyn_array_for(g_pat_var_types, i) {
         local_type_push(g_pat_var_types[i].name, g_pat_var_types[i].type);
+    }
+}
+
+static void pat_var_type_bind_hint(sp_str_t name, fxsh_type_t *type) {
+    if (!name.data || !type || type_has_var(type))
+        return;
+    sp_dyn_array_for(g_pat_var_types, i) {
+        if (sp_str_equal(g_pat_var_types[i].name, name)) {
+            g_pat_var_types[i].type = type;
+            return;
+        }
+    }
+    pat_var_type_entry_t e = {.name = name, .type = type};
+    sp_dyn_array_push(g_pat_var_types, e);
+}
+
+static void seed_pattern_var_types_from_hint(fxsh_ast_node_t *pat, fxsh_type_t *hint_t) {
+    if (!pat || !hint_t)
+        return;
+    if (is_pat_var_node(pat)) {
+        pat_var_type_bind_hint(pat->data.ident, hint_t);
+        return;
+    }
+    switch (pat->kind) {
+        case AST_PAT_TUPLE:
+            sp_dyn_array_for(pat->data.elements, i) seed_pattern_var_types_from_hint(
+                pat->data.elements[i], tuple_elem_type_hint(hint_t, (u32)i));
+            return;
+        case AST_PAT_RECORD:
+            sp_dyn_array_for(pat->data.elements, i) {
+                fxsh_ast_node_t *f = pat->data.elements[i];
+                if (!f || f->kind != AST_FIELD_ACCESS || !f->data.field.object)
+                    continue;
+                seed_pattern_var_types_from_hint(
+                    f->data.field.object, record_field_type_hint(hint_t, f->data.field.field));
+            }
+            return;
+        case AST_PAT_CONSTR:
+            sp_dyn_array_for(pat->data.constr_appl.args, i) seed_pattern_var_types_from_hint(
+                pat->data.constr_appl.args[i],
+                constr_arg_type_hint(pat->data.constr_appl.constr_name, (u32)i, hint_t));
+            return;
+        case AST_PAT_CONS:
+            if (pat->data.elements && sp_dyn_array_size(pat->data.elements) == 2) {
+                fxsh_type_t *elem_t = list_elem_type_hint(hint_t);
+                seed_pattern_var_types_from_hint(pat->data.elements[0], elem_t);
+                seed_pattern_var_types_from_hint(pat->data.elements[1], hint_t);
+            }
+            return;
+        case AST_LIST: {
+            fxsh_type_t *elem_t = list_elem_type_hint(hint_t);
+            sp_dyn_array_for(pat->data.elements, i)
+                seed_pattern_var_types_from_hint(pat->data.elements[i], elem_t);
+            return;
+        }
+        default:
+            return;
     }
 }
 
@@ -2846,6 +3258,7 @@ static bool derive_pattern_var_types_from_match(fxsh_ast_node_t *pat, fxsh_type_
     sp_dyn_array_for(g_pat_var_types, i) {
         fxsh_type_apply_subst(subst, &g_pat_var_types[i].type);
     }
+    seed_pattern_var_types_from_hint(pat, scrutinee_t);
     return true;
 }
 
@@ -2923,14 +3336,15 @@ static void gen_pattern_bindings(codegen_ctx_t *ctx, fxsh_ast_node_t *pat, const
                              (unsigned)j);
                 }
                 bool field_boxed = constr_arg_is_boxed_typevar(cname, (u32)j);
+                fxsh_type_t *arg_hint = constr_arg_type_hint(cname, (u32)j, hint_t);
                 if (!field_boxed && constr_arg_is_self_ptr(cname, (u32)j)) {
                     char deref_expr[320];
                     snprintf(deref_expr, sizeof(deref_expr), "(*%s)", field_expr);
                     gen_pattern_bindings(ctx, pat->data.constr_appl.args[j], deref_expr, false,
-                                         NULL);
+                                         arg_hint);
                 } else {
                     gen_pattern_bindings(ctx, pat->data.constr_appl.args[j], field_expr,
-                                         field_boxed, NULL);
+                                         field_boxed, arg_hint);
                 }
             }
             break;
@@ -3753,6 +4167,12 @@ static fxsh_type_t *guess_expr_type_for_codegen(fxsh_ast_node_t *expr) {
         rt->data.record.row_var = -1;
         return rt;
     }
+    if (expr->kind == AST_FIELD_ACCESS) {
+        fxsh_type_t *obj_t = guess_expr_type_for_codegen(expr->data.field.object);
+        fxsh_type_t *field_t = record_field_type_hint(obj_t, expr->data.field.field);
+        if (field_t)
+            return field_t;
+    }
     if (expr->kind == AST_LIST) {
         fxsh_type_t *elem_t = fxsh_type_con(TYPE_INT);
         if (expr->data.elements && sp_dyn_array_size(expr->data.elements) > 0) {
@@ -3778,7 +4198,7 @@ static fxsh_type_t *infer_expr_type_strict_for_codegen(fxsh_ast_node_t *expr) {
     fxsh_type_env_t env = g_codegen_type_env;
     fxsh_constr_env_t cenv = g_codegen_constr_env;
     fxsh_type_t *out_t = NULL;
-    if (fxsh_type_infer(expr, &env, &cenv, &out_t) == ERR_OK && out_t)
+    if (fxsh_type_infer(expr, &env, &cenv, &out_t) == ERR_OK && out_t && !type_has_var(out_t))
         return out_t;
     return guess_expr_type_for_codegen(expr);
 }
@@ -4389,18 +4809,8 @@ static bool gen_decl_let_closure_generic(codegen_ctx_t *ctx, fxsh_ast_node_t *as
 
     sp_dyn_array(fxsh_ast_list_t) groups = SP_NULLPTR;
     fxsh_ast_node_t *final_body = NULL;
-    fxsh_ast_node_t *cur_lam = lam;
-    while (cur_lam && cur_lam->kind == AST_LAMBDA) {
-        if (!cur_lam->data.lambda.params || sp_dyn_array_size(cur_lam->data.lambda.params) == 0)
-            return false;
-        sp_dyn_array_push(groups, cur_lam->data.lambda.params);
-        if (cur_lam->data.lambda.body && cur_lam->data.lambda.body->kind == AST_LAMBDA) {
-            cur_lam = cur_lam->data.lambda.body;
-        } else {
-            final_body = cur_lam->data.lambda.body;
-            break;
-        }
-    }
+    if (!flatten_curried_lambda_groups(lam, &groups, &final_body))
+        return false;
     if (sp_dyn_array_size(groups) < 2 || !final_body)
         return false;
 
@@ -4628,12 +5038,19 @@ static void gen_decl_let_mono_specs(codegen_ctx_t *ctx, fxsh_ast_node_t *ast) {
         return;
 
     fxsh_ast_node_t *lam = ast->data.let.value;
+    sp_dyn_array(fxsh_ast_list_t) groups = SP_NULLPTR;
+    fxsh_ast_node_t *final_body = NULL;
+    if (!flatten_curried_lambda_groups(lam, &groups, &final_body))
+        return;
+
+    u32 total_params = 0;
+    sp_dyn_array_for(groups, gi) total_params += (u32)sp_dyn_array_size(groups[gi]);
+
     sp_dyn_array_for(g_mono_specs, i) {
         mono_spec_t *ms = &g_mono_specs[i];
         if (!sp_str_equal(ms->fn_name, ast->data.let.name))
             continue;
-        if (!lam->data.lambda.params ||
-            sp_dyn_array_size(lam->data.lambda.params) != sp_dyn_array_size(ms->arg_types))
+        if ((u32)sp_dyn_array_size(ms->arg_types) != total_params)
             continue;
 
         emit_indent(ctx);
@@ -4643,29 +5060,35 @@ static void gen_decl_let_mono_specs(codegen_ctx_t *ctx, fxsh_ast_node_t *ast) {
         emit_string(ctx, ms->c_name);
         emit_raw(ctx, "(");
         u32 lty_m = local_type_mark();
-        sp_dyn_array_for(lam->data.lambda.params, pi) {
-            if (pi > 0)
-                emit_raw(ctx, ", ");
-            emit_c_type_for_type(ctx, ms->arg_types[pi]);
-            emit_raw(ctx, " ");
-            fxsh_ast_node_t *p = lam->data.lambda.params[pi];
-            if (is_pat_var_node(p)) {
-                emit_mangled(ctx, p->data.ident);
-                local_type_push(p->data.ident, ms->arg_types[pi]);
-            } else
-                emit_fmt(ctx, "_arg%u", (unsigned)pi);
+        u32 arg_idx = 0;
+        sp_dyn_array_for(groups, gi) {
+            fxsh_ast_list_t params = groups[gi];
+            sp_dyn_array_for(params, pi) {
+                if (arg_idx > 0)
+                    emit_raw(ctx, ", ");
+                emit_c_type_for_type(ctx, ms->arg_types[arg_idx]);
+                emit_raw(ctx, " ");
+                fxsh_ast_node_t *p = params[pi];
+                if (is_pat_var_node(p)) {
+                    emit_mangled(ctx, p->data.ident);
+                    local_type_push(p->data.ident, ms->arg_types[arg_idx]);
+                } else {
+                    emit_fmt(ctx, "_arg%u", (unsigned)arg_idx);
+                }
+                arg_idx++;
+            }
         }
         emit_raw(ctx, ") {\n");
         ctx->indent_level++;
         emit_indent(ctx);
         if (is_type_con_named(ms->ret_type, TYPE_UNIT)) {
-            gen_expr(ctx, lam->data.lambda.body);
+            gen_expr(ctx, final_body);
             emit_raw(ctx, ";\n");
             emit_indent(ctx);
             emit_raw(ctx, "return;\n");
         } else {
             emit_raw(ctx, "return ");
-            gen_expr(ctx, lam->data.lambda.body);
+            gen_expr(ctx, final_body);
             emit_raw(ctx, ";\n");
         }
         ctx->indent_level--;
@@ -4904,13 +5327,13 @@ static void gen_decl_let(codegen_ctx_t *ctx, fxsh_ast_node_t *ast) {
     if (is_closure_value) {
         emit_closure_type_name(ctx, clo_root, clo_stage);
     } else {
-        emit_c_type_for_type(ctx, vt);
+        emit_c_storage_type_for_type(ctx, vt);
     }
     emit_raw(ctx, " ");
     emit_string(ctx, cname);
     emit_raw(ctx, ";\n");
 
-    global_init_t gi = {.c_name = cname, .rhs_expr = rhs};
+    global_init_t gi = {.is_stmt = false, .c_name = cname, .rhs_expr = rhs, .expr = NULL};
     sp_dyn_array_push(g_global_inits, gi);
     sym_push_expr(ast->data.let.name, cname);
     if (is_closure_value) {
@@ -4918,6 +5341,14 @@ static void gen_decl_let(codegen_ctx_t *ctx, fxsh_ast_node_t *ast) {
             .name = ast->data.let.name, .root_fn = clo_root, .stage = clo_stage};
         sp_dyn_array_push(g_closure_values, cvi);
     }
+}
+
+static void gen_top_level_expr_init(fxsh_ast_node_t *ast) {
+    if (!ast)
+        return;
+    global_init_t gi = {
+        .is_stmt = true, .c_name = (sp_str_t){0}, .rhs_expr = (sp_str_t){0}, .expr = ast};
+    sp_dyn_array_push(g_global_inits, gi);
 }
 
 /*=============================================================================
@@ -4965,6 +5396,8 @@ static void gen_prelude(codegen_ctx_t *ctx) {
     emit_line(ctx, "typedef struct { s64 rows; s64 cols; double *data; } fxsh_tensor_t;");
     emit_line(ctx, "extern bool fxsh_json_validate(sp_str_t json);");
     emit_line(ctx, "extern sp_str_t fxsh_json_compact(sp_str_t json);");
+    emit_line(ctx, "extern sp_str_t fxsh_json_kind(sp_str_t json);");
+    emit_line(ctx, "extern sp_str_t fxsh_json_quote_string(sp_str_t s);");
     emit_line(ctx, "extern bool fxsh_json_has(sp_str_t json, sp_str_t path);");
     emit_line(ctx, "extern sp_str_t fxsh_json_get(sp_str_t json, sp_str_t path);");
     emit_line(ctx, "extern sp_str_t fxsh_json_get_string(sp_str_t json, sp_str_t path);");
@@ -4972,8 +5405,32 @@ static void gen_prelude(codegen_ctx_t *ctx) {
     emit_line(ctx, "extern f64 fxsh_json_get_float(sp_str_t json, sp_str_t path, bool *ok);");
     emit_line(ctx, "extern bool fxsh_json_get_bool(sp_str_t json, sp_str_t path, bool *ok);");
     emit_line(ctx, "");
+    emit_line(ctx, "extern void fxsh_set_argv_rt(sp_str_t argv0, s64 argc, char **argv);");
+    emit_line(ctx, "extern sp_str_t fxsh_argv0_rt(void);");
+    emit_line(ctx, "extern s64 fxsh_argc_rt(void);");
+    emit_line(ctx, "extern sp_str_t fxsh_argv_at_rt(s64 index);");
+    emit_line(ctx, "");
     emit_line(ctx, "extern sp_str_t fxsh_getenv_rt(sp_str_t key);");
     emit_line(ctx, "extern bool fxsh_file_exists_rt(sp_str_t path);");
+    emit_line(ctx, "extern bool fxsh_is_dir_rt(sp_str_t path);");
+    emit_line(ctx, "extern bool fxsh_is_file_rt(sp_str_t path);");
+    emit_line(ctx, "extern sp_str_t fxsh_list_dir_text_rt(sp_str_t path);");
+    emit_line(ctx, "extern sp_str_t fxsh_walk_dir_text_rt(sp_str_t path);");
+    emit_line(ctx, "extern sp_str_t fxsh_getcwd_rt(void);");
+    emit_line(ctx, "extern bool fxsh_mkdir_p_rt(sp_str_t path);");
+    emit_line(ctx, "extern s64 fxsh_file_size_rt(sp_str_t path);");
+    emit_line(ctx, "extern bool fxsh_remove_file_rt(sp_str_t path);");
+    emit_line(ctx, "extern bool fxsh_rename_path_rt(sp_str_t src, sp_str_t dst);");
+    emit_line(ctx, "extern s64 fxsh_str_len_rt(sp_str_t s);");
+    emit_line(ctx, "extern sp_str_t fxsh_str_slice_rt(sp_str_t s, s64 start, s64 len);");
+    emit_line(ctx, "extern s64 fxsh_str_find_rt(sp_str_t s, sp_str_t needle);");
+    emit_line(ctx, "extern s64 fxsh_str_find_from_rt(sp_str_t s, sp_str_t needle, s64 start);");
+    emit_line(ctx, "extern bool fxsh_str_starts_with_rt(sp_str_t s, sp_str_t prefix);");
+    emit_line(ctx, "extern bool fxsh_str_ends_with_rt(sp_str_t s, sp_str_t suffix);");
+    emit_line(ctx, "extern sp_str_t fxsh_str_trim_rt(sp_str_t s);");
+    emit_line(ctx, "extern s64 fxsh_byte_at_rt(sp_str_t s, s64 index);");
+    emit_line(ctx, "extern sp_str_t fxsh_byte_to_string_rt(s64 byte_value);");
+    emit_line(ctx, "extern sp_str_t fxsh_split_words_rt(sp_str_t s);");
     emit_line(ctx, "extern sp_str_t fxsh_read_file(sp_str_t path);");
     emit_line(ctx, "extern int fxsh_write_file(sp_str_t path, sp_str_t content);");
     emit_line(ctx, "extern s64 fxsh_exec_rt(sp_str_t cmd);");
@@ -5155,6 +5612,22 @@ static void gen_prelude(codegen_ctx_t *ctx) {
     emit_line(ctx, "  if (!l || l->is_nil) return fxsh_list_nil();");
     emit_line(ctx, "  return l->tail;");
     emit_line(ctx, "}");
+    emit_line(ctx, "static inline fxsh_list_t *fxsh_lines_to_list(sp_str_t text) {");
+    emit_line(ctx, "  if (!text.data || text.len == 0) return fxsh_list_nil();");
+    emit_line(ctx, "  fxsh_list_t *out = fxsh_list_nil();");
+    emit_line(ctx, "  u32 end = text.len;");
+    emit_line(ctx, "  while (end > 0) {");
+    emit_line(ctx, "    u32 start = end;");
+    emit_line(ctx, "    while (start > 0 && text.data[start - 1] != '\\n') start--;");
+    emit_line(ctx, "    if (end > start) {");
+    emit_line(ctx, "      sp_str_t line = { .data = text.data + start, .len = end - start };");
+    emit_line(ctx, "      out = fxsh_list_cons(fxsh_box_str(line), out);");
+    emit_line(ctx, "    }");
+    emit_line(ctx, "    if (start == 0) break;");
+    emit_line(ctx, "    end = start - 1;");
+    emit_line(ctx, "  }");
+    emit_line(ctx, "  return out;");
+    emit_line(ctx, "}");
     emit_line(ctx,
               "static inline fxsh_tensor_t *fxsh_tensor_new2(s64 rows, s64 cols, double fill) {");
     emit_line(ctx, "  if (rows <= 0 || cols <= 0) return NULL;");
@@ -5270,11 +5743,17 @@ static void gen_adt_init_fn(codegen_ctx_t *ctx) {
         emit_raw(ctx, ";\n");
     }
     sp_dyn_array_for(g_global_inits, i) {
-        emit_indent(ctx);
-        emit_string(ctx, g_global_inits[i].c_name);
-        emit_raw(ctx, " = ");
-        emit_string(ctx, g_global_inits[i].rhs_expr);
-        emit_raw(ctx, ";\n");
+        if (g_global_inits[i].is_stmt) {
+            emit_indent(ctx);
+            gen_expr(ctx, g_global_inits[i].expr);
+            emit_raw(ctx, ";\n");
+        } else {
+            emit_indent(ctx);
+            emit_string(ctx, g_global_inits[i].c_name);
+            emit_raw(ctx, " = ");
+            emit_string(ctx, g_global_inits[i].rhs_expr);
+            emit_raw(ctx, ";\n");
+        }
     }
     ctx->indent_level--;
     emit_line(ctx, "}");
@@ -5283,8 +5762,12 @@ static void gen_adt_init_fn(codegen_ctx_t *ctx) {
 
 static void gen_epilogue(codegen_ctx_t *ctx) {
     gen_adt_init_fn(ctx);
-    emit_line(ctx, "int main(void) {");
+    emit_line(ctx, "int main(int argc, char **argv) {");
     ctx->indent_level++;
+    emit_line(
+        ctx,
+        "fxsh_set_argv_rt(argc > 1 ? fxsh_from_cstr(argv[1]) : (argc > 0 ? fxsh_from_cstr(argv[0]) "
+        ": fxsh_from_cstr(\"\")), argc > 2 ? (s64)(argc - 2) : 0, argc > 2 ? argv + 2 : NULL);");
     if ((g_adt_inits && sp_dyn_array_size(g_adt_inits) > 0) ||
         (g_global_inits && sp_dyn_array_size(g_global_inits) > 0))
         emit_line(ctx, "fxsh_init_globals();");
@@ -5384,6 +5867,8 @@ char *fxsh_codegen(fxsh_ast_node_t *ast) {
                 gen_decl_fn(&ctx, d);
             else if (d->kind == AST_DECL_LET || d->kind == AST_LET)
                 gen_decl_let(&ctx, d);
+            else if (d->kind != AST_TYPE_DEF)
+                gen_top_level_expr_init(d);
             /* TYPE_DEF already handled */
         }
     }

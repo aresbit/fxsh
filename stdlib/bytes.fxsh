@@ -1,0 +1,58 @@
+# bytes.fxsh - byte-oriented helpers over length-delimited strings
+#
+# In fxsh 1.0, bytes are represented as `string` at runtime.
+# The important property is length-delimited storage, not zero termination.
+
+let empty = ""
+
+let of_string : string -> string = fn s -> s
+
+let to_string : string -> string = fn b -> b
+
+let length : string -> int = fn b -> string_length b
+
+let slice : string -> int -> int -> string = fn b start len -> string_slice b start len
+
+let take : int -> string -> string = fn n b ->
+  if n <= 0 then ""
+  else string_slice b 0 n
+
+let drop : int -> string -> string = fn n b ->
+  let total = length b in
+  if n <= 0 then b
+  else if n >= total then ""
+  else string_slice b n (total - n)
+
+let get : string -> int -> int = fn b idx -> byte_at b idx
+
+let singleton : int -> string = fn n -> byte_to_string n
+
+let append : string -> string -> string = fn a b -> a ++ b
+
+let concat : string -> string -> string = fn a b -> append a b
+
+let starts_with : string -> string -> bool = fn prefix b -> string_starts_with b prefix
+
+let ends_with : string -> string -> bool = fn suffix b -> string_ends_with b suffix
+
+let of_text : string -> string = fn s -> s
+
+let to_text : string -> string = fn b -> b
+
+let rec of_list : int list -> string = fn xs ->
+  match xs with
+  | [] -> ""
+  | x :: xs1 -> (byte_to_string x) ++ (of_list xs1)
+  end
+
+let rec to_list_rev : int list -> string -> int -> int list = fn acc b idx ->
+  if idx < 0 then acc
+  else
+    let head = get b idx in
+    let next_acc = head :: acc in
+    let next_idx = idx - 1 in
+    to_list_rev next_acc b next_idx
+
+let to_list : string -> int list = fn b ->
+  let last = (length b) - 1 in
+  to_list_rev [] b last

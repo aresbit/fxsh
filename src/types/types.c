@@ -1008,20 +1008,124 @@ static void ensure_builtin_env(fxsh_type_env_t *env) {
             env, sp_str_lit("print"),
             mk_mono_scheme(fxsh_type_arrow(fxsh_type_con(TYPE_STRING), fxsh_type_con(TYPE_UNIT))));
     }
+    if (!type_env_lookup(*env, sp_str_lit("argv0"))) {
+        type_env_bind(
+            env, sp_str_lit("argv0"),
+            mk_mono_scheme(fxsh_type_arrow(fxsh_type_con(TYPE_UNIT), fxsh_type_con(TYPE_STRING))));
+    }
+    if (!type_env_lookup(*env, sp_str_lit("argc"))) {
+        type_env_bind(
+            env, sp_str_lit("argc"),
+            mk_mono_scheme(fxsh_type_arrow(fxsh_type_con(TYPE_UNIT), fxsh_type_con(TYPE_INT))));
+    }
+    if (!type_env_lookup(*env, sp_str_lit("argv_at"))) {
+        type_env_bind(
+            env, sp_str_lit("argv_at"),
+            mk_mono_scheme(fxsh_type_arrow(fxsh_type_con(TYPE_INT), fxsh_type_con(TYPE_STRING))));
+    }
     if (!type_env_lookup(*env, sp_str_lit("getenv"))) {
         type_env_bind(env, sp_str_lit("getenv"),
                       mk_mono_scheme(
                           fxsh_type_arrow(fxsh_type_con(TYPE_STRING), fxsh_type_con(TYPE_STRING))));
+    }
+    if (!type_env_lookup(*env, sp_str_lit("cwd"))) {
+        type_env_bind(
+            env, sp_str_lit("cwd"),
+            mk_mono_scheme(fxsh_type_arrow(fxsh_type_con(TYPE_UNIT), fxsh_type_con(TYPE_STRING))));
     }
     if (!type_env_lookup(*env, sp_str_lit("file_exists"))) {
         type_env_bind(
             env, sp_str_lit("file_exists"),
             mk_mono_scheme(fxsh_type_arrow(fxsh_type_con(TYPE_STRING), fxsh_type_con(TYPE_BOOL))));
     }
+    if (!type_env_lookup(*env, sp_str_lit("is_dir"))) {
+        type_env_bind(
+            env, sp_str_lit("is_dir"),
+            mk_mono_scheme(fxsh_type_arrow(fxsh_type_con(TYPE_STRING), fxsh_type_con(TYPE_BOOL))));
+    }
+    if (!type_env_lookup(*env, sp_str_lit("is_file"))) {
+        type_env_bind(
+            env, sp_str_lit("is_file"),
+            mk_mono_scheme(fxsh_type_arrow(fxsh_type_con(TYPE_STRING), fxsh_type_con(TYPE_BOOL))));
+    }
     if (!type_env_lookup(*env, sp_str_lit("read_file"))) {
         type_env_bind(env, sp_str_lit("read_file"),
                       mk_mono_scheme(
                           fxsh_type_arrow(fxsh_type_con(TYPE_STRING), fxsh_type_con(TYPE_STRING))));
+    }
+    if (!type_env_lookup(*env, sp_str_lit("file_size"))) {
+        type_env_bind(
+            env, sp_str_lit("file_size"),
+            mk_mono_scheme(fxsh_type_arrow(fxsh_type_con(TYPE_STRING), fxsh_type_con(TYPE_INT))));
+    }
+    if (!type_env_lookup(*env, sp_str_lit("mkdir_p"))) {
+        type_env_bind(
+            env, sp_str_lit("mkdir_p"),
+            mk_mono_scheme(fxsh_type_arrow(fxsh_type_con(TYPE_STRING), fxsh_type_con(TYPE_BOOL))));
+    }
+    if (!type_env_lookup(*env, sp_str_lit("remove_file"))) {
+        type_env_bind(
+            env, sp_str_lit("remove_file"),
+            mk_mono_scheme(fxsh_type_arrow(fxsh_type_con(TYPE_STRING), fxsh_type_con(TYPE_BOOL))));
+    }
+    if (!type_env_lookup(*env, sp_str_lit("rename_path"))) {
+        fxsh_type_t *t =
+            fxsh_type_arrow(fxsh_type_con(TYPE_STRING),
+                            fxsh_type_arrow(fxsh_type_con(TYPE_STRING), fxsh_type_con(TYPE_BOOL)));
+        type_env_bind(env, sp_str_lit("rename_path"), mk_mono_scheme(t));
+    }
+    if (!type_env_lookup(*env, sp_str_lit("string_length"))) {
+        type_env_bind(
+            env, sp_str_lit("string_length"),
+            mk_mono_scheme(fxsh_type_arrow(fxsh_type_con(TYPE_STRING), fxsh_type_con(TYPE_INT))));
+    }
+    if (!type_env_lookup(*env, sp_str_lit("string_slice"))) {
+        fxsh_type_t *t = fxsh_type_arrow(
+            fxsh_type_con(TYPE_STRING),
+            fxsh_type_arrow(fxsh_type_con(TYPE_INT),
+                            fxsh_type_arrow(fxsh_type_con(TYPE_INT), fxsh_type_con(TYPE_STRING))));
+        type_env_bind(env, sp_str_lit("string_slice"), mk_mono_scheme(t));
+    }
+    if (!type_env_lookup(*env, sp_str_lit("string_find"))) {
+        fxsh_type_t *t =
+            fxsh_type_arrow(fxsh_type_con(TYPE_STRING),
+                            fxsh_type_arrow(fxsh_type_con(TYPE_STRING), fxsh_type_con(TYPE_INT)));
+        type_env_bind(env, sp_str_lit("string_find"), mk_mono_scheme(t));
+    }
+    if (!type_env_lookup(*env, sp_str_lit("string_find_from"))) {
+        fxsh_type_t *t = fxsh_type_arrow(
+            fxsh_type_con(TYPE_STRING),
+            fxsh_type_arrow(fxsh_type_con(TYPE_STRING),
+                            fxsh_type_arrow(fxsh_type_con(TYPE_INT), fxsh_type_con(TYPE_INT))));
+        type_env_bind(env, sp_str_lit("string_find_from"), mk_mono_scheme(t));
+    }
+    if (!type_env_lookup(*env, sp_str_lit("string_starts_with"))) {
+        fxsh_type_t *t =
+            fxsh_type_arrow(fxsh_type_con(TYPE_STRING),
+                            fxsh_type_arrow(fxsh_type_con(TYPE_STRING), fxsh_type_con(TYPE_BOOL)));
+        type_env_bind(env, sp_str_lit("string_starts_with"), mk_mono_scheme(t));
+    }
+    if (!type_env_lookup(*env, sp_str_lit("string_ends_with"))) {
+        fxsh_type_t *t =
+            fxsh_type_arrow(fxsh_type_con(TYPE_STRING),
+                            fxsh_type_arrow(fxsh_type_con(TYPE_STRING), fxsh_type_con(TYPE_BOOL)));
+        type_env_bind(env, sp_str_lit("string_ends_with"), mk_mono_scheme(t));
+    }
+    if (!type_env_lookup(*env, sp_str_lit("string_trim"))) {
+        type_env_bind(env, sp_str_lit("string_trim"),
+                      mk_mono_scheme(
+                          fxsh_type_arrow(fxsh_type_con(TYPE_STRING), fxsh_type_con(TYPE_STRING))));
+    }
+    if (!type_env_lookup(*env, sp_str_lit("byte_at"))) {
+        fxsh_type_t *t =
+            fxsh_type_arrow(fxsh_type_con(TYPE_STRING),
+                            fxsh_type_arrow(fxsh_type_con(TYPE_INT), fxsh_type_con(TYPE_INT)));
+        type_env_bind(env, sp_str_lit("byte_at"), mk_mono_scheme(t));
+    }
+    if (!type_env_lookup(*env, sp_str_lit("byte_to_string"))) {
+        type_env_bind(
+            env, sp_str_lit("byte_to_string"),
+            mk_mono_scheme(fxsh_type_arrow(fxsh_type_con(TYPE_INT), fxsh_type_con(TYPE_STRING))));
     }
     if (!type_env_lookup(*env, sp_str_lit("write_file"))) {
         fxsh_type_t *t =
@@ -1149,6 +1253,26 @@ static void ensure_builtin_env(fxsh_type_env_t *env) {
                       mk_mono_scheme(
                           fxsh_type_arrow(fxsh_type_con(TYPE_STRING), fxsh_type_con(TYPE_STRING))));
     }
+    if (!type_env_lookup(*env, sp_str_lit("list_dir"))) {
+        type_env_bind(env, sp_str_lit("list_dir"),
+                      mk_mono_scheme(fxsh_type_arrow(fxsh_type_con(TYPE_STRING),
+                                                     make_list_type(fxsh_type_con(TYPE_STRING)))));
+    }
+    if (!type_env_lookup(*env, sp_str_lit("walk_dir"))) {
+        type_env_bind(env, sp_str_lit("walk_dir"),
+                      mk_mono_scheme(fxsh_type_arrow(fxsh_type_con(TYPE_STRING),
+                                                     make_list_type(fxsh_type_con(TYPE_STRING)))));
+    }
+    if (!type_env_lookup(*env, sp_str_lit("split_lines"))) {
+        type_env_bind(env, sp_str_lit("split_lines"),
+                      mk_mono_scheme(fxsh_type_arrow(fxsh_type_con(TYPE_STRING),
+                                                     make_list_type(fxsh_type_con(TYPE_STRING)))));
+    }
+    if (!type_env_lookup(*env, sp_str_lit("split_words"))) {
+        type_env_bind(env, sp_str_lit("split_words"),
+                      mk_mono_scheme(fxsh_type_arrow(fxsh_type_con(TYPE_STRING),
+                                                     make_list_type(fxsh_type_con(TYPE_STRING)))));
+    }
     if (!type_env_lookup(*env, sp_str_lit("grep_lines"))) {
         fxsh_type_t *t = fxsh_type_arrow(
             fxsh_type_con(TYPE_STRING),
@@ -1170,6 +1294,16 @@ static void ensure_builtin_env(fxsh_type_env_t *env) {
     }
     if (!type_env_lookup(*env, sp_str_lit("json_compact"))) {
         type_env_bind(env, sp_str_lit("json_compact"),
+                      mk_mono_scheme(
+                          fxsh_type_arrow(fxsh_type_con(TYPE_STRING), fxsh_type_con(TYPE_STRING))));
+    }
+    if (!type_env_lookup(*env, sp_str_lit("json_kind"))) {
+        type_env_bind(env, sp_str_lit("json_kind"),
+                      mk_mono_scheme(
+                          fxsh_type_arrow(fxsh_type_con(TYPE_STRING), fxsh_type_con(TYPE_STRING))));
+    }
+    if (!type_env_lookup(*env, sp_str_lit("json_quote_string"))) {
+        type_env_bind(env, sp_str_lit("json_quote_string"),
                       mk_mono_scheme(
                           fxsh_type_arrow(fxsh_type_con(TYPE_STRING), fxsh_type_con(TYPE_STRING))));
     }

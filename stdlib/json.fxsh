@@ -1,75 +1,91 @@
-# json.fxsh - JSON helpers built on native json_* builtins
+# json.fxsh - native JSON helpers with total APIs
 
-type json = Json of string
+import Fs
+import Bytes
 
-type 'a result = Ok of 'a | Err of string
+let empty = { raw = "" }
 
-type 'a option = None | Some of 'a
+let empty_object = { raw = "{}" }
 
-let is_valid = fn s -> json_validate s
+let empty_array = { raw = "[]" }
 
-let compact = fn s -> json_compact s
+let is_valid_text = fn s -> json_validate s
 
-let parse = fn s ->
-  let c = json_compact s in
-  if c == "" then Err "invalid json" else Ok (Json c)
+let compact_text = fn s -> json_compact s
 
-let stringify = fn j ->
-  match j with
-  | Json s -> s
+let kind_of_text : string -> string = fn s ->
+  let k = json_kind s in
+  if k == "" then "invalid" else k
+
+let quote_string : string -> string = fn s -> json_quote_string s
+
+let encode_string : string -> string = fn s -> quote_string s
+
+let of_text : string -> { raw: string } = fn s -> { raw = compact_text s }
+
+let of_bytes : string -> { raw: string } = fn b -> of_text (Bytes.to_text b)
+
+let read_file : string -> { raw: string } = fn path ->
+  if Fs.exists path then
+    of_text (Fs.read_text path)
+  else
+    empty
   end
 
-let has = fn j path ->
-  match j with
-  | Json s -> json_has s path
+let stringify : { raw: string } -> string = fn j -> j.raw
+
+let to_bytes : { raw: string } -> string = fn j -> Bytes.of_text (stringify j)
+
+let is_valid : { raw: string } -> bool = fn j -> j.raw != ""
+
+let kind : { raw: string } -> string = fn j -> kind_of_text j.raw
+
+let write_file : string -> { raw: string } -> bool = fn path j ->
+  Fs.write_text_ensured path (stringify j)
+
+let write_bytes_file : string -> { raw: string } -> bool = fn path j ->
+  Fs.write_bytes_ensured path (to_bytes j)
+
+let has : { raw: string } -> string -> bool = fn j path -> json_has j.raw path
+
+let get_raw_text_or : { raw: string } -> string -> string -> string = fn j path fallback ->
+  if json_has j.raw path then
+    json_get j.raw path
+  else
+    fallback
   end
 
-let get_raw = fn j path ->
-  match j with
-  | Json s ->
-      if json_has s path then
-        Some (Json (json_get s path))
-      else
-        None
-      end
+let get_kind_or : { raw: string } -> string -> string -> string = fn j path fallback ->
+  if json_has j.raw path then
+    kind_of_text (json_get j.raw path)
+  else
+    fallback
   end
 
-let get_string = fn j path ->
-  match j with
-  | Json s ->
-      if json_has s path then
-        Some (json_get_string s path)
-      else
-        None
-      end
+let get_string_or : { raw: string } -> string -> string -> string = fn j path fallback ->
+  if json_has j.raw path then
+    json_get_string j.raw path
+  else
+    fallback
   end
 
-let get_int = fn j path ->
-  match j with
-  | Json s ->
-      if json_has s path then
-        Some (json_get_int s path)
-      else
-        None
-      end
+let get_int_or : { raw: string } -> string -> int -> int = fn j path fallback ->
+  if json_has j.raw path then
+    json_get_int j.raw path
+  else
+    fallback
   end
 
-let get_float = fn j path ->
-  match j with
-  | Json s ->
-      if json_has s path then
-        Some (json_get_float s path)
-      else
-        None
-      end
+let get_float_or : { raw: string } -> string -> float -> float = fn j path fallback ->
+  if json_has j.raw path then
+    json_get_float j.raw path
+  else
+    fallback
   end
 
-let get_bool = fn j path ->
-  match j with
-  | Json s ->
-      if json_has s path then
-        Some (json_get_bool s path)
-      else
-        None
-      end
+let get_bool_or : { raw: string } -> string -> bool -> bool = fn j path fallback ->
+  if json_has j.raw path then
+    json_get_bool j.raw path
+  else
+    fallback
   end

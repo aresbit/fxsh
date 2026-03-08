@@ -49,6 +49,11 @@ static inline fxsh_token_t *consume(fxsh_parser_t *parser, fxsh_token_kind_t kin
 static inline fxsh_token_t *consume_name_token(fxsh_parser_t *parser, const char *msg);
 static fxsh_ast_node_t *alloc_node(fxsh_ast_kind_t kind, fxsh_loc_t loc);
 
+typedef struct {
+    sp_str_t name;
+    s32 arity;
+} ctor_arity_entry_t;
+
 static sp_str_t join_qualified_segments(sp_dyn_array(sp_str_t) segments, u32 count) {
     if (!segments || count == 0)
         return (sp_str_t){0};
@@ -182,6 +187,166 @@ static fxsh_ast_node_t *clone_type_ast(fxsh_ast_node_t *type_ast) {
         default:
             return copy;
     }
+}
+
+static s32 ctor_arity_lookup(sp_dyn_array(ctor_arity_entry_t) entries, sp_str_t name) {
+    sp_dyn_array_for(entries, i) {
+        if (sp_str_equal(entries[i].name, name))
+            return entries[i].arity;
+    }
+    return -1;
+}
+
+static void normalize_constructor_tuple_sugar_pattern(fxsh_ast_node_t *ast,
+                                                      sp_dyn_array(ctor_arity_entry_t) entries);
+
+static void normalize_constructor_tuple_sugar_expr(fxsh_ast_node_t *ast,
+                                                   sp_dyn_array(ctor_arity_entry_t) entries) {
+    if (!ast)
+        return;
+    switch (ast->kind) {
+        case AST_PROGRAM:
+            sp_dyn_array_for(ast->data.decls, i)
+                normalize_constructor_tuple_sugar_expr(ast->data.decls[i], entries);
+            return;
+        case AST_BINARY:
+            normalize_constructor_tuple_sugar_expr(ast->data.binary.left, entries);
+            normalize_constructor_tuple_sugar_expr(ast->data.binary.right, entries);
+            return;
+        case AST_UNARY:
+            normalize_constructor_tuple_sugar_expr(ast->data.unary.operand, entries);
+            return;
+        case AST_CALL:
+            normalize_constructor_tuple_sugar_expr(ast->data.call.func, entries);
+            sp_dyn_array_for(ast->data.call.args, i)
+                normalize_constructor_tuple_sugar_expr(ast->data.call.args[i], entries);
+            return;
+        case AST_LAMBDA:
+            sp_dyn_array_for(ast->data.lambda.params, i)
+                normalize_constructor_tuple_sugar_pattern(ast->data.lambda.params[i], entries);
+            normalize_constructor_tuple_sugar_expr(ast->data.lambda.body, entries);
+            return;
+        case AST_LET:
+        case AST_DECL_LET:
+            normalize_constructor_tuple_sugar_pattern(ast->data.let.pattern, entries);
+            normalize_constructor_tuple_sugar_expr(ast->data.let.value, entries);
+            return;
+        case AST_LET_IN:
+            sp_dyn_array_for(ast->data.let_in.bindings, i)
+                normalize_constructor_tuple_sugar_expr(ast->data.let_in.bindings[i], entries);
+            normalize_constructor_tuple_sugar_expr(ast->data.let_in.body, entries);
+            return;
+        case AST_IF:
+            normalize_constructor_tuple_sugar_expr(ast->data.if_expr.cond, entries);
+            normalize_constructor_tuple_sugar_expr(ast->data.if_expr.then_branch, entries);
+            normalize_constructor_tuple_sugar_expr(ast->data.if_expr.else_branch, entries);
+            return;
+        case AST_MATCH:
+            normalize_constructor_tuple_sugar_expr(ast->data.match_expr.expr, entries);
+            sp_dyn_array_for(ast->data.match_expr.arms, i)
+                normalize_constructor_tuple_sugar_expr(ast->data.match_expr.arms[i], entries);
+            return;
+        case AST_MATCH_ARM:
+            normalize_constructor_tuple_sugar_pattern(ast->data.match_arm.pattern, entries);
+            normalize_constructor_tuple_sugar_expr(ast->data.match_arm.guard, entries);
+            normalize_constructor_tuple_sugar_expr(ast->data.match_arm.body, entries);
+            return;
+        case AST_PIPE:
+            normalize_constructor_tuple_sugar_expr(ast->data.pipe.left, entries);
+            normalize_constructor_tuple_sugar_expr(ast->data.pipe.right, entries);
+            return;
+        case AST_TUPLE:
+        case AST_LIST:
+        case AST_RECORD:
+        case AST_PAT_TUPLE:
+        case AST_PAT_RECORD:
+        case AST_PAT_CONS:
+            sp_dyn_array_for(ast->data.elements, i)
+                normalize_constructor_tuple_sugar_expr(ast->data.elements[i], entries);
+            return;
+        case AST_FIELD_ACCESS:
+            normalize_constructor_tuple_sugar_expr(ast->data.field.object, entries);
+            return;
+        case AST_CONSTR_APPL: {
+            sp_dyn_array_for(ast->data.constr_appl.args, i)
+                normalize_constructor_tuple_sugar_expr(ast->data.constr_appl.args[i], entries);
+            s32 arity = ctor_arity_lookup(entries, ast->data.constr_appl.constr_name);
+            if (arity > 1 && sp_dyn_array_size(ast->data.constr_appl.args) == 1 &&
+                ast->data.constr_appl.args[0] && ast->data.constr_appl.args[0]->kind == AST_TUPLE &&
+                sp_dyn_array_size(ast->data.constr_appl.args[0]->data.elements) == (u32)arity) {
+                fxsh_ast_node_t *tuple_arg = ast->data.constr_appl.args[0];
+                ast->data.constr_appl.args = tuple_arg->data.elements;
+                tuple_arg->data.elements = SP_NULLPTR;
+                sp_free(tuple_arg);
+            }
+            return;
+        }
+        default:
+            return;
+    }
+}
+
+static void normalize_constructor_tuple_sugar_pattern(fxsh_ast_node_t *ast,
+                                                      sp_dyn_array(ctor_arity_entry_t) entries) {
+    if (!ast)
+        return;
+    switch (ast->kind) {
+        case AST_PAT_TUPLE:
+        case AST_PAT_RECORD:
+        case AST_PAT_CONS:
+            sp_dyn_array_for(ast->data.elements, i)
+                normalize_constructor_tuple_sugar_pattern(ast->data.elements[i], entries);
+            return;
+        case AST_PAT_CONSTR:
+            sp_dyn_array_for(ast->data.constr_appl.args, i)
+                normalize_constructor_tuple_sugar_pattern(ast->data.constr_appl.args[i], entries);
+            {
+                s32 arity = ctor_arity_lookup(entries, ast->data.constr_appl.constr_name);
+                if (arity > 1 && sp_dyn_array_size(ast->data.constr_appl.args) == 1 &&
+                    ast->data.constr_appl.args[0] &&
+                    ast->data.constr_appl.args[0]->kind == AST_PAT_TUPLE &&
+                    sp_dyn_array_size(ast->data.constr_appl.args[0]->data.elements) == (u32)arity) {
+                    fxsh_ast_node_t *tuple_arg = ast->data.constr_appl.args[0];
+                    ast->data.constr_appl.args = tuple_arg->data.elements;
+                    tuple_arg->data.elements = SP_NULLPTR;
+                    sp_free(tuple_arg);
+                }
+            }
+            return;
+        case AST_FIELD_ACCESS:
+            normalize_constructor_tuple_sugar_pattern(ast->data.field.object, entries);
+            return;
+        default:
+            return;
+    }
+}
+
+static void collect_constructor_arities(fxsh_ast_node_t *ast,
+                                        sp_dyn_array(ctor_arity_entry_t) * entries) {
+    if (!ast || !entries)
+        return;
+    if (ast->kind == AST_PROGRAM) {
+        sp_dyn_array_for(ast->data.decls, i)
+            collect_constructor_arities(ast->data.decls[i], entries);
+        return;
+    }
+    if (ast->kind != AST_TYPE_DEF)
+        return;
+    sp_dyn_array_for(ast->data.type_def.constructors, i) {
+        fxsh_ast_node_t *c = ast->data.type_def.constructors[i];
+        if (!c || c->kind != AST_DATA_CONSTR)
+            continue;
+        ctor_arity_entry_t e = {.name = c->data.data_constr.name,
+                                .arity = (s32)sp_dyn_array_size(c->data.data_constr.arg_types)};
+        sp_dyn_array_push(*entries, e);
+    }
+}
+
+static void normalize_constructor_tuple_sugar(fxsh_ast_node_t *ast) {
+    sp_dyn_array(ctor_arity_entry_t) entries = SP_NULLPTR;
+    collect_constructor_arities(ast, &entries);
+    normalize_constructor_tuple_sugar_expr(ast, entries);
+    sp_dyn_array_free(entries);
 }
 
 static fxsh_ast_node_t *substitute_self_type_ast(fxsh_ast_node_t *type_ast,
@@ -1051,16 +1216,7 @@ static fxsh_ast_node_t *parse_pattern_atom(fxsh_parser_t *parser) {
             fxsh_ast_node_t *arg = parse_pattern(parser);
             if (!arg)
                 break;
-            /* Constructor tuple sugar in patterns:
-             *   Cons(x, xs)  => args [x, xs] */
-            if (arg->kind == AST_PAT_TUPLE) {
-                sp_dyn_array_for(arg->data.elements, i) {
-                    sp_dyn_array_push(args, arg->data.elements[i]);
-                }
-                sp_free(arg);
-            } else {
-                sp_dyn_array_push(args, arg);
-            }
+            sp_dyn_array_push(args, arg);
         }
 
         fxsh_ast_node_t *node = alloc_node(AST_PAT_CONSTR, tok->loc);
@@ -1184,17 +1340,127 @@ static bool is_app_arg_start(fxsh_token_kind_t kind) {
         case TOK_LPAREN:
         case TOK_LBRACKET:
         case TOK_LBRACE:
-        case TOK_IF:
-        case TOK_LET:
-        case TOK_MATCH:
-        case TOK_FN:
-        case TOK_DO:
-        case TOK_AT:
-        case TOK_COMPTIME:
             return true;
         default:
             return false;
     }
+}
+
+static bool prev_token_is_newline(fxsh_parser_t *parser) {
+    return parser && parser->pos > 0 && parser->tokens[parser->pos - 1].kind == TOK_NEWLINE;
+}
+
+static u32 token_display_width(const fxsh_token_t *tok) {
+    if (!tok)
+        return 0;
+    switch (tok->kind) {
+        case TOK_INT: {
+            char buf[64];
+            int n = snprintf(buf, sizeof(buf), "%lld", (long long)tok->data.int_val);
+            return n > 0 ? (u32)n : 0;
+        }
+        case TOK_FLOAT: {
+            char buf[64];
+            int n = snprintf(buf, sizeof(buf), "%.17g", tok->data.float_val);
+            return n > 0 ? (u32)n : 0;
+        }
+        case TOK_STRING:
+        case TOK_FSTRING:
+            return tok->data.str_val.len + 2;
+        case TOK_IDENT:
+        case TOK_TYPE_IDENT:
+            return tok->data.ident.len;
+        case TOK_TRUE:
+            return 4;
+        case TOK_FALSE:
+            return 5;
+        case TOK_LET:
+        case TOK_NOT:
+        case TOK_FOR:
+        case TOK_REC:
+            return 3;
+        case TOK_FN:
+        case TOK_IF:
+        case TOK_IN:
+        case TOK_OF:
+        case TOK_DO:
+        case TOK_OR:
+            return 2;
+        case TOK_END:
+            return 3;
+        case TOK_THEN:
+            return 4;
+        case TOK_ELSE:
+            return 4;
+        case TOK_WHILE:
+            return 5;
+        case TOK_MATCH:
+            return 5;
+        case TOK_WITH:
+            return 4;
+        case TOK_TYPE:
+            return 4;
+        case TOK_MODULE:
+            return 6;
+        case TOK_IMPORT:
+            return 6;
+        case TOK_COMPTIME:
+            return 8;
+        case TOK_STRUCT:
+            return 6;
+        case TOK_TRAIT:
+            return 5;
+        case TOK_IMPL:
+            return 4;
+        case TOK_RETURN:
+            return 6;
+        case TOK_AND:
+            return 3;
+        case TOK_PLUS:
+        case TOK_MINUS:
+        case TOK_STAR:
+        case TOK_SLASH:
+        case TOK_PERCENT:
+        case TOK_ASSIGN:
+        case TOK_LT:
+        case TOK_GT:
+        case TOK_LPAREN:
+        case TOK_RPAREN:
+        case TOK_LBRACKET:
+        case TOK_RBRACKET:
+        case TOK_LBRACE:
+        case TOK_RBRACE:
+        case TOK_COMMA:
+        case TOK_COLON:
+        case TOK_SEMICOLON:
+        case TOK_DOT:
+        case TOK_PIPE_SYM:
+        case TOK_AT:
+            return 1;
+        case TOK_ARROW:
+        case TOK_FAT_ARROW:
+        case TOK_PIPE:
+        case TOK_EQ:
+        case TOK_NEQ:
+        case TOK_LEQ:
+        case TOK_GEQ:
+        case TOK_APPEND:
+        case TOK_DOTDOT:
+            return 2;
+        default:
+            return 0;
+    }
+}
+
+static bool current_token_is_tightly_attached(fxsh_parser_t *parser) {
+    if (!parser || parser->pos == 0)
+        return false;
+    fxsh_token_t *prev = &parser->tokens[parser->pos - 1];
+    fxsh_token_t *cur = current(parser);
+    if (!cur || prev->loc.line != cur->loc.line)
+        return false;
+    u32 prev_end_col = prev->loc.column + token_display_width(prev);
+    return cur->loc.column == prev_end_col;
 }
 
 static sp_str_t fresh_do_tmp_name(void) {
@@ -1680,16 +1946,7 @@ static fxsh_ast_node_t *parse_primary(fxsh_parser_t *parser) {
                 if (!arg)
                     break;
 
-                /* If argument is a tuple, flatten it into multiple args */
-                if (arg->kind == AST_TUPLE) {
-                    sp_dyn_array_for(arg->data.elements, i) {
-                        sp_dyn_array_push(args, arg->data.elements[i]);
-                    }
-                    /* Free the tuple node but not its elements (now in args) */
-                    sp_free(arg);
-                } else {
-                    sp_dyn_array_push(args, arg);
-                }
+                sp_dyn_array_push(args, arg);
             }
 
             fxsh_ast_node_t *node = alloc_node(AST_CONSTR_APPL, tok->loc);
@@ -2182,14 +2439,14 @@ static fxsh_ast_node_t *parse_postfix(fxsh_parser_t *parser) {
             node->data.field.object = expr;
             node->data.field.field = field->data.ident;
             expr = rewrite_module_chain_expr(parser, node);
-        } else if (is_app_arg_start(current(parser)->kind)) {
+        } else if (!prev_token_is_newline(parser) && is_app_arg_start(current(parser)->kind)) {
             /* Function application by juxtaposition: f x y */
             fxsh_loc_t loc = current(parser)->loc;
             fxsh_ast_node_t *arg = parse_app_arg_primary(parser);
             if (!arg)
                 return expr;
             while (true) {
-                if (check(parser, TOK_LPAREN)) {
+                if (check(parser, TOK_LPAREN) && current_token_is_tightly_attached(parser)) {
                     fxsh_loc_t cloc = current(parser)->loc;
                     advance(parser);
                     fxsh_ast_list_t cargs = SP_NULLPTR;
@@ -2207,7 +2464,8 @@ static fxsh_ast_node_t *parse_postfix(fxsh_parser_t *parser) {
                     }
                     consume(parser, TOK_RPAREN, "')'");
                     arg = fxsh_ast_call(arg, cargs, cloc);
-                } else if (match(parser, TOK_DOT)) {
+                } else if (check(parser, TOK_DOT) && current_token_is_tightly_attached(parser)) {
+                    advance(parser);
                     fxsh_loc_t floc = current(parser)->loc;
                     fxsh_token_t *field = consume_name_token(parser, "field name");
                     if (!field)
@@ -2262,10 +2520,13 @@ static fxsh_ast_node_t *parse_multiplicative(fxsh_parser_t *parser) {
     if (!left)
         return NULL;
 
+    skip_newlines(parser);
     while (check(parser, TOK_STAR) || check(parser, TOK_SLASH) || check(parser, TOK_PERCENT)) {
         fxsh_token_t *tok = advance(parser);
+        skip_newlines(parser);
         fxsh_ast_node_t *right = parse_unary(parser);
         left = fxsh_ast_binary(tok->kind, left, right, tok->loc);
+        skip_newlines(parser);
     }
 
     return left;
@@ -2280,10 +2541,13 @@ static fxsh_ast_node_t *parse_additive(fxsh_parser_t *parser) {
     if (!left)
         return NULL;
 
+    skip_newlines(parser);
     while (check(parser, TOK_PLUS) || check(parser, TOK_MINUS) || check(parser, TOK_CONCAT)) {
         fxsh_token_t *tok = advance(parser);
+        skip_newlines(parser);
         fxsh_ast_node_t *right = parse_multiplicative(parser);
         left = fxsh_ast_binary(tok->kind, left, right, tok->loc);
+        skip_newlines(parser);
     }
 
     return left;
@@ -2297,8 +2561,10 @@ static fxsh_ast_node_t *parse_append_expr(fxsh_parser_t *parser) {
     fxsh_ast_node_t *left = parse_additive(parser);
     if (!left)
         return NULL;
+    skip_newlines(parser);
     if (match(parser, TOK_APPEND)) {
         fxsh_token_t *tok = &parser->tokens[parser->pos - 1];
+        skip_newlines(parser);
         fxsh_ast_node_t *right = parse_append_expr(parser);
         return fxsh_ast_binary(tok->kind, left, right, tok->loc);
     }
@@ -2316,10 +2582,13 @@ static fxsh_ast_node_t *parse_comparison(fxsh_parser_t *parser) {
 
     fxsh_token_kind_t cmp_ops[] = {TOK_EQ, TOK_NEQ, TOK_LT, TOK_GT, TOK_LEQ, TOK_GEQ};
 
+    skip_newlines(parser);
     while (check_any(parser, cmp_ops, 6)) {
         fxsh_token_t *tok = advance(parser);
+        skip_newlines(parser);
         fxsh_ast_node_t *right = parse_append_expr(parser);
         left = fxsh_ast_binary(tok->kind, left, right, tok->loc);
+        skip_newlines(parser);
     }
 
     return left;
@@ -2334,10 +2603,13 @@ static fxsh_ast_node_t *parse_logical(fxsh_parser_t *parser) {
     if (!left)
         return NULL;
 
+    skip_newlines(parser);
     while (check(parser, TOK_AND) || check(parser, TOK_OR)) {
         fxsh_token_t *tok = advance(parser);
+        skip_newlines(parser);
         fxsh_ast_node_t *right = parse_comparison(parser);
         left = fxsh_ast_binary(tok->kind, left, right, tok->loc);
+        skip_newlines(parser);
     }
 
     return left;
@@ -2352,14 +2624,17 @@ static fxsh_ast_node_t *parse_pipe(fxsh_parser_t *parser) {
     if (!left)
         return NULL;
 
+    skip_newlines(parser);
     while (match(parser, TOK_PIPE)) {
         fxsh_loc_t loc = current(parser)->loc;
+        skip_newlines(parser);
         fxsh_ast_node_t *right = parse_logical(parser);
 
         fxsh_ast_node_t *node = alloc_node(AST_PIPE, loc);
         node->data.pipe.left = left;
         node->data.pipe.right = right;
         left = node;
+        skip_newlines(parser);
     }
 
     return left;
@@ -2459,7 +2734,7 @@ static fxsh_ast_node_t *parse_import_decl(fxsh_parser_t *parser);
 static fxsh_ast_node_t *parse_decl(fxsh_parser_t *parser) {
     skip_newlines(parser);
 
-    if (check(parser, TOK_EOF)) {
+    if (check(parser, TOK_EOF) || check(parser, TOK_RBRACE) || check(parser, TOK_END)) {
         return NULL;
     }
 
@@ -2519,6 +2794,7 @@ static fxsh_ast_node_t *parse_trait_decl(fxsh_parser_t *parser) {
 
     fxsh_ast_list_t methods = SP_NULLPTR;
     while (!check(parser, TOK_EOF)) {
+        skip_newlines(parser);
         if (brace_body && check(parser, TOK_RBRACE))
             break;
         if (!brace_body && check(parser, TOK_END))
@@ -2599,6 +2875,7 @@ static fxsh_ast_node_t *parse_impl_decl(fxsh_parser_t *parser) {
 
     fxsh_ast_list_t members = SP_NULLPTR;
     while (!check(parser, TOK_EOF)) {
+        skip_newlines(parser);
         if (brace_body && check(parser, TOK_RBRACE))
             break;
         if (!brace_body && check(parser, TOK_END))
@@ -2713,6 +2990,7 @@ static fxsh_ast_node_t *parse_module_decl(fxsh_parser_t *parser) {
 
     fxsh_ast_list_t members = SP_NULLPTR;
     while (!check(parser, TOK_END) && !check(parser, TOK_EOF)) {
+        skip_newlines(parser);
         if (brace_body && check(parser, TOK_RBRACE))
             break;
         fxsh_ast_node_t *d = parse_decl(parser);
@@ -2875,7 +3153,9 @@ fxsh_ast_node_t *fxsh_parse_program(fxsh_parser_t *parser) {
         skip_newlines(parser);
     }
 
-    return fxsh_ast_program(decls, current(parser)->loc);
+    fxsh_ast_node_t *prog = fxsh_ast_program(decls, current(parser)->loc);
+    normalize_constructor_tuple_sugar(prog);
+    return prog;
 }
 
 fxsh_ast_node_t *fxsh_parse(fxsh_parser_t *parser) {

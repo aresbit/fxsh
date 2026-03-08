@@ -1,5 +1,7 @@
 # os.fxsh - unified executable OS/process/path/system stdlib
 
+import Fs
+
 type 'a result = Ok of 'a | Err of string
 
 #------------------------------------------------------------------------------
@@ -14,17 +16,41 @@ let env_get = fn k ->
   let v = getenv k in
   if v == "" then Err "env not found" else Ok v
 
+let cwd_path = Ok (cwd())
+
 #------------------------------------------------------------------------------
 # Path / file text
 #------------------------------------------------------------------------------
 
 let exists = fn p -> Ok (file_exists p)
+let is_dir_path = fn p -> Ok (is_dir p)
+let is_file_path = fn p -> Ok (is_file p)
+let list_dir_paths = fn p -> Ok (list_dir p)
+let walk_dir_paths = fn p -> Ok (walk_dir p)
+let file_size_bytes = fn p -> Ok (file_size p)
+let ensure_dir = fn p -> Ok (mkdir_p p)
+let delete_file = fn p -> Ok (remove_file p)
+let move_path = fn src dst -> Ok (rename_path src dst)
+let basename = fn p -> Ok (Fs.basename p)
+let dirname = fn p -> Ok (Fs.dirname p)
+let extension = fn p -> Ok (Fs.extension p)
+let stem = fn p -> Ok (Fs.stem p)
+let has_extension = fn ext p -> Ok (Fs.has_extension ext p)
+let replace_extension = fn ext p -> Ok (Fs.replace_extension ext p)
+let replace_basename = fn base p -> Ok (Fs.replace_basename base p)
+let parent_or_self = fn p -> Ok (Fs.parent_or_self p)
+let ensure_parent_dir = fn p -> Ok (Fs.ensure_parent_dir p)
 
 let read_text = fn p ->
   let s = read_file p in
   if s == "" then Err "read failed or empty" else Ok s
 
+let read_bytes = fn p -> Ok (read_file p)
+
 let write_text = fn p c ->
+  if write_file p c then Ok () else Err "write failed"
+
+let write_bytes = fn p c ->
   if write_file p c then Ok () else Err "write failed"
 
 let copy_text = fn src dst ->

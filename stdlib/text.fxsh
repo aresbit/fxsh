@@ -1,0 +1,249 @@
+# text.fxsh - text primitives over length-delimited strings
+
+type split_result = Missing | Split of string * string
+
+let empty = ""
+
+let length : string -> int = fn s -> string_length s
+
+let is_empty : string -> bool = fn s -> (length s) == 0
+
+let slice : string -> int -> int -> string = fn s start len -> string_slice s start len
+
+let take : int -> string -> string = fn n s ->
+  if n <= 0 then ""
+  else string_slice s 0 n
+
+let drop : int -> string -> string = fn n s ->
+  let total = length s in
+  if n <= 0 then s
+  else if n >= total then ""
+  else
+    let rest = total - n in
+    string_slice s n rest
+
+let trim : string -> string = fn s -> string_trim s
+
+let find : string -> string -> int = fn needle s -> string_find s needle
+
+let index_of : string -> string -> int = fn needle s -> find needle s
+
+let index_of_from : string -> string -> int -> int = fn needle s start ->
+  string_find_from s needle start
+
+let contains : string -> string -> bool = fn needle s -> (find needle s) != -1
+
+let starts_with : string -> string -> bool = fn prefix s -> string_starts_with s prefix
+
+let ends_with : string -> string -> bool = fn suffix s -> string_ends_with s suffix
+
+let split_lines_text : string -> string list = fn s -> split_lines s
+
+let rec split_from : string -> string -> int -> string list = fn sep s start ->
+  let hit = index_of_from sep s start in
+  if hit == -1 then
+    let total = length s in
+    let rest = total - start in
+    [slice s start rest]
+  else
+    let seg_len = hit - start in
+    let head = slice s start seg_len in
+    let next = hit + (length sep) in
+    head :: (split_from sep s next)
+
+let split : string -> string -> string list = fn sep s ->
+  if sep == "" then [s] else split_from sep s 0
+
+let rec last_index_of_from : string -> string -> int -> int = fn needle s start ->
+  if needle == "" then -1
+  else if start < 0 then -1
+  else
+    let hit = index_of_from needle s start in
+    if hit == -1 then -1
+    else
+      let next_start = hit + 1 in
+      let next_hit = last_index_of_from needle s next_start in
+      if next_hit == -1 then hit else next_hit
+
+let last_index_of : string -> string -> int = fn needle s -> last_index_of_from needle s 0
+
+let split_once = fn sep s ->
+  let hit = if sep == "" then -1 else find sep s in
+  if hit == -1 then Missing
+  else
+    let left = slice s 0 hit in
+    let sep_len = length sep in
+    let right_start = hit + sep_len in
+    let total = length s in
+    let right_len = total - right_start in
+    let right = slice s right_start right_len in
+    Split (left, right)
+
+let before_first : string -> string -> string = fn sep s ->
+  match split_once sep s with
+  | Split (left, _) -> left
+  | Missing -> s
+  end
+
+let after_first : string -> string -> string = fn sep s ->
+  match split_once sep s with
+  | Split (_, right) -> right
+  | Missing -> ""
+  end
+
+let rec replace_all : string -> string -> string -> string = fn old_t new_t s ->
+  let hit = find old_t s in
+  if hit == -1 then s
+  else
+    let prefix = slice s 0 hit in
+    let after_start = hit + (length old_t) in
+    let total = length s in
+    let after_len = total - after_start in
+    let suffix = slice s after_start after_len in
+    prefix ++ new_t ++ (replace_all old_t new_t suffix)
+
+let byte : string -> int -> int = fn s idx -> byte_at s idx
+
+let char_at : string -> int -> string = fn s idx -> byte_to_string (byte s idx)
+
+let from_byte : int -> string = fn n -> byte_to_string n
+
+let first : string -> string = fn s ->
+  if length s == 0 then "" else char_at s 0
+
+let last : string -> string = fn s ->
+  let n = length s in
+  if n == 0 then "" else char_at s (n - 1)
+
+let is_space_byte : int -> bool = fn b ->
+  (b == 32) or (b == 9) or (b == 10) or (b == 13)
+
+let is_digit_byte : int -> bool = fn b -> (b >= 48) and (b <= 57)
+
+let is_lower_byte : int -> bool = fn b -> (b >= 97) and (b <= 122)
+
+let is_upper_byte : int -> bool = fn b -> (b >= 65) and (b <= 90)
+
+let is_alpha_byte : int -> bool = fn b -> (is_lower_byte b) or (is_upper_byte b)
+
+let is_alnum_byte : int -> bool = fn b -> (is_alpha_byte b) or (is_digit_byte b)
+
+let starts_with_at : string -> string -> int -> bool = fn prefix s start ->
+  let plen = length prefix in
+  let total = length s in
+  if start < 0 then false
+  else if plen == 0 then true
+  else if start + plen > total then false
+  else slice s start plen == prefix
+
+let rec skip_spaces_from : string -> int -> int = fn s idx ->
+  let total = length s in
+  if idx >= total then idx
+  else
+    let b = byte s idx in
+    if is_space_byte b then
+      let next = idx + 1 in
+      skip_spaces_from s next
+    else idx
+
+let rec take_digits_from : string -> int -> int = fn s idx ->
+  let total = length s in
+  if idx >= total then idx
+  else
+    let b = byte s idx in
+    if is_digit_byte b then
+      let next = idx + 1 in
+      take_digits_from s next
+    else idx
+
+let take_digits : string -> string = fn s ->
+  let stop = take_digits_from s 0 in
+  slice s 0 stop
+
+let drop_spaces : string -> string = fn s ->
+  let start = skip_spaces_from s 0 in
+  drop start s
+
+let split_whitespace : string -> string list = fn s -> split_words s
+
+let rec repeat : int -> string -> string = fn n s ->
+  if n <= 0 then ""
+  else s ++ (repeat (n - 1) s)
+
+let trim_prefix : string -> string -> string = fn prefix s ->
+  if starts_with prefix s then
+    let plen = length prefix in
+    let rest = length s - plen in
+    slice s plen rest
+  else s
+
+let trim_suffix : string -> string -> string = fn suffix s ->
+  if ends_with suffix s then
+    let slen = length suffix in
+    let keep = length s - slen in
+    slice s 0 keep
+  else s
+
+let rec take_letters_from : string -> int -> int = fn s idx ->
+  let total = length s in
+  if idx >= total then idx
+  else
+    let b = byte s idx in
+    if is_alpha_byte b then
+      let next = idx + 1 in
+      take_letters_from s next
+    else idx
+
+let take_letters : string -> string = fn s ->
+  let stop = take_letters_from s 0 in
+  slice s 0 stop
+
+let is_ident_start_byte : int -> bool = fn b ->
+  (b == 95) or (is_alpha_byte b)
+
+let is_ident_byte : int -> bool = fn b ->
+  (b == 95) or (is_alnum_byte b)
+
+let rec take_ident_from : string -> int -> int = fn s idx ->
+  let total = length s in
+  if idx >= total then idx
+  else
+    let b = byte s idx in
+    if is_ident_byte b then
+      let next = idx + 1 in
+      take_ident_from s next
+    else idx
+
+let take_ident : string -> string = fn s ->
+  if length s == 0 then ""
+  else
+    let b0 = byte s 0 in
+    if is_ident_start_byte b0 then
+      let stop = take_ident_from s 1 in
+      slice s 0 stop
+    else ""
+
+let rec join : string -> string list -> string = fn sep xs ->
+  match xs with
+  | [] -> ""
+  | x :: [] -> x
+  | x :: xs1 -> x ++ sep ++ (join sep xs1)
+  end
+
+let take_last : int -> string -> string = fn n s ->
+  let total = length s in
+  if n <= 0 then ""
+  else if n >= total then s
+  else slice s (total - n) n
+
+let drop_last : int -> string -> string = fn n s ->
+  let total = length s in
+  if n <= 0 then s
+  else if n >= total then ""
+  else slice s 0 (total - n)
+
+let strip_prefix : string -> string -> string = fn prefix s ->
+  if starts_with prefix s then trim_prefix prefix s else ""
+
+let strip_suffix : string -> string -> string = fn suffix s ->
+  if ends_with suffix s then trim_suffix suffix s else ""
