@@ -1424,7 +1424,7 @@ static rv_value_t *eval_expr(fxsh_ast_node_t *ast, rv_env_t *env, fxsh_error_t *
                         if (v->kind == RV_FUNCTION)
                             v->as.fn.self_name = d->data.let.name;
                         *slot = *v;
-                        last = rv_unit();
+                        last = v;
                     } else {
                         rv_value_t *v = eval_expr(d->data.let.value, prog_env, err);
                         if (!v || *err != ERR_OK)
@@ -1432,7 +1432,7 @@ static rv_value_t *eval_expr(fxsh_ast_node_t *ast, rv_env_t *env, fxsh_error_t *
                         if (v->kind == RV_FUNCTION)
                             v->as.fn.self_name = d->data.let.name;
                         prog_env = env_bind(prog_env, d->data.let.name, v);
-                        last = rv_unit();
+                        last = v;
                     }
                 } else if (d->kind == AST_TYPE_DEF) {
                     last = rv_unit();
