@@ -18,11 +18,15 @@ let invoice_sql = comptime { @sqliteSQL(@typeOf(sample_invoice), "invoices") }
 let users_select_active = comptime {
   @sql({
     op = "select",
+    distinct = true,
     columns = ["id", "email", "balance", "active"],
     from = "users",
     where = ["active = ?", "balance > ?"],
+    group_by = ["id", "email", "balance", "active"],
+    having = ["count(*) >= 1"],
     order_by = "id DESC",
-    limit = 100
+    limit = 100,
+    offset = 0
   })
 }
 let users_update_email = comptime {
@@ -36,8 +40,10 @@ let users_update_email = comptime {
 let invoices_insert = comptime {
   @sql({
     op = "insert",
+    mode = "OR IGNORE",
     table = "invoices",
-    columns = ["id", "user_id", "amount", "paid", "note"]
+    columns = ["id", "user_id", "amount", "paid", "note"],
+    returning = ["id"]
   })
 }
 let soft_delete_user = comptime {
@@ -47,7 +53,15 @@ let soft_delete_user = comptime {
     where = ["id = ?"]
   })
 }
-let pragma_sql = comptime { @sql({ op = "raw", text = "PRAGMA journal_mode=WAL;" }) }
+let create_idx = comptime {
+  @sql({
+    op = "create_index",
+    name = "idx_invoices_user",
+    table = "invoices",
+    columns = ["user_id", "id DESC"]
+  })
+}
+let pragma_sql = comptime { @sql({ op = "pragma", name = "journal_mode", value = "WAL" }) }
 
 let banner = "=== fxsh comptime SQLite SQL generator ==="
 let _ = print banner
@@ -67,4 +81,5 @@ let _ = print users_select_active
 let _ = print users_update_email
 let _ = print invoices_insert
 let _ = print soft_delete_user
+let _ = print create_idx
 let _ = print pragma_sql

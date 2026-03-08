@@ -99,10 +99,20 @@ echo "$out_sql" | grep -q 'SELECT "id", "email", "balance", "active" FROM "users
 
 echo "[comptime] sql dsl"
 out_sql_dsl=$("$BIN" examples/comptime_sql_dsl.fxsh 2>/dev/null)
-echo "$out_sql_dsl" | grep -q 'SELECT "id", "email", "active" FROM "users" WHERE active = ? AND id > ? ORDER BY id DESC LIMIT 20;'
-echo "$out_sql_dsl" | grep -q 'INSERT INTO "users" ("id", "email", "active") VALUES (?, ?, ?);'
-echo "$out_sql_dsl" | grep -q 'UPDATE "users" SET email = ?, active = ? WHERE id = ?;'
-echo "$out_sql_dsl" | grep -q 'DELETE FROM "users" WHERE id = ?;'
-echo "$out_sql_dsl" | grep -q 'PRAGMA journal_mode=WAL;'
+echo "$out_sql_dsl" | grep -q 'SELECT DISTINCT'
+echo "$out_sql_dsl" | grep -q 'LEFT JOIN invoices i ON i.user_id = u.id'
+echo "$out_sql_dsl" | grep -q 'GROUP BY u.id, u.email'
+echo "$out_sql_dsl" | grep -q 'HAVING count(i.id) >= ?'
+echo "$out_sql_dsl" | grep -q 'OFFSET 5;'
+echo "$out_sql_dsl" | grep -q 'INSERT OR REPLACE INTO "users"'
+echo "$out_sql_dsl" | grep -q 'ON CONFLICT (id) DO UPDATE'
+echo "$out_sql_dsl" | grep -q 'RETURNING "id", "email";'
+echo "$out_sql_dsl" | grep -q 'UPDATE OR ABORT "users" SET email = ?, active = ? WHERE id = ? RETURNING id;'
+echo "$out_sql_dsl" | grep -q 'DELETE FROM "users" WHERE id = ? LIMIT 1;'
+echo "$out_sql_dsl" | grep -q 'CREATE TABLE IF NOT EXISTS "audit_logs"'
+echo "$out_sql_dsl" | grep -q 'CREATE INDEX IF NOT EXISTS "idx_audit_user_time"'
+echo "$out_sql_dsl" | grep -q 'PRAGMA journal_mode = WAL;'
+echo "$out_sql_dsl" | grep -q 'EXPLAIN QUERY PLAN SELECT'
+echo "$out_sql_dsl" | grep -q 'VACUUM;'
 
 echo "comptime integration passed"

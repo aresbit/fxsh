@@ -1931,32 +1931,160 @@ static bool ct_list_all_strings(fxsh_ct_value_t *v) {
     return true;
 }
 
-static void ct_sql_push_ident(ct_sb_t *sb, sp_str_t ident) {
+static bool ct_list_all_list_of_strings(fxsh_ct_value_t *v) {
+    if (!v || v->kind != CT_LIST)
+        return false;
+    for (u32 i = 0; i < v->data.list_val.len; i++) {
+        fxsh_ct_value_t *row = v->data.list_val.items[i];
+        if (!row || !ct_list_all_strings(row))
+            return false;
+    }
+    return true;
+}
+
+static bool ct_sql_is_ident_char(c8 c) {
+    return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') ||
+           c == '_';
+}
+
+static bool ct_sql_is_simple_ident(sp_str_t s) {
+    if (!s.data || s.len == 0)
+        return false;
+    for (u32 i = 0; i < s.len; i++) {
+        if (!ct_sql_is_ident_char(s.data[i]))
+            return false;
+    }
+    return true;
+}
+
+static bool ct_sql_is_simple_dotted_ident(sp_str_t s) {
+    if (!s.data || s.len == 0)
+        return false;
+    u32 seg_len = 0;
+    for (u32 i = 0; i < s.len; i++) {
+        c8 c = s.data[i];
+        if (c == '.') {
+            if (seg_len == 0)
+                return false;
+            seg_len = 0;
+            continue;
+        }
+        if (!ct_sql_is_ident_char(c))
+            return false;
+        seg_len++;
+    }
+    return seg_len > 0;
+}
+
+static void ct_sql_push_ident_quoted(ct_sb_t *sb, sp_str_t ident) {
     ct_sb_push_c(sb, '"');
     ct_sb_push_str(sb, ident);
     ct_sb_push_c(sb, '"');
 }
 
-static bool ct_sql_push_ident_list(ct_sb_t *sb, fxsh_ct_value_t *list_val) {
-    if (!ct_list_all_strings(list_val))
-        return false;
-    for (u32 i = 0; i < list_val->data.list_val.len; i++) {
-        if (i > 0)
-            ct_sb_push_s(sb, ", ");
-        ct_sql_push_ident(sb, list_val->data.list_val.items[i]->data.string_val);
+static void ct_sql_push_ident_or_expr(ct_sb_t *sb, sp_str_t text) {
+    if (ct_sql_is_simple_ident(text)) {
+        ct_sql_push_ident_quoted(sb, text);
+        return;
     }
-    return true;
+    if (ct_sql_is_simple_dotted_ident(text)) {
+        u32 start = 0;
+        for (u32 i = 0; i <= text.len; i++) {
+            if (i == text.len || text.data[i] == '.') {
+                if (i > start) {
+                    if (start > 0)
+                        ct_sb_push_c(sb, '.');
+                    ct_sb_push_c(sb, '"');
+                    for (u32 j = start; j < i; j++)
+                        ct_sb_push_c(sb, text.data[j]);
+                    ct_sb_push_c(sb, '"');
+                }
+                start = i + 1;
+            }
+        }
+        return;
+    }
+    ct_sb_push_str(sb, text);
 }
 
-static bool ct_sql_push_text_list_join(ct_sb_t *sb, fxsh_ct_value_t *list_val, const c8 *sep) {
+static bool ct_sql_push_string_list_join(ct_sb_t *sb, fxsh_ct_value_t *list_val, const c8 *sep,
+                                         bool ident_or_expr) {
     if (!ct_list_all_strings(list_val))
         return false;
     for (u32 i = 0; i < list_val->data.list_val.len; i++) {
         if (i > 0)
             ct_sb_push_s(sb, sep);
-        ct_sb_push_str(sb, list_val->data.list_val.items[i]->data.string_val);
+        sp_str_t it = list_val->data.list_val.items[i]->data.string_val;
+        if (ident_or_expr)
+            ct_sql_push_ident_or_expr(sb, it);
+        else
+            ct_sb_push_str(sb, it);
     }
     return true;
+}
+
+static bool ct_sql_get_bool(fxsh_ct_value_t *dsl, const c8 *name, bool def) {
+    fxsh_ct_value_t *v = fxsh_ct_record_get_field(dsl, sp_str_view((char *)name));
+    if (!v || v->kind != CT_BOOL)
+        return def;
+    return v->data.bool_val;
+}
+
+static s64 ct_sql_get_int(fxsh_ct_value_t *dsl, const c8 *name, s64 def) {
+    fxsh_ct_value_t *v = fxsh_ct_record_get_field(dsl, sp_str_view((char *)name));
+    if (!v || v->kind != CT_INT)
+        return def;
+    return v->data.int_val;
+}
+
+static fxsh_ct_value_t *ct_sql_get(fxsh_ct_value_t *dsl, const c8 *name) {
+    return fxsh_ct_record_get_field(dsl, sp_str_view((char *)name));
+}
+
+static bool ct_sql_append_conditions(ct_sb_t *sb, fxsh_ct_value_t *dsl, const c8 *field_name,
+                                     const c8 *prefix, const c8 *mode_field, const c8 *def_mode,
+                                     const c8 *errmsg) {
+    fxsh_ct_value_t *conds = ct_sql_get(dsl, field_name);
+    if (!conds || conds->kind != CT_LIST || conds->data.list_val.len == 0)
+        return true;
+    if (!ct_list_all_strings(conds)) {
+        ct_set_error("%s", errmsg);
+        return false;
+    }
+    const c8 *sep = def_mode;
+    fxsh_ct_value_t *mode = ct_sql_get(dsl, mode_field);
+    if (mode && mode->kind == CT_STRING && mode->data.string_val.len > 0)
+        sep = mode->data.string_val.data;
+
+    ct_sb_push_c(sb, ' ');
+    ct_sb_push_s(sb, prefix);
+    ct_sb_push_c(sb, ' ');
+    for (u32 i = 0; i < conds->data.list_val.len; i++) {
+        if (i > 0) {
+            ct_sb_push_c(sb, ' ');
+            ct_sb_push_s(sb, sep);
+            ct_sb_push_c(sb, ' ');
+        }
+        ct_sb_push_str(sb, conds->data.list_val.items[i]->data.string_val);
+    }
+    return true;
+}
+
+static bool ct_sql_append_returning(ct_sb_t *sb, fxsh_ct_value_t *dsl) {
+    fxsh_ct_value_t *ret = ct_sql_get(dsl, "returning");
+    if (!ret)
+        return true;
+    if (ret->kind == CT_STRING) {
+        ct_sb_push_s(sb, " RETURNING ");
+        ct_sb_push_str(sb, ret->data.string_val);
+        return true;
+    }
+    if (ret->kind != CT_LIST || !ct_list_all_strings(ret)) {
+        ct_set_error("@sql returning must be string or [string]");
+        return false;
+    }
+    ct_sb_push_s(sb, " RETURNING ");
+    return ct_sql_push_string_list_join(sb, ret, ", ", true);
 }
 
 static fxsh_ct_value_t *ct_sql_emit_select(fxsh_ct_value_t *dsl) {
@@ -1969,34 +2097,95 @@ static fxsh_ct_value_t *ct_sql_emit_select(fxsh_ct_value_t *dsl) {
 
     ct_sb_t sb = {.chars = SP_NULLPTR};
     ct_sb_push_s(&sb, "SELECT ");
-    if (!ct_sql_push_ident_list(&sb, cols))
+    if (ct_sql_get_bool(dsl, "distinct", false))
+        ct_sb_push_s(&sb, "DISTINCT ");
+    if (!ct_sql_push_string_list_join(&sb, cols, ", ", true))
         return NULL;
     ct_sb_push_s(&sb, " FROM ");
-    ct_sql_push_ident(&sb, from->data.string_val);
+    ct_sql_push_ident_or_expr(&sb, from->data.string_val);
 
-    fxsh_ct_value_t *where = fxsh_ct_record_get_field(dsl, (sp_str_t){.data = "where", .len = 5});
-    if (where && where->kind == CT_LIST && where->data.list_val.len > 0) {
-        ct_sb_push_s(&sb, " WHERE ");
-        if (!ct_sql_push_text_list_join(&sb, where, " AND ")) {
-            ct_set_error("@sql select where must be [string]");
+    fxsh_ct_value_t *joins = ct_sql_get(dsl, "joins");
+    if (joins) {
+        if (!ct_list_all_strings(joins)) {
+            ct_set_error("@sql select joins must be [string]");
+            return NULL;
+        }
+        for (u32 i = 0; i < joins->data.list_val.len; i++) {
+            ct_sb_push_c(&sb, ' ');
+            ct_sb_push_str(&sb, joins->data.list_val.items[i]->data.string_val);
+        }
+    }
+
+    if (!ct_sql_append_conditions(&sb, dsl, "where", "WHERE", "where_mode", "AND",
+                                  "@sql select where must be [string]"))
+        return NULL;
+
+    fxsh_ct_value_t *group_by = ct_sql_get(dsl, "group_by");
+    if (group_by && group_by->kind == CT_LIST && group_by->data.list_val.len > 0) {
+        ct_sb_push_s(&sb, " GROUP BY ");
+        if (!ct_sql_push_string_list_join(&sb, group_by, ", ", false)) {
+            ct_set_error("@sql select group_by must be [string]");
             return NULL;
         }
     }
 
-    fxsh_ct_value_t *order_by =
-        fxsh_ct_record_get_field(dsl, (sp_str_t){.data = "order_by", .len = 8});
+    if (!ct_sql_append_conditions(&sb, dsl, "having", "HAVING", "having_mode", "AND",
+                                  "@sql select having must be [string]"))
+        return NULL;
+
+    fxsh_ct_value_t *window = ct_sql_get(dsl, "window");
+    if (window && window->kind == CT_LIST && window->data.list_val.len > 0) {
+        ct_sb_push_s(&sb, " WINDOW ");
+        if (!ct_sql_push_string_list_join(&sb, window, ", ", false)) {
+            ct_set_error("@sql select window must be [string]");
+            return NULL;
+        }
+    }
+
+    fxsh_ct_value_t *order_by = ct_sql_get(dsl, "order_by");
     if (order_by && order_by->kind == CT_STRING && order_by->data.string_val.len > 0) {
         ct_sb_push_s(&sb, " ORDER BY ");
         ct_sb_push_str(&sb, order_by->data.string_val);
     }
 
-    fxsh_ct_value_t *limit = fxsh_ct_record_get_field(dsl, (sp_str_t){.data = "limit", .len = 5});
-    if (limit && limit->kind == CT_INT && limit->data.int_val >= 0) {
+    s64 limit = ct_sql_get_int(dsl, "limit", -1);
+    if (limit >= 0) {
         char nbuf[32];
-        snprintf(nbuf, sizeof(nbuf), "%lld", (long long)limit->data.int_val);
+        snprintf(nbuf, sizeof(nbuf), "%lld", (long long)limit);
         ct_sb_push_s(&sb, " LIMIT ");
         ct_sb_push_s(&sb, nbuf);
     }
+    s64 offset = ct_sql_get_int(dsl, "offset", -1);
+    if (offset >= 0) {
+        char nbuf[32];
+        snprintf(nbuf, sizeof(nbuf), "%lld", (long long)offset);
+        ct_sb_push_s(&sb, " OFFSET ");
+        ct_sb_push_s(&sb, nbuf);
+    }
+
+    fxsh_ct_value_t *union_q = ct_sql_get(dsl, "union");
+    if (union_q && union_q->kind == CT_LIST && union_q->data.list_val.len > 0) {
+        if (!ct_list_all_strings(union_q)) {
+            ct_set_error("@sql select union must be [string]");
+            return NULL;
+        }
+        for (u32 i = 0; i < union_q->data.list_val.len; i++) {
+            ct_sb_push_s(&sb, " UNION ");
+            ct_sb_push_str(&sb, union_q->data.list_val.items[i]->data.string_val);
+        }
+    }
+    fxsh_ct_value_t *union_all_q = ct_sql_get(dsl, "union_all");
+    if (union_all_q && union_all_q->kind == CT_LIST && union_all_q->data.list_val.len > 0) {
+        if (!ct_list_all_strings(union_all_q)) {
+            ct_set_error("@sql select union_all must be [string]");
+            return NULL;
+        }
+        for (u32 i = 0; i < union_all_q->data.list_val.len; i++) {
+            ct_sb_push_s(&sb, " UNION ALL ");
+            ct_sb_push_str(&sb, union_all_q->data.list_val.items[i]->data.string_val);
+        }
+    }
+
     ct_sb_push_s(&sb, ";");
     return ct_sb_to_string_value(&sb);
 }
@@ -2011,18 +2200,80 @@ static fxsh_ct_value_t *ct_sql_emit_insert(fxsh_ct_value_t *dsl) {
     }
 
     ct_sb_t sb = {.chars = SP_NULLPTR};
-    ct_sb_push_s(&sb, "INSERT INTO ");
-    ct_sql_push_ident(&sb, table->data.string_val);
-    ct_sb_push_s(&sb, " (");
-    if (!ct_sql_push_ident_list(&sb, cols))
-        return NULL;
-    ct_sb_push_s(&sb, ") VALUES (");
-    for (u32 i = 0; i < cols->data.list_val.len; i++) {
-        if (i > 0)
-            ct_sb_push_s(&sb, ", ");
-        ct_sb_push_c(&sb, '?');
+    ct_sb_push_s(&sb, "INSERT");
+    fxsh_ct_value_t *mode = ct_sql_get(dsl, "mode");
+    if (mode && mode->kind == CT_STRING && mode->data.string_val.len > 0) {
+        ct_sb_push_c(&sb, ' ');
+        ct_sb_push_str(&sb, mode->data.string_val);
     }
-    ct_sb_push_s(&sb, ");");
+    ct_sb_push_s(&sb, " INTO ");
+    ct_sql_push_ident_or_expr(&sb, table->data.string_val);
+    ct_sb_push_s(&sb, " (");
+    if (!ct_sql_push_string_list_join(&sb, cols, ", ", true))
+        return NULL;
+    ct_sb_push_s(&sb, ")");
+
+    fxsh_ct_value_t *rows = ct_sql_get(dsl, "rows");
+    fxsh_ct_value_t *values = ct_sql_get(dsl, "values");
+    fxsh_ct_value_t *select_q = ct_sql_get(dsl, "select");
+    if ((rows && values) || (rows && select_q) || (values && select_q)) {
+        ct_set_error("@sql insert rows/values/select are mutually exclusive");
+        return NULL;
+    }
+
+    if (rows) {
+        if (!ct_list_all_list_of_strings(rows) || rows->data.list_val.len == 0) {
+            ct_set_error("@sql insert rows must be [[string]]");
+            return NULL;
+        }
+        ct_sb_push_s(&sb, " VALUES ");
+        for (u32 r = 0; r < rows->data.list_val.len; r++) {
+            fxsh_ct_value_t *row = rows->data.list_val.items[r];
+            if (row->data.list_val.len != cols->data.list_val.len) {
+                ct_set_error("@sql insert row size must equal columns size");
+                return NULL;
+            }
+            if (r > 0)
+                ct_sb_push_s(&sb, ", ");
+            ct_sb_push_c(&sb, '(');
+            if (!ct_sql_push_string_list_join(&sb, row, ", ", false))
+                return NULL;
+            ct_sb_push_c(&sb, ')');
+        }
+    } else if (values) {
+        if (!ct_list_all_strings(values) || values->data.list_val.len != cols->data.list_val.len) {
+            ct_set_error("@sql insert values must be [string] and match columns size");
+            return NULL;
+        }
+        ct_sb_push_s(&sb, " VALUES (");
+        if (!ct_sql_push_string_list_join(&sb, values, ", ", false))
+            return NULL;
+        ct_sb_push_c(&sb, ')');
+    } else if (select_q) {
+        if (select_q->kind != CT_STRING) {
+            ct_set_error("@sql insert select must be string");
+            return NULL;
+        }
+        ct_sb_push_c(&sb, ' ');
+        ct_sb_push_str(&sb, select_q->data.string_val);
+    } else {
+        ct_sb_push_s(&sb, " VALUES (");
+        for (u32 i = 0; i < cols->data.list_val.len; i++) {
+            if (i > 0)
+                ct_sb_push_s(&sb, ", ");
+            ct_sb_push_c(&sb, '?');
+        }
+        ct_sb_push_c(&sb, ')');
+    }
+
+    fxsh_ct_value_t *on_conflict = ct_sql_get(dsl, "on_conflict");
+    if (on_conflict && on_conflict->kind == CT_STRING && on_conflict->data.string_val.len > 0) {
+        ct_sb_push_s(&sb, " ON CONFLICT ");
+        ct_sb_push_str(&sb, on_conflict->data.string_val);
+    }
+    if (!ct_sql_append_returning(&sb, dsl))
+        return NULL;
+    ct_sb_push_s(&sb, ";");
     return ct_sb_to_string_value(&sb);
 }
 
@@ -2036,20 +2287,42 @@ static fxsh_ct_value_t *ct_sql_emit_update(fxsh_ct_value_t *dsl) {
     }
 
     ct_sb_t sb = {.chars = SP_NULLPTR};
-    ct_sb_push_s(&sb, "UPDATE ");
-    ct_sql_push_ident(&sb, table->data.string_val);
+    ct_sb_push_s(&sb, "UPDATE");
+    fxsh_ct_value_t *mode = ct_sql_get(dsl, "mode");
+    if (mode && mode->kind == CT_STRING && mode->data.string_val.len > 0) {
+        ct_sb_push_c(&sb, ' ');
+        ct_sb_push_str(&sb, mode->data.string_val);
+    }
+    ct_sb_push_c(&sb, ' ');
+    ct_sql_push_ident_or_expr(&sb, table->data.string_val);
     ct_sb_push_s(&sb, " SET ");
-    if (!ct_sql_push_text_list_join(&sb, set, ", "))
+    if (!ct_sql_push_string_list_join(&sb, set, ", ", false))
         return NULL;
 
-    fxsh_ct_value_t *where = fxsh_ct_record_get_field(dsl, (sp_str_t){.data = "where", .len = 5});
-    if (where && where->kind == CT_LIST && where->data.list_val.len > 0) {
-        ct_sb_push_s(&sb, " WHERE ");
-        if (!ct_sql_push_text_list_join(&sb, where, " AND ")) {
-            ct_set_error("@sql update where must be [string]");
-            return NULL;
-        }
+    fxsh_ct_value_t *from = ct_sql_get(dsl, "from");
+    if (from && from->kind == CT_STRING && from->data.string_val.len > 0) {
+        ct_sb_push_s(&sb, " FROM ");
+        ct_sb_push_str(&sb, from->data.string_val);
     }
+
+    if (!ct_sql_append_conditions(&sb, dsl, "where", "WHERE", "where_mode", "AND",
+                                  "@sql update where must be [string]"))
+        return NULL;
+
+    fxsh_ct_value_t *order_by = ct_sql_get(dsl, "order_by");
+    if (order_by && order_by->kind == CT_STRING && order_by->data.string_val.len > 0) {
+        ct_sb_push_s(&sb, " ORDER BY ");
+        ct_sb_push_str(&sb, order_by->data.string_val);
+    }
+    s64 limit = ct_sql_get_int(dsl, "limit", -1);
+    if (limit >= 0) {
+        char nbuf[32];
+        snprintf(nbuf, sizeof(nbuf), "%lld", (long long)limit);
+        ct_sb_push_s(&sb, " LIMIT ");
+        ct_sb_push_s(&sb, nbuf);
+    }
+    if (!ct_sql_append_returning(&sb, dsl))
+        return NULL;
     ct_sb_push_s(&sb, ";");
     return ct_sb_to_string_value(&sb);
 }
@@ -2063,16 +2336,202 @@ static fxsh_ct_value_t *ct_sql_emit_delete(fxsh_ct_value_t *dsl) {
 
     ct_sb_t sb = {.chars = SP_NULLPTR};
     ct_sb_push_s(&sb, "DELETE FROM ");
-    ct_sql_push_ident(&sb, table->data.string_val);
+    ct_sql_push_ident_or_expr(&sb, table->data.string_val);
 
-    fxsh_ct_value_t *where = fxsh_ct_record_get_field(dsl, (sp_str_t){.data = "where", .len = 5});
-    if (where && where->kind == CT_LIST && where->data.list_val.len > 0) {
-        ct_sb_push_s(&sb, " WHERE ");
-        if (!ct_sql_push_text_list_join(&sb, where, " AND ")) {
-            ct_set_error("@sql delete where must be [string]");
+    if (!ct_sql_append_conditions(&sb, dsl, "where", "WHERE", "where_mode", "AND",
+                                  "@sql delete where must be [string]"))
+        return NULL;
+    fxsh_ct_value_t *order_by = ct_sql_get(dsl, "order_by");
+    if (order_by && order_by->kind == CT_STRING && order_by->data.string_val.len > 0) {
+        ct_sb_push_s(&sb, " ORDER BY ");
+        ct_sb_push_str(&sb, order_by->data.string_val);
+    }
+    s64 limit = ct_sql_get_int(dsl, "limit", -1);
+    if (limit >= 0) {
+        char nbuf[32];
+        snprintf(nbuf, sizeof(nbuf), "%lld", (long long)limit);
+        ct_sb_push_s(&sb, " LIMIT ");
+        ct_sb_push_s(&sb, nbuf);
+    }
+    if (!ct_sql_append_returning(&sb, dsl))
+        return NULL;
+    ct_sb_push_s(&sb, ";");
+    return ct_sb_to_string_value(&sb);
+}
+
+static fxsh_ct_value_t *ct_sql_emit_create_table(fxsh_ct_value_t *dsl) {
+    fxsh_ct_value_t *table = ct_sql_get(dsl, "table");
+    fxsh_ct_value_t *cols = ct_sql_get(dsl, "columns");
+    fxsh_ct_value_t *as_select = ct_sql_get(dsl, "as_select");
+    if (!table || table->kind != CT_STRING) {
+        ct_set_error("@sql create_table requires table:string");
+        return NULL;
+    }
+    if (!as_select && (!cols || !ct_list_all_strings(cols) || cols->data.list_val.len == 0)) {
+        ct_set_error("@sql create_table requires columns:[string] when as_select is absent");
+        return NULL;
+    }
+
+    ct_sb_t sb = {.chars = SP_NULLPTR};
+    ct_sb_push_s(&sb, "CREATE ");
+    if (ct_sql_get_bool(dsl, "temporary", false))
+        ct_sb_push_s(&sb, "TEMP ");
+    ct_sb_push_s(&sb, "TABLE ");
+    if (ct_sql_get_bool(dsl, "if_not_exists", true))
+        ct_sb_push_s(&sb, "IF NOT EXISTS ");
+    ct_sql_push_ident_or_expr(&sb, table->data.string_val);
+
+    if (as_select && as_select->kind == CT_STRING && as_select->data.string_val.len > 0) {
+        ct_sb_push_s(&sb, " AS ");
+        ct_sb_push_str(&sb, as_select->data.string_val);
+        ct_sb_push_s(&sb, ";");
+        return ct_sb_to_string_value(&sb);
+    }
+
+    ct_sb_push_s(&sb, " (");
+    if (!ct_sql_push_string_list_join(&sb, cols, ", ", false))
+        return NULL;
+    fxsh_ct_value_t *constraints = ct_sql_get(dsl, "constraints");
+    if (constraints && constraints->kind == CT_LIST && constraints->data.list_val.len > 0) {
+        ct_sb_push_s(&sb, ", ");
+        if (!ct_sql_push_string_list_join(&sb, constraints, ", ", false)) {
+            ct_set_error("@sql create_table constraints must be [string]");
             return NULL;
         }
     }
+    ct_sb_push_c(&sb, ')');
+    if (ct_sql_get_bool(dsl, "without_rowid", false))
+        ct_sb_push_s(&sb, " WITHOUT ROWID");
+    if (ct_sql_get_bool(dsl, "strict", false))
+        ct_sb_push_s(&sb, " STRICT");
+    ct_sb_push_s(&sb, ";");
+    return ct_sb_to_string_value(&sb);
+}
+
+static fxsh_ct_value_t *ct_sql_emit_drop_table(fxsh_ct_value_t *dsl) {
+    fxsh_ct_value_t *table = ct_sql_get(dsl, "table");
+    if (!table || table->kind != CT_STRING) {
+        ct_set_error("@sql drop_table requires table:string");
+        return NULL;
+    }
+    ct_sb_t sb = {.chars = SP_NULLPTR};
+    ct_sb_push_s(&sb, "DROP TABLE ");
+    if (ct_sql_get_bool(dsl, "if_exists", true))
+        ct_sb_push_s(&sb, "IF EXISTS ");
+    ct_sql_push_ident_or_expr(&sb, table->data.string_val);
+    ct_sb_push_s(&sb, ";");
+    return ct_sb_to_string_value(&sb);
+}
+
+static fxsh_ct_value_t *ct_sql_emit_create_index(fxsh_ct_value_t *dsl) {
+    fxsh_ct_value_t *name = ct_sql_get(dsl, "name");
+    fxsh_ct_value_t *table = ct_sql_get(dsl, "table");
+    fxsh_ct_value_t *cols = ct_sql_get(dsl, "columns");
+    if (!name || name->kind != CT_STRING || !table || table->kind != CT_STRING || !cols ||
+        !ct_list_all_strings(cols) || cols->data.list_val.len == 0) {
+        ct_set_error("@sql create_index requires name:string, table:string, columns:[string]");
+        return NULL;
+    }
+    ct_sb_t sb = {.chars = SP_NULLPTR};
+    ct_sb_push_s(&sb, "CREATE ");
+    if (ct_sql_get_bool(dsl, "unique", false))
+        ct_sb_push_s(&sb, "UNIQUE ");
+    ct_sb_push_s(&sb, "INDEX ");
+    if (ct_sql_get_bool(dsl, "if_not_exists", true))
+        ct_sb_push_s(&sb, "IF NOT EXISTS ");
+    ct_sql_push_ident_or_expr(&sb, name->data.string_val);
+    ct_sb_push_s(&sb, " ON ");
+    ct_sql_push_ident_or_expr(&sb, table->data.string_val);
+    ct_sb_push_s(&sb, " (");
+    if (!ct_sql_push_string_list_join(&sb, cols, ", ", false))
+        return NULL;
+    ct_sb_push_c(&sb, ')');
+    if (!ct_sql_append_conditions(&sb, dsl, "where", "WHERE", "where_mode", "AND",
+                                  "@sql create_index where must be [string]"))
+        return NULL;
+    ct_sb_push_s(&sb, ";");
+    return ct_sb_to_string_value(&sb);
+}
+
+static fxsh_ct_value_t *ct_sql_emit_pragma(fxsh_ct_value_t *dsl) {
+    fxsh_ct_value_t *name = ct_sql_get(dsl, "name");
+    if (!name || name->kind != CT_STRING || name->data.string_val.len == 0) {
+        ct_set_error("@sql pragma requires name:string");
+        return NULL;
+    }
+    ct_sb_t sb = {.chars = SP_NULLPTR};
+    ct_sb_push_s(&sb, "PRAGMA ");
+    ct_sb_push_str(&sb, name->data.string_val);
+    fxsh_ct_value_t *value = ct_sql_get(dsl, "value");
+    if (value) {
+        ct_sb_push_s(&sb, " = ");
+        switch (value->kind) {
+            case CT_STRING:
+                ct_sb_push_str(&sb, value->data.string_val);
+                break;
+            case CT_INT: {
+                char nbuf[32];
+                snprintf(nbuf, sizeof(nbuf), "%lld", (long long)value->data.int_val);
+                ct_sb_push_s(&sb, nbuf);
+                break;
+            }
+            case CT_BOOL:
+                ct_sb_push_s(&sb, value->data.bool_val ? "1" : "0");
+                break;
+            default:
+                ct_set_error("@sql pragma value must be string/int/bool");
+                return NULL;
+        }
+    }
+    ct_sb_push_s(&sb, ";");
+    return ct_sb_to_string_value(&sb);
+}
+
+static fxsh_ct_value_t *ct_sql_emit_explain(fxsh_ct_value_t *dsl) {
+    fxsh_ct_value_t *query = ct_sql_get(dsl, "query");
+    if (!query || query->kind != CT_STRING || query->data.string_val.len == 0) {
+        ct_set_error("@sql explain requires query:string");
+        return NULL;
+    }
+    ct_sb_t sb = {.chars = SP_NULLPTR};
+    ct_sb_push_s(&sb, ct_sql_get_bool(dsl, "query_plan", false) ? "EXPLAIN QUERY PLAN "
+                                                                : "EXPLAIN ");
+    ct_sb_push_str(&sb, query->data.string_val);
+    if (query->data.string_val.data[query->data.string_val.len - 1] != ';')
+        ct_sb_push_c(&sb, ';');
+    return ct_sb_to_string_value(&sb);
+}
+
+static fxsh_ct_value_t *ct_sql_emit_copy(fxsh_ct_value_t *dsl) {
+    fxsh_ct_value_t *table = ct_sql_get(dsl, "table");
+    fxsh_ct_value_t *src = ct_sql_get(dsl, "from_select");
+    if (!table || table->kind != CT_STRING || !src || src->kind != CT_STRING) {
+        ct_set_error("@sql copy requires table:string, from_select:string");
+        return NULL;
+    }
+    ct_sb_t sb = {.chars = SP_NULLPTR};
+    ct_sb_push_s(&sb, "INSERT INTO ");
+    ct_sql_push_ident_or_expr(&sb, table->data.string_val);
+    ct_sb_push_c(&sb, ' ');
+    ct_sb_push_str(&sb, src->data.string_val);
+    ct_sb_push_s(&sb, ";");
+    return ct_sb_to_string_value(&sb);
+}
+
+static fxsh_ct_value_t *ct_sql_emit_upsert(fxsh_ct_value_t *dsl) {
+    fxsh_ct_value_t *base_insert = ct_sql_get(dsl, "insert");
+    fxsh_ct_value_t *on_conflict = ct_sql_get(dsl, "on_conflict");
+    if (!base_insert || base_insert->kind != CT_STRING || !on_conflict ||
+        on_conflict->kind != CT_STRING) {
+        ct_set_error("@sql upsert requires insert:string, on_conflict:string");
+        return NULL;
+    }
+    ct_sb_t sb = {.chars = SP_NULLPTR};
+    ct_sb_push_str(&sb, base_insert->data.string_val);
+    if (base_insert->data.string_val.data[base_insert->data.string_val.len - 1] == ';')
+        sp_dyn_array_pop(sb.chars);
+    ct_sb_push_s(&sb, " ON CONFLICT ");
+    ct_sb_push_str(&sb, on_conflict->data.string_val);
     ct_sb_push_s(&sb, ";");
     return ct_sb_to_string_value(&sb);
 }
@@ -2111,6 +2570,20 @@ static fxsh_ct_value_t *fxsh_ct_op_sql(fxsh_ct_value_t *dsl) {
         return ct_sql_emit_update(dsl);
     if (sp_str_equal(op->data.string_val, (sp_str_t){.data = "delete", .len = 6}))
         return ct_sql_emit_delete(dsl);
+    if (sp_str_equal(op->data.string_val, (sp_str_t){.data = "create_table", .len = 12}))
+        return ct_sql_emit_create_table(dsl);
+    if (sp_str_equal(op->data.string_val, (sp_str_t){.data = "drop_table", .len = 10}))
+        return ct_sql_emit_drop_table(dsl);
+    if (sp_str_equal(op->data.string_val, (sp_str_t){.data = "create_index", .len = 12}))
+        return ct_sql_emit_create_index(dsl);
+    if (sp_str_equal(op->data.string_val, (sp_str_t){.data = "pragma", .len = 6}))
+        return ct_sql_emit_pragma(dsl);
+    if (sp_str_equal(op->data.string_val, (sp_str_t){.data = "explain", .len = 7}))
+        return ct_sql_emit_explain(dsl);
+    if (sp_str_equal(op->data.string_val, (sp_str_t){.data = "copy", .len = 4}))
+        return ct_sql_emit_copy(dsl);
+    if (sp_str_equal(op->data.string_val, (sp_str_t){.data = "upsert", .len = 6}))
+        return ct_sql_emit_upsert(dsl);
 
     ct_set_error("@sql unknown op: %s", fxsh_ct_value_to_string(op));
     return NULL;

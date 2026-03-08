@@ -1,28 +1,38 @@
 let select_sql = comptime {
   @sql({
     op = "select",
-    columns = ["id", "email", "active"],
-    from = "users",
-    where = ["active = ?", "id > ?"],
-    order_by = "id DESC",
-    limit = 20
+    distinct = true,
+    columns = ["u.id", "u.email", "count(i.id) as invoice_count"],
+    from = "users u",
+    joins = ["LEFT JOIN invoices i ON i.user_id = u.id"],
+    where = ["u.active = ?", "u.id > ?"],
+    group_by = ["u.id", "u.email"],
+    having = ["count(i.id) >= ?"],
+    order_by = "u.id DESC",
+    limit = 20,
+    offset = 5
   })
 }
 
 let insert_sql = comptime {
   @sql({
     op = "insert",
+    mode = "OR REPLACE",
     table = "users",
-    columns = ["id", "email", "active"]
+    columns = ["id", "email", "active"],
+    on_conflict = "(id) DO UPDATE SET email = excluded.email, active = excluded.active",
+    returning = ["id", "email"]
   })
 }
 
 let update_sql = comptime {
   @sql({
     op = "update",
+    mode = "OR ABORT",
     table = "users",
     set = ["email = ?", "active = ?"],
-    where = ["id = ?"]
+    where = ["id = ?"],
+    returning = "id"
   })
 }
 
@@ -30,14 +40,46 @@ let delete_sql = comptime {
   @sql({
     op = "delete",
     table = "users",
-    where = ["id = ?"]
+    where = ["id = ?"],
+    limit = 1
   })
 }
 
-let raw_sql = comptime { @sql({ op = "raw", text = "PRAGMA journal_mode=WAL;" }) }
+let create_table_sql = comptime {
+  @sql({
+    op = "create_table",
+    table = "audit_logs",
+    columns = [
+      "id INTEGER PRIMARY KEY",
+      "user_id INTEGER NOT NULL",
+      "action TEXT NOT NULL",
+      "created_at TEXT NOT NULL"
+    ],
+    strict = true
+  })
+}
+
+let create_index_sql = comptime {
+  @sql({
+    op = "create_index",
+    unique = false,
+    name = "idx_audit_user_time",
+    table = "audit_logs",
+    columns = ["user_id", "created_at DESC"],
+    where = ["user_id > 0"]
+  })
+}
+
+let pragma_sql = comptime { @sql({ op = "pragma", name = "journal_mode", value = "WAL" }) }
+let explain_sql = comptime { @sql({ op = "explain", query_plan = true, query = select_sql }) }
+let raw_sql = comptime { @sql({ op = "raw", text = "VACUUM;" }) }
 
 let _ = print select_sql
 let _ = print insert_sql
 let _ = print update_sql
 let _ = print delete_sql
+let _ = print create_table_sql
+let _ = print create_index_sql
+let _ = print pragma_sql
+let _ = print explain_sql
 let _ = print raw_sql
