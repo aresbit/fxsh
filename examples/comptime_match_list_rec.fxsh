@@ -1,0 +1,21 @@
+let comptime head_or = fn xs def ->
+  match xs with
+  | [] -> def
+  | x :: _ -> x
+  end
+
+let comptime rec sum = fn xs ->
+  match xs with
+  | [] -> 0
+  | x :: rest -> x + sum rest
+  end
+
+let comptime M = match [1, 2, 3] with
+| [a, b, c] -> a + b + c
+| _ -> 0
+end
+
+let comptime R1 = head_or [] 7
+let comptime R2 = head_or [9, 8] 0
+let comptime R3 = sum [1, 2, 3, 4]
+let comptime R4 = M

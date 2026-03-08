@@ -125,6 +125,7 @@ static fxsh_ct_value_t *eval_expr(fxsh_ast_node_t *ast, fxsh_comptime_ctx_t *ctx
 fxsh_ct_value_t *fxsh_ct_type_name(fxsh_ct_value_t *type_val);
 static fxsh_ct_value_t *fxsh_ct_is_record(fxsh_ct_value_t *type_val);
 static fxsh_ct_value_t *fxsh_ct_is_tuple(fxsh_ct_value_t *type_val);
+static fxsh_ct_value_t *eval_match(fxsh_ast_node_t *ast, fxsh_comptime_ctx_t *ctx);
 
 static void ct_set_error(const c8 *fmt, ...) {
     va_list ap;
@@ -148,6 +149,31 @@ static fxsh_ct_env_t *clone_env(fxsh_ct_env_t *src) {
         sp_ht_insert(*dst, k, v);
     }
     return dst;
+}
+
+static void ct_env_bind_local(fxsh_ct_env_t **env, sp_str_t name, fxsh_ct_value_t *val) {
+    if (!env || !val)
+        return;
+    if (!*env) {
+        *env = fxsh_alloc0(sizeof(fxsh_ct_env_t));
+        **env = SP_NULLPTR;
+    }
+    sp_ht_for(**env, it) {
+        sp_str_t k = *sp_ht_it_getkp(**env, it);
+        if (sp_str_equal(k, name)) {
+            *sp_ht_it_getp(**env, it) = *val;
+            return;
+        }
+    }
+    sp_ht_insert(**env, name, *val);
+}
+
+static void ct_bind_recursive_closure(sp_str_t self_name, fxsh_ct_value_t *val) {
+    if (!val || val->kind != CT_FUNCTION)
+        return;
+    fxsh_ct_env_t *closure = (fxsh_ct_env_t *)val->data.func_val.closure;
+    ct_env_bind_local(&closure, self_name, val);
+    val->data.func_val.closure = closure;
 }
 
 static fxsh_ast_node_t *clone_ast(fxsh_ast_node_t *n);
@@ -287,6 +313,8 @@ static bool ct_function_to_ast_expr(fxsh_ct_value_t *v, fxsh_ast_node_t **out) {
         sp_ht_for(*closure_env, it) {
             sp_str_t name = *sp_ht_it_getkp(*closure_env, it);
             fxsh_ct_value_t *cv = sp_ht_it_getp(*closure_env, it);
+            if (cv && cv->kind == CT_FUNCTION)
+                continue;
             fxsh_ast_node_t *rhs = NULL;
             if (!ct_value_to_ast_expr(cv, &rhs))
                 continue;
@@ -511,19 +539,123 @@ static fxsh_ct_value_t *eval_if(fxsh_ast_node_t *ast, fxsh_comptime_ctx_t *ctx) 
     return fxsh_ct_unit();
 }
 
+static bool ct_bind_pattern(fxsh_ast_node_t *pat, fxsh_ct_value_t *val, fxsh_ct_env_t **env) {
+    if (!pat)
+        return false;
+
+    switch (pat->kind) {
+        case AST_PAT_WILD:
+            return true;
+        case AST_PAT_VAR:
+            ct_env_bind_local(env, pat->data.ident, val);
+            return true;
+        case AST_PAT_TUPLE:
+        case AST_LIST: {
+            if (!val || val->kind != CT_LIST)
+                return false;
+            u32 n = (u32)sp_dyn_array_size(pat->data.elements);
+            if (n != val->data.list_val.len)
+                return false;
+            for (u32 i = 0; i < n; i++) {
+                if (!ct_bind_pattern(pat->data.elements[i], val->data.list_val.items[i], env))
+                    return false;
+            }
+            return true;
+        }
+        case AST_PAT_CONS: {
+            if (!val || val->kind != CT_LIST || val->data.list_val.len == 0)
+                return false;
+            if (sp_dyn_array_size(pat->data.elements) != 2)
+                return false;
+            fxsh_ct_value_t *head = val->data.list_val.items[0];
+            fxsh_ct_value_t *tail = fxsh_ct_list(val->data.list_val.items + 1, val->data.list_val.len - 1);
+            return ct_bind_pattern(pat->data.elements[0], head, env) &&
+                   ct_bind_pattern(pat->data.elements[1], tail, env);
+        }
+        case AST_PAT_RECORD: {
+            if (!val || val->kind != CT_STRUCT)
+                return false;
+            sp_dyn_array_for(pat->data.elements, i) {
+                fxsh_ast_node_t *f = pat->data.elements[i];
+                if (!f || f->kind != AST_FIELD_ACCESS || !f->data.field.object)
+                    return false;
+                fxsh_ct_value_t *fv = fxsh_ct_record_get_field(val, f->data.field.field);
+                if (!fv)
+                    return false;
+                if (!ct_bind_pattern(f->data.field.object, fv, env))
+                    return false;
+            }
+            return true;
+        }
+        case AST_LIT_INT:
+            return val && val->kind == CT_INT && pat->data.lit_int == val->data.int_val;
+        case AST_LIT_FLOAT:
+            return val && val->kind == CT_FLOAT && pat->data.lit_float == val->data.float_val;
+        case AST_LIT_STRING:
+            return val && val->kind == CT_STRING && sp_str_equal(pat->data.lit_string, val->data.string_val);
+        case AST_LIT_BOOL:
+            return val && val->kind == CT_BOOL && pat->data.lit_bool == val->data.bool_val;
+        case AST_LIT_UNIT:
+            return val && val->kind == CT_UNIT;
+        case AST_PAT_CONSTR:
+        default:
+            return false;
+    }
+}
+
+static fxsh_ct_value_t *eval_match(fxsh_ast_node_t *ast, fxsh_comptime_ctx_t *ctx) {
+    fxsh_ct_value_t *mv = eval_expr(ast->data.match_expr.expr, ctx);
+    if (!mv)
+        return NULL;
+
+    sp_dyn_array_for(ast->data.match_expr.arms, i) {
+        fxsh_ast_node_t *arm = ast->data.match_expr.arms[i];
+        if (!arm || arm->kind != AST_MATCH_ARM)
+            continue;
+
+        fxsh_comptime_ctx_t arm_ctx = *ctx;
+        arm_ctx.env = clone_env(ctx->env);
+        if (!ct_bind_pattern(arm->data.match_arm.pattern, mv, &arm_ctx.env))
+            continue;
+
+        if (arm->data.match_arm.guard) {
+            fxsh_ct_value_t *g = eval_expr(arm->data.match_arm.guard, &arm_ctx);
+            if (!g || g->kind != CT_BOOL || !g->data.bool_val)
+                continue;
+        }
+        return eval_expr(arm->data.match_arm.body, &arm_ctx);
+    }
+
+    ct_set_error("non-exhaustive compile-time match at %u:%u", ast->loc.line, ast->loc.column);
+    return NULL;
+}
+
 static fxsh_ct_value_t *eval_let_in(fxsh_ast_node_t *ast, fxsh_comptime_ctx_t *ctx) {
-    /* Evaluate each binding and add to environment */
+    fxsh_comptime_ctx_t scoped = *ctx;
+    scoped.env = clone_env(ctx->env);
+
     sp_dyn_array_for(ast->data.let_in.bindings, i) {
         fxsh_ast_node_t *binding = ast->data.let_in.bindings[i];
         if (binding->kind == AST_DECL_LET || binding->kind == AST_LET) {
-            fxsh_ct_value_t *val = eval_expr(binding->data.let.value, ctx);
-            if (val) {
-                bind_var(ctx, binding->data.let.name, val);
+            if (binding->data.let.is_rec) {
+                fxsh_ct_value_t *slot = fxsh_ct_unit();
+                ct_env_bind_local(&scoped.env, binding->data.let.name, slot);
+                fxsh_ct_value_t *val = eval_expr(binding->data.let.value, &scoped);
+                if (!val)
+                    return NULL;
+                ct_bind_recursive_closure(binding->data.let.name, val);
+                ct_env_bind_local(&scoped.env, binding->data.let.name, val);
+                continue;
             }
+
+            fxsh_ct_value_t *val = eval_expr(binding->data.let.value, &scoped);
+            if (!val)
+                return NULL;
+            ct_env_bind_local(&scoped.env, binding->data.let.name, val);
         }
     }
 
-    return eval_expr(ast->data.let_in.body, ctx);
+    return eval_expr(ast->data.let_in.body, &scoped);
 }
 
 static fxsh_ct_value_t *eval_call(fxsh_ast_node_t *ast, fxsh_comptime_ctx_t *ctx) {
@@ -791,6 +923,8 @@ static fxsh_ct_value_t *eval_expr(fxsh_ast_node_t *ast, fxsh_comptime_ctx_t *ctx
             return eval_unary(ast, ctx);
         case AST_IF:
             return eval_if(ast, ctx);
+        case AST_MATCH:
+            return eval_match(ast, ctx);
         case AST_LET_IN:
             return eval_let_in(ast, ctx);
         case AST_LAMBDA:
@@ -975,8 +1109,15 @@ fxsh_ct_result_t fxsh_ct_eval(fxsh_ast_node_t *ast, fxsh_comptime_ctx_t *ctx) {
 
     /* Handle declarations */
     if ((ast->kind == AST_DECL_LET || ast->kind == AST_LET) && ast->data.let.is_comptime) {
+        if (ast->data.let.is_rec) {
+            fxsh_ct_value_t *slot = fxsh_ct_unit();
+            bind_var(ctx, ast->data.let.name, slot);
+        }
+
         fxsh_ct_value_t *val = eval_expr(ast->data.let.value, ctx);
         if (val) {
+            if (ast->data.let.is_rec)
+                ct_bind_recursive_closure(ast->data.let.name, val);
             bind_var(ctx, ast->data.let.name, val);
             result.value = val;
         } else {
