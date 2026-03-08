@@ -1,0 +1,14 @@
+let head_or = fn fallback xs ->
+  match xs with
+  | [] -> fallback
+  | x :: _ -> x
+  end
+
+let root = if argc() == 0 then "stdlib" else argv_at(0)
+let entries = list_dir root
+let walked = walk_dir root
+
+print ("root=" ++ root ++
+       "|is_dir=" ++ (if is_dir root then "true" else "false") ++
+       "|entry0=" ++ (head_or "" entries) ++
+       "|walk0=" ++ (head_or "" walked))

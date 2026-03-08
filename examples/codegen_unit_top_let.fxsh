@@ -1,0 +1,3 @@
+let _ = print "first"
+let _ = print "second"
+let _ = print "ok"

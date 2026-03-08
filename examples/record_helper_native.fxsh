@@ -1,0 +1,4 @@
+let get_code = fn r -> r.code
+let ok = fn r -> get_code r == 0
+let x = { code = 0, stdout = "ok", stderr = "" }
+print (if ok x then x.stdout else x.stderr)

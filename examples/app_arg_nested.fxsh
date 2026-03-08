@@ -1,0 +1,11 @@
+import Nestarg
+
+let first_or : string -> string list -> string = fn fallback xs ->
+  match xs with
+  | [] -> fallback
+  | x :: _ -> x
+  end
+
+let ys = Nestarg.id ["ok"]
+print (first_or "" ys)
+print (first_or "" (Nestarg.id ["ok"]))

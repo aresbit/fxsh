@@ -7,6 +7,12 @@
   - release surface includes modules/imports, ADTs/match, records, comptime, FFI,
     interpreter/native/native-codegen, and explicit trait/impl namespaces
   - added `docs/half_hour_fxsh.md` as the primary learning guide for new users
+- Release size snapshot:
+  - core implementation (`src/` + `include/`): 15 files, about 19,166 lines
+  - release-related tracked files (`src/`, `include/`, `tests/`, `examples/`, `stdlib/`, `docs/`,
+    `README.md`, `DESIGN.md`, `Makefile`, `changelog.md`): 143 files, about 23,022 lines
+  - Codex token usage was not recorded in a directly queryable way in the local environment, so
+    no exact token count is published here
 
 ## 2026-03-07
 

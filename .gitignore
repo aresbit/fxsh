@@ -19,3 +19,8 @@ compile_commands.json
 # OS
 .DS_Store
 Thumbs.db
+
+# Local temp/debug
+.fxsh_tmp/
+agents/__pycache__/
+external/

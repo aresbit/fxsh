@@ -1,0 +1,5 @@
+print (("a" ++
+        "b") ++
+       (if true
+        then "c"
+        else "d"))

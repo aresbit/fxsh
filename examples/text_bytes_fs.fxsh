@@ -1,0 +1,95 @@
+import Text
+import Bytes
+import Fs
+
+let first_or : string -> string list -> string = fn fallback xs ->
+  match xs with
+  | [] -> fallback
+  | x :: _ -> x
+  end
+
+let ok_text =
+  let parts = Text.split "--" "a--b--c" in
+  let words = Text.split_whitespace "  hello\tworld\nfxsh " in
+  let split_once_ok =
+    match Text.split_once "=" "k=v" with
+    | Text.Split (k, v) -> (k == "k") and (v == "v")
+    | Text.Missing -> false
+    end
+  in
+  (Text.length "abc" == 3) and
+  (Text.slice "abcdef" 2 3 == "cde") and
+  (Text.find "cd" "abcdef" == 2) and
+  (Text.last_index_of "ab" "zzabyyab" == 6) and
+  (Text.index_of_from "ab" "zzabyyab" 3 == 6) and
+  (Text.char_at "abcdef" 1 == "b") and
+  (Text.starts_with_at "cd" "abcdef" 2) and
+  (Text.take_digits "123abc" == "123") and
+  (Text.drop_spaces " \t abc" == "abc") and
+  (Text.starts_with "ab" "abcdef") and
+  (Text.ends_with "ef" "abcdef") and
+  (Text.trim "  hi\t" == "hi") and
+  (Text.repeat 3 "xy" == "xyxyxy") and
+  (Text.replace_all "ab" "XY" "zab12ab" == "zXY12XY") and
+  (Text.before_first ":" "k:v:x" == "k") and
+  (Text.after_first ":" "k:v:x" == "v:x") and
+  (Text.trim_prefix "pre_" "pre_name" == "name") and
+  (Text.trim_suffix ".txt" "demo.txt" == "demo") and
+  (Text.take_letters "abc123" == "abc") and
+  (Text.take_ident "_name42!" == "_name42") and
+  split_once_ok and
+  (first_or "" parts == "a") and
+  (first_or "" words == "hello")
+
+let ok_bytes =
+  let raw = Bytes.of_list [65, 66, 67] in
+  (Bytes.length raw == 3) and
+  (Bytes.get raw 0 == 65) and
+  (Bytes.get raw 1 == 66) and
+  (Bytes.get raw 2 == 67) and
+  (Bytes.to_string raw == "ABC") and
+  (Bytes.slice raw 1 2 == "BC")
+
+let ok_fs =
+  let entries = Fs.list_dir_paths "stdlib" in
+  let first = first_or "" entries in
+  let tmp_dir = "build/fxsh_fs_tmp/a/b" in
+  let src = "build/fxsh_fs_tmp/data.txt" in
+  let dst = "build/fxsh_fs_tmp/data2.txt" in
+  let lines_path = "build/fxsh_fs_tmp/lines.txt" in
+  let line_payload = Text.join "\n" ["a"; "b"] in
+  let line_head =
+    match Fs.read_lines lines_path with
+    | x :: _ -> x
+    | [] -> ""
+    end
+  in
+  (Fs.is_dir_path "stdlib") and
+  (Fs.is_file_path "stdlib/text.fxsh") and
+  (Fs.dirname "a/b/c.txt" == "a/b") and
+  (Fs.basename "a/b/c.txt" == "c.txt") and
+  (Fs.extension "a/b/c.txt" == "txt") and
+  (Fs.stem "a/b/c.txt" == "c") and
+  (Fs.has_extension "txt" "a/b/c.txt") and
+  (Fs.replace_extension "json" "a/b/c.txt" == "a/b/c.json") and
+  (Fs.replace_basename "renamed.md" "a/b/c.txt" == "a/b/renamed.md") and
+  (Fs.is_abs_path "/tmp/demo") and
+  (Fs.is_hidden_name ".env") and
+  (Fs.parent_or_self "a/b/c.txt" == "a/b") and
+  (Fs.path_join "a/b" "c.txt" == "a/b/c.txt") and
+  (Fs.ensure_dir tmp_dir) and
+  (Fs.ensure_parent_dir lines_path) and
+  (Fs.is_dir_path tmp_dir) and
+  (Fs.size "stdlib/text.fxsh" > 0) and
+  (Fs.write_text src "payload") and
+  (Fs.write_text lines_path line_payload) and
+  ((line_head == "") or (line_head == "a")) and
+  (Fs.move_path src dst) and
+  (Fs.is_file_path dst) and
+  (Fs.delete_file dst) and
+  (Fs.delete_file lines_path) and
+  (not (Fs.is_file_path dst)) and
+  (first != "") and
+  (Text.starts_with "stdlib/" first)
+
+print (if ok_text and ok_bytes and ok_fs then "ok" else "bad")

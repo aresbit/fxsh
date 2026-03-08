@@ -1,0 +1,19 @@
+import Fs
+import Json
+
+let _ = Fs.ensure_dir "build"
+
+let source = "{ \"agent\": { \"name\": \"fx\", \"ok\": true, \"steps\": [1, 2, 3] } }"
+let path = "build/json_stdlib_file.json"
+
+let doc = Json.of_text source
+let _ = Json.write_file path doc
+let loaded = Json.read_file path
+let name = Json.get_string_or loaded "agent.name" "missing"
+let ok = Json.get_bool_or loaded "agent.ok" false
+let step1 = Json.get_int_or loaded "agent.steps[1]" 0
+let _ = print name
+let _ = print (if ok then "true" else "false")
+let _ = print (if step1 == 2 then "2" else "bad")
+let _ = print (Json.encode_string "line\nbreak")
+let out = "done"

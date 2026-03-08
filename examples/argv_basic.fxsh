@@ -1,0 +1,1 @@
+print (argv0() ++ "|" ++ (if argc() == 2 then argv_at(0) ++ "|" ++ argv_at(1) ++ "|ok" else "argc-mismatch"))
