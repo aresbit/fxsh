@@ -271,13 +271,4 @@ if [ -x "$APP_DIR/bin/fx-doctor-native" ]; then
 fi
 
 FXSH_BIN=${FXSH_BIN:-"$APP_DIR/../../bin/fxsh"}
-TMP_OUT=$(mktemp)
-if "$FXSH_BIN" "$APP_DIR/src/main.fxsh" >"$TMP_OUT" 2>&1; then
-  awk '''BEGIN { emit = 0 } /^Comptime evaluation:$/ { emit = 1; next } /^Interpreter:$/ { exit } /^Native:$/ { exit } { if (emit && $0 !~ /^  comptime /) print }''' "$TMP_OUT"
-  rm -f "$TMP_OUT"
-  exit 0
-else
-  cat "$TMP_OUT" >&2
-  rm -f "$TMP_OUT"
-  exit 1
-fi
+exec "$FXSH_BIN" "$APP_DIR/src/main.fxsh"
