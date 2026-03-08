@@ -1,0 +1,48 @@
+import Regex
+
+let usage = fn _ ->
+  let _ = print "Usage: ctx [--dump] <regex> [strings...]" in
+  let _ = print "Example: ctx --dump 'a(b|c)*d' ad abcd accd axd" in
+  ()
+
+let rec run_from = fn cre i argc0 ->
+  if i >= argc0 then ()
+  else
+    let s = argv_at i in
+    let ok = Regex.is_match cre s in
+    let _ = print ((if ok then "MATCH" else "MISS") ++ "\t" ++ s) in
+    run_from cre (i + 1) argc0
+  end
+
+let main = fn _ ->
+  let n = argc() in
+  if n < 1 then
+    usage 0
+  else
+    let a0 = argv_at 0 in
+    let with_dump = a0 == "--dump" in
+    let pidx = if with_dump then 1 else 0 in
+    if n <= pidx then
+      usage 0
+    else
+      let pattern = argv_at pidx in
+      let cre = Regex.compile pattern in
+      let start = pidx + 1 in
+      let run_inputs = fn _ ->
+        if start >= n then
+          let _ = print ("compiled ok: " ++ pattern) in
+          ()
+        else
+          run_from cre start n
+        end
+      in
+      if with_dump then
+        let _ = Regex.dump cre in
+        run_inputs 0
+      else
+        run_inputs 0
+      end
+    end
+  end
+
+let _ = main 0

@@ -1,0 +1,321 @@
+# regex.fxsh - Thompson-style regex engine in pure fxsh
+
+import Text
+
+let rec len = fn xs ->
+  match xs with
+  | [] -> 0
+  | _ :: ys -> 1 + (len ys)
+  end
+
+let rec rev_into = fn acc xs ->
+  match xs with
+  | [] -> acc
+  | x :: ys -> rev_into (x :: acc) ys
+  end
+
+let rev = fn xs -> rev_into [] xs
+
+let rec append = fn a b ->
+  match a with
+  | [] -> b
+  | x :: xs -> x :: (append xs b)
+  end
+
+let rec mem_int = fn x xs ->
+  match xs with
+  | [] -> false
+  | y :: ys -> if x == y then true else mem_int x ys
+  end
+
+let rec mem_str = fn x xs ->
+  match xs with
+  | [] -> false
+  | y :: ys -> if x == y then true else mem_str x ys
+  end
+
+let rec get_state = fn states sid ->
+  match states with
+  | [] -> { id = -1, kind = "invalid", ch = "", out = -1, out1 = -1 }
+  | s :: ss -> if s.id == sid then s else get_state ss sid
+  end
+
+let rec set_out = fn states sid v ->
+  match states with
+  | [] -> []
+  | s :: ss ->
+      if s.id == sid then
+        { id = s.id, kind = s.kind, ch = s.ch, out = v, out1 = s.out1 } :: (set_out ss sid v)
+      else
+        s :: (set_out ss sid v)
+      end
+  end
+
+let rec set_out1 = fn states sid v ->
+  match states with
+  | [] -> []
+  | s :: ss ->
+      if s.id == sid then
+        { id = s.id, kind = s.kind, ch = s.ch, out = s.out, out1 = v } :: (set_out1 ss sid v)
+      else
+        s :: (set_out1 ss sid v)
+      end
+  end
+
+let lit = fn ch -> "LIT:" ++ ch
+let is_lit = fn t -> Text.starts_with "LIT:" t
+let lit_ch = fn t -> Text.drop 4 t
+
+let rec tokenize_go = fn pattern n i acc ->
+  if i >= n then
+    rev acc
+  else
+    let ch = Text.char_at pattern i in
+    if ch == "\\" then
+      if i + 1 >= n then rev ("ERR_DANGLING_ESCAPE" :: acc)
+      else tokenize_go pattern n (i + 2) ((lit (Text.char_at pattern (i + 1))) :: acc)
+      end
+    else if ch == "(" then tokenize_go pattern n (i + 1) ("LP" :: acc)
+    else if ch == ")" then tokenize_go pattern n (i + 1) ("RP" :: acc)
+    else if ch == "|" then tokenize_go pattern n (i + 1) ("OR" :: acc)
+    else if ch == "*" then tokenize_go pattern n (i + 1) ("STAR" :: acc)
+    else if ch == "+" then tokenize_go pattern n (i + 1) ("PLUS" :: acc)
+    else if ch == "?" then tokenize_go pattern n (i + 1) ("QMARK" :: acc)
+    else if ch == "." then tokenize_go pattern n (i + 1) ("DOT" :: acc)
+    else tokenize_go pattern n (i + 1) ((lit ch) :: acc)
+    end
+
+let tokenize = fn pattern -> tokenize_go pattern (Text.length pattern) 0 []
+
+let atom_start = fn t -> (is_lit t) or (t == "LP") or (t == "DOT")
+let atom_end = fn t -> (is_lit t) or (t == "RP") or (t == "DOT") or (t == "STAR") or (t == "PLUS") or (t == "QMARK")
+
+let rec insert_concat_go = fn prev rest acc ->
+  match rest with
+  | [] -> rev acc
+  | t :: ts ->
+      let need = if prev == "" then false else (atom_end prev) and (atom_start t) in
+      if need then insert_concat_go t ts (t :: ("CAT" :: acc))
+      else insert_concat_go t ts (t :: acc)
+      end
+  end
+
+let insert_concat = fn toks -> insert_concat_go "" toks []
+
+let prec = fn op -> if op == "OR" then 1 else if op == "CAT" then 2 else 0
+
+let rec pop_ops = fn minp ops out ->
+  match ops with
+  | [] -> (ops, out)
+  | op :: rest ->
+      if op == "LP" then (ops, out)
+      else if prec op >= minp then pop_ops minp rest (op :: out)
+      else (ops, out)
+      end
+  end
+
+let rec pop_until_lp = fn ops out ->
+  match ops with
+  | [] -> Err "unmatched )"
+  | x :: xr -> if x == "LP" then Ok (xr, out) else pop_until_lp xr (x :: out)
+  end
+
+let rec flush_ops = fn ops out ->
+  match ops with
+  | [] -> Ok (rev out)
+  | op :: rest -> if op == "LP" then Err "unmatched (" else flush_ops rest (op :: out)
+  end
+
+let rec to_postfix_go = fn ts ops out ->
+  match ts with
+  | [] -> flush_ops ops out
+  | t :: rest ->
+      if t == "ERR_DANGLING_ESCAPE" then Err "dangling escape"
+      else if (is_lit t) or (t == "DOT") then to_postfix_go rest ops (t :: out)
+      else if (t == "STAR") or (t == "PLUS") or (t == "QMARK") then to_postfix_go rest ops (t :: out)
+      else if t == "LP" then to_postfix_go rest (t :: ops) out
+      else if t == "RP" then
+        match pop_until_lp ops out with
+        | Ok (ops2, out2) -> to_postfix_go rest ops2 out2
+        | Err e -> Err e
+        end
+      else if (t == "OR") or (t == "CAT") then
+        match pop_ops (prec t) ops out with
+        | (ops2, out2) -> to_postfix_go rest (t :: ops2) out2
+        end
+      else Err "unknown token"
+      end
+  end
+
+let to_postfix = fn toks -> to_postfix_go toks [] []
+
+let out_out = fn sid -> sid
+let out_out1 = fn sid -> -sid - 1
+let out_sid = fn r -> if r >= 0 then r else -r - 1
+let out_is_out1 = fn r -> r < 0
+
+let patch_one = fn states r target ->
+  if out_is_out1 r then set_out1 states (out_sid r) target else set_out states (out_sid r) target
+
+let rec patch_all = fn states refs target ->
+  match refs with
+  | [] -> states
+  | r :: rs -> patch_all (patch_one states r target) rs target
+  end
+
+let new_state = fn states kind ch out out1 ->
+  let id = len states in
+  let s = { id = id, kind = kind, ch = ch, out = out, out1 = out1 } in
+  (append states [s], id)
+
+let rec compile_step = fn toks states stack post ->
+  match toks with
+  | [] ->
+      match stack with
+      | [] -> Err "empty postfix"
+      | f :: _ ->
+          match new_state states "match" "" (-1) (-1) with
+          | (states1, mid) ->
+              let states2 = patch_all states1 f.outs mid in
+              Ok { postfix = post, start = f.start, states = states2 }
+          end
+      end
+  | t :: ts ->
+      if is_lit t then
+        match new_state states "char" (lit_ch t) (-1) (-1) with
+        | (states1, sid) -> compile_step ts states1 ({ start = sid, outs = [out_out sid] } :: stack) post
+        end
+      else if t == "DOT" then
+        match new_state states "dot" "." (-1) (-1) with
+        | (states1, sid) -> compile_step ts states1 ({ start = sid, outs = [out_out sid] } :: stack) post
+        end
+      else if t == "CAT" then
+        match stack with
+        | f2 :: f1 :: st ->
+            let states1 = patch_all states f1.outs f2.start in
+            compile_step ts states1 ({ start = f1.start, outs = f2.outs } :: st) post
+        | _ -> Err "bad concat"
+        end
+      else if t == "OR" then
+        match stack with
+        | f2 :: f1 :: st ->
+            match new_state states "split" "" f1.start f2.start with
+            | (states1, sid) ->
+                compile_step ts states1 ({ start = sid, outs = append f1.outs f2.outs } :: st) post
+            end
+        | _ -> Err "bad alternation"
+        end
+      else if t == "STAR" then
+        match stack with
+        | f :: st ->
+            match new_state states "split" "" f.start (-1) with
+            | (states1, sid) ->
+                let states2 = patch_all states1 f.outs sid in
+                compile_step ts states2 ({ start = sid, outs = [out_out1 sid] } :: st) post
+            end
+        | _ -> Err "bad *"
+        end
+      else if t == "PLUS" then
+        match stack with
+        | f :: st ->
+            match new_state states "split" "" f.start (-1) with
+            | (states1, sid) ->
+                let states2 = patch_all states1 f.outs sid in
+                compile_step ts states2 ({ start = f.start, outs = [out_out1 sid] } :: st) post
+            end
+        | _ -> Err "bad +"
+        end
+      else if t == "QMARK" then
+        match stack with
+        | f :: st ->
+            match new_state states "split" "" f.start (-1) with
+            | (states1, sid) ->
+                compile_step ts states1 ({ start = sid, outs = append f.outs [out_out1 sid] } :: st) post
+            end
+        | _ -> Err "bad ?"
+        end
+      else
+        Err "bad postfix token"
+      end
+  end
+
+let compile = fn pattern ->
+  let toks = tokenize pattern in
+  let toks2 = insert_concat toks in
+  match to_postfix toks2 with
+  | Err e -> Err e
+  | Ok post -> compile_step post [] [] post
+  end
+
+let rec add_state = fn states sid seen ids ->
+  if sid < 0 then (seen, ids)
+  else if mem_int sid seen then (seen, ids)
+  else
+    let s = get_state states sid in
+    let seen1 = sid :: seen in
+    if s.kind == "split" then
+      match add_state states s.out seen1 ids with
+      | (seen2, ids2) -> add_state states s.out1 seen2 ids2
+      end
+    else
+      (seen1, sid :: ids)
+    end
+  end
+
+let rec closure_go = fn states seeds seen ids ->
+  match seeds with
+  | [] -> rev ids
+  | sid :: rest ->
+      match add_state states sid seen ids with
+      | (seen1, ids1) -> closure_go states rest seen1 ids1
+      end
+  end
+
+let closure = fn states seeds -> closure_go states seeds [] []
+
+let rec step_collect = fn states ids ch acc ->
+  match ids with
+  | [] -> acc
+  | sid :: rest ->
+      let s = get_state states sid in
+      if s.kind == "char" then
+        if s.ch == ch then step_collect states rest ch (s.out :: acc) else step_collect states rest ch acc
+      else if s.kind == "dot" then
+        step_collect states rest ch (s.out :: acc)
+      else
+        step_collect states rest ch acc
+      end
+  end
+
+let step_once = fn states current ch ->
+  let seeds = step_collect states current ch [] in
+  closure states seeds
+
+let rec is_accept = fn states ids ->
+  match ids with
+  | [] -> false
+  | sid :: rest ->
+      let s = get_state states sid in
+      if s.kind == "match" then true else is_accept states rest
+  end
+
+let is_match = fn cre text ->
+  match cre with
+  | Err _ -> false
+  | Ok r ->
+      let current0 = closure r.states [r.start] in
+      let n = Text.length text in
+      let rec run i current =
+        if i >= n then is_accept r.states current
+        else run (i + 1) (step_once r.states current (Text.char_at text i))
+      in
+      run 0 current0
+  end
+
+let dump = fn cre ->
+  match cre with
+  | Err e ->
+      print ("compile error: " ++ e)
+  | Ok r ->
+      print ("postfix: " ++ Text.join " " r.postfix)
+  end
