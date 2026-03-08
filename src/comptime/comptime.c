@@ -126,6 +126,8 @@ fxsh_ct_value_t *fxsh_ct_type_name(fxsh_ct_value_t *type_val);
 static fxsh_ct_value_t *fxsh_ct_is_record(fxsh_ct_value_t *type_val);
 static fxsh_ct_value_t *fxsh_ct_is_tuple(fxsh_ct_value_t *type_val);
 static fxsh_ct_value_t *eval_match(fxsh_ast_node_t *ast, fxsh_comptime_ctx_t *ctx);
+static fxsh_ct_value_t *fxsh_ct_op_sqlite_sql(fxsh_ct_value_t *type_val, sp_str_t table_name);
+static fxsh_ct_value_t *fxsh_ct_op_sql(fxsh_ct_value_t *dsl);
 
 static void ct_set_error(const c8 *fmt, ...) {
     va_list ap;
@@ -264,6 +266,7 @@ static fxsh_ast_node_t *clone_ast(fxsh_ast_node_t *n) {
         case AST_CT_UNQUOTE:
         case AST_CT_SPLICE:
         case AST_CT_EVAL:
+        case AST_CT_SQL:
         case AST_CT_COMPILE_ERROR:
         case AST_CT_COMPILE_LOG:
         case AST_CT_PANIC:
@@ -276,6 +279,9 @@ static fxsh_ast_node_t *clone_ast(fxsh_ast_node_t *n) {
         case AST_CT_IS_TUPLE:
         case AST_CT_JSON_SCHEMA:
             c->data.ct_type_op.type_expr = clone_ast(n->data.ct_type_op.type_expr);
+            break;
+        case AST_CT_SQLITE_SQL:
+            c->data.ct_sqlite_sql.type_expr = clone_ast(n->data.ct_sqlite_sql.type_expr);
             break;
         case AST_CT_HAS_FIELD:
             c->data.ct_has_field.type_expr = clone_ast(n->data.ct_has_field.type_expr);
@@ -1019,6 +1025,11 @@ static fxsh_ct_value_t *eval_expr(fxsh_ast_node_t *ast, fxsh_comptime_ctx_t *ctx
                 eval_type_operand_to_ct_type(ast->data.ct_type_op.type_expr, ctx);
             return fxsh_ct_op_json_schema(type_val);
         }
+        case AST_CT_SQLITE_SQL: {
+            fxsh_ct_value_t *type_val =
+                eval_type_operand_to_ct_type(ast->data.ct_sqlite_sql.type_expr, ctx);
+            return fxsh_ct_op_sqlite_sql(type_val, ast->data.ct_sqlite_sql.table_name);
+        }
         case AST_CT_CTOR_APPLY: {
             fxsh_type_constructor_t *ctor =
                 ct_lookup_type_constructor(ctx, ast->data.ct_ctor_apply.ctor_name);
@@ -1069,6 +1080,10 @@ static fxsh_ct_value_t *eval_expr(fxsh_ast_node_t *ast, fxsh_comptime_ctx_t *ctx
         }
         case AST_CT_EVAL:
             return eval_expr(ast->data.ct_type_of.operand, ctx);
+        case AST_CT_SQL: {
+            fxsh_ct_value_t *dsl = eval_expr(ast->data.ct_type_of.operand, ctx);
+            return fxsh_ct_op_sql(dsl);
+        }
         case AST_CT_COMPILE_LOG: {
             fxsh_ct_value_t *v = eval_expr(ast->data.ct_type_of.operand, ctx);
             if (!v)
@@ -1168,6 +1183,7 @@ static bool is_ct_expr_kind(fxsh_ast_kind_t k) {
     return k == AST_CT_TYPE_OF || k == AST_CT_TYPE_NAME || k == AST_CT_SIZE_OF ||
            k == AST_CT_ALIGN_OF || k == AST_CT_FIELDS_OF || k == AST_CT_HAS_FIELD ||
            k == AST_CT_IS_RECORD || k == AST_CT_IS_TUPLE || k == AST_CT_JSON_SCHEMA ||
+           k == AST_CT_SQLITE_SQL || k == AST_CT_SQL ||
            k == AST_CT_CTOR_APPLY || k == AST_CT_QUOTE || k == AST_CT_UNQUOTE ||
            k == AST_CT_SPLICE || k == AST_CT_EVAL || k == AST_CT_COMPILE_ERROR ||
            k == AST_CT_COMPILE_LOG || k == AST_CT_PANIC;
@@ -1780,6 +1796,324 @@ fxsh_ct_value_t *fxsh_ct_op_json_schema(fxsh_ct_value_t *type_val) {
     sp_str_t s = sp_str_view(out);
     sp_dyn_array_free(sb.chars);
     return fxsh_ct_string(s);
+}
+
+static bool ct_type_app_head_is(fxsh_type_t *type, sp_str_t con_name) {
+    if (!type || type->kind != TYPE_APP)
+        return false;
+    fxsh_type_t *head = type->data.app.con;
+    while (head && head->kind == TYPE_APP)
+        head = head->data.app.con;
+    return head && head->kind == TYPE_CON && sp_str_equal(head->data.con, con_name);
+}
+
+static fxsh_type_t *ct_unwrap_option_type(fxsh_type_t *type, bool *is_nullable) {
+    if (is_nullable)
+        *is_nullable = false;
+    if (!type)
+        return type;
+    if (ct_type_app_head_is(type, TYPE_OPTION)) {
+        if (is_nullable)
+            *is_nullable = true;
+        return type->data.app.arg;
+    }
+    return type;
+}
+
+static const c8 *ct_sqlite_type_name(fxsh_type_t *type) {
+    if (!type)
+        return "TEXT";
+    if (type->kind == TYPE_CON) {
+        if (sp_str_equal(type->data.con, TYPE_INT) || sp_str_equal(type->data.con, TYPE_BOOL))
+            return "INTEGER";
+        if (sp_str_equal(type->data.con, TYPE_FLOAT))
+            return "REAL";
+        if (sp_str_equal(type->data.con, TYPE_STRING))
+            return "TEXT";
+    }
+    return "TEXT";
+}
+
+static fxsh_ct_value_t *ct_sb_to_string_value(ct_sb_t *sb) {
+    sp_dyn_array_push(sb->chars, '\0');
+    char *out = fxsh_alloc((size_t)sp_dyn_array_size(sb->chars));
+    memcpy(out, sb->chars, (size_t)sp_dyn_array_size(sb->chars));
+    sp_str_t s = sp_str_view(out);
+    sp_dyn_array_free(sb->chars);
+    return fxsh_ct_string(s);
+}
+
+static fxsh_ct_value_t *fxsh_ct_op_sqlite_sql(fxsh_ct_value_t *type_val, sp_str_t table_name) {
+    if (!type_val || type_val->kind != CT_TYPE)
+        return NULL;
+    fxsh_type_t *type = type_val->data.type_val;
+    if (!type || type->kind != TYPE_RECORD) {
+        ct_set_error("@sqliteSQL expects a record type");
+        return NULL;
+    }
+
+    ct_sb_t create_sb = {.chars = SP_NULLPTR};
+    ct_sb_t insert_sb = {.chars = SP_NULLPTR};
+    ct_sb_t select_sb = {.chars = SP_NULLPTR};
+
+    ct_sb_push_s(&create_sb, "CREATE TABLE IF NOT EXISTS \"");
+    ct_sb_push_str(&create_sb, table_name);
+    ct_sb_push_s(&create_sb, "\" (");
+
+    ct_sb_push_s(&insert_sb, "INSERT INTO \"");
+    ct_sb_push_str(&insert_sb, table_name);
+    ct_sb_push_s(&insert_sb, "\" (");
+
+    ct_sb_push_s(&select_sb, "SELECT ");
+
+    const sp_str_t id_name = {.data = "id", .len = 2};
+    sp_dyn_array_for(type->data.record.fields, i) {
+        fxsh_field_t field = type->data.record.fields[i];
+        if (i > 0) {
+            ct_sb_push_s(&create_sb, ", ");
+            ct_sb_push_s(&insert_sb, ", ");
+            ct_sb_push_s(&select_sb, ", ");
+        }
+
+        bool nullable = false;
+        fxsh_type_t *base_type = ct_unwrap_option_type(field.type, &nullable);
+        const c8 *sql_t = ct_sqlite_type_name(base_type);
+
+        ct_sb_push_c(&create_sb, '\"');
+        ct_sb_push_str(&create_sb, field.name);
+        ct_sb_push_s(&create_sb, "\" ");
+        ct_sb_push_s(&create_sb, sql_t);
+        if (!nullable)
+            ct_sb_push_s(&create_sb, " NOT NULL");
+        if (!nullable && sp_str_equal(field.name, id_name) && strcmp(sql_t, "INTEGER") == 0)
+            ct_sb_push_s(&create_sb, " PRIMARY KEY");
+
+        ct_sb_push_c(&insert_sb, '\"');
+        ct_sb_push_str(&insert_sb, field.name);
+        ct_sb_push_c(&insert_sb, '\"');
+
+        ct_sb_push_c(&select_sb, '\"');
+        ct_sb_push_str(&select_sb, field.name);
+        ct_sb_push_c(&select_sb, '\"');
+    }
+
+    ct_sb_push_s(&create_sb, ");");
+
+    ct_sb_push_s(&insert_sb, ") VALUES (");
+    sp_dyn_array_for(type->data.record.fields, i) {
+        if (i > 0)
+            ct_sb_push_s(&insert_sb, ", ");
+        ct_sb_push_c(&insert_sb, '?');
+    }
+    ct_sb_push_s(&insert_sb, ");");
+
+    ct_sb_push_s(&select_sb, " FROM \"");
+    ct_sb_push_str(&select_sb, table_name);
+    ct_sb_push_s(&select_sb, "\";");
+
+    fxsh_ct_value_t *record = fxsh_ct_make_record_type((sp_str_t){.data = "SqliteSql", .len = 9});
+    fxsh_ct_record_add_field(record, (sp_str_t){.data = "create", .len = 6},
+                             ct_sb_to_string_value(&create_sb));
+    fxsh_ct_record_add_field(record, (sp_str_t){.data = "insert", .len = 6},
+                             ct_sb_to_string_value(&insert_sb));
+    fxsh_ct_record_add_field(record, (sp_str_t){.data = "select", .len = 6},
+                             ct_sb_to_string_value(&select_sb));
+    return record;
+}
+
+static bool ct_list_all_strings(fxsh_ct_value_t *v) {
+    if (!v || v->kind != CT_LIST)
+        return false;
+    for (u32 i = 0; i < v->data.list_val.len; i++) {
+        if (!v->data.list_val.items[i] || v->data.list_val.items[i]->kind != CT_STRING)
+            return false;
+    }
+    return true;
+}
+
+static void ct_sql_push_ident(ct_sb_t *sb, sp_str_t ident) {
+    ct_sb_push_c(sb, '"');
+    ct_sb_push_str(sb, ident);
+    ct_sb_push_c(sb, '"');
+}
+
+static bool ct_sql_push_ident_list(ct_sb_t *sb, fxsh_ct_value_t *list_val) {
+    if (!ct_list_all_strings(list_val))
+        return false;
+    for (u32 i = 0; i < list_val->data.list_val.len; i++) {
+        if (i > 0)
+            ct_sb_push_s(sb, ", ");
+        ct_sql_push_ident(sb, list_val->data.list_val.items[i]->data.string_val);
+    }
+    return true;
+}
+
+static bool ct_sql_push_text_list_join(ct_sb_t *sb, fxsh_ct_value_t *list_val, const c8 *sep) {
+    if (!ct_list_all_strings(list_val))
+        return false;
+    for (u32 i = 0; i < list_val->data.list_val.len; i++) {
+        if (i > 0)
+            ct_sb_push_s(sb, sep);
+        ct_sb_push_str(sb, list_val->data.list_val.items[i]->data.string_val);
+    }
+    return true;
+}
+
+static fxsh_ct_value_t *ct_sql_emit_select(fxsh_ct_value_t *dsl) {
+    fxsh_ct_value_t *cols = fxsh_ct_record_get_field(dsl, (sp_str_t){.data = "columns", .len = 7});
+    fxsh_ct_value_t *from = fxsh_ct_record_get_field(dsl, (sp_str_t){.data = "from", .len = 4});
+    if (!cols || !from || from->kind != CT_STRING || !ct_list_all_strings(cols)) {
+        ct_set_error("@sql select requires columns:[string], from:string");
+        return NULL;
+    }
+
+    ct_sb_t sb = {.chars = SP_NULLPTR};
+    ct_sb_push_s(&sb, "SELECT ");
+    if (!ct_sql_push_ident_list(&sb, cols))
+        return NULL;
+    ct_sb_push_s(&sb, " FROM ");
+    ct_sql_push_ident(&sb, from->data.string_val);
+
+    fxsh_ct_value_t *where = fxsh_ct_record_get_field(dsl, (sp_str_t){.data = "where", .len = 5});
+    if (where && where->kind == CT_LIST && where->data.list_val.len > 0) {
+        ct_sb_push_s(&sb, " WHERE ");
+        if (!ct_sql_push_text_list_join(&sb, where, " AND ")) {
+            ct_set_error("@sql select where must be [string]");
+            return NULL;
+        }
+    }
+
+    fxsh_ct_value_t *order_by =
+        fxsh_ct_record_get_field(dsl, (sp_str_t){.data = "order_by", .len = 8});
+    if (order_by && order_by->kind == CT_STRING && order_by->data.string_val.len > 0) {
+        ct_sb_push_s(&sb, " ORDER BY ");
+        ct_sb_push_str(&sb, order_by->data.string_val);
+    }
+
+    fxsh_ct_value_t *limit = fxsh_ct_record_get_field(dsl, (sp_str_t){.data = "limit", .len = 5});
+    if (limit && limit->kind == CT_INT && limit->data.int_val >= 0) {
+        char nbuf[32];
+        snprintf(nbuf, sizeof(nbuf), "%lld", (long long)limit->data.int_val);
+        ct_sb_push_s(&sb, " LIMIT ");
+        ct_sb_push_s(&sb, nbuf);
+    }
+    ct_sb_push_s(&sb, ";");
+    return ct_sb_to_string_value(&sb);
+}
+
+static fxsh_ct_value_t *ct_sql_emit_insert(fxsh_ct_value_t *dsl) {
+    fxsh_ct_value_t *table = fxsh_ct_record_get_field(dsl, (sp_str_t){.data = "table", .len = 5});
+    fxsh_ct_value_t *cols = fxsh_ct_record_get_field(dsl, (sp_str_t){.data = "columns", .len = 7});
+    if (!table || table->kind != CT_STRING || !cols || !ct_list_all_strings(cols) ||
+        cols->data.list_val.len == 0) {
+        ct_set_error("@sql insert requires table:string, columns:[string]");
+        return NULL;
+    }
+
+    ct_sb_t sb = {.chars = SP_NULLPTR};
+    ct_sb_push_s(&sb, "INSERT INTO ");
+    ct_sql_push_ident(&sb, table->data.string_val);
+    ct_sb_push_s(&sb, " (");
+    if (!ct_sql_push_ident_list(&sb, cols))
+        return NULL;
+    ct_sb_push_s(&sb, ") VALUES (");
+    for (u32 i = 0; i < cols->data.list_val.len; i++) {
+        if (i > 0)
+            ct_sb_push_s(&sb, ", ");
+        ct_sb_push_c(&sb, '?');
+    }
+    ct_sb_push_s(&sb, ");");
+    return ct_sb_to_string_value(&sb);
+}
+
+static fxsh_ct_value_t *ct_sql_emit_update(fxsh_ct_value_t *dsl) {
+    fxsh_ct_value_t *table = fxsh_ct_record_get_field(dsl, (sp_str_t){.data = "table", .len = 5});
+    fxsh_ct_value_t *set = fxsh_ct_record_get_field(dsl, (sp_str_t){.data = "set", .len = 3});
+    if (!table || table->kind != CT_STRING || !set || !ct_list_all_strings(set) ||
+        set->data.list_val.len == 0) {
+        ct_set_error("@sql update requires table:string, set:[string]");
+        return NULL;
+    }
+
+    ct_sb_t sb = {.chars = SP_NULLPTR};
+    ct_sb_push_s(&sb, "UPDATE ");
+    ct_sql_push_ident(&sb, table->data.string_val);
+    ct_sb_push_s(&sb, " SET ");
+    if (!ct_sql_push_text_list_join(&sb, set, ", "))
+        return NULL;
+
+    fxsh_ct_value_t *where = fxsh_ct_record_get_field(dsl, (sp_str_t){.data = "where", .len = 5});
+    if (where && where->kind == CT_LIST && where->data.list_val.len > 0) {
+        ct_sb_push_s(&sb, " WHERE ");
+        if (!ct_sql_push_text_list_join(&sb, where, " AND ")) {
+            ct_set_error("@sql update where must be [string]");
+            return NULL;
+        }
+    }
+    ct_sb_push_s(&sb, ";");
+    return ct_sb_to_string_value(&sb);
+}
+
+static fxsh_ct_value_t *ct_sql_emit_delete(fxsh_ct_value_t *dsl) {
+    fxsh_ct_value_t *table = fxsh_ct_record_get_field(dsl, (sp_str_t){.data = "table", .len = 5});
+    if (!table || table->kind != CT_STRING) {
+        ct_set_error("@sql delete requires table:string");
+        return NULL;
+    }
+
+    ct_sb_t sb = {.chars = SP_NULLPTR};
+    ct_sb_push_s(&sb, "DELETE FROM ");
+    ct_sql_push_ident(&sb, table->data.string_val);
+
+    fxsh_ct_value_t *where = fxsh_ct_record_get_field(dsl, (sp_str_t){.data = "where", .len = 5});
+    if (where && where->kind == CT_LIST && where->data.list_val.len > 0) {
+        ct_sb_push_s(&sb, " WHERE ");
+        if (!ct_sql_push_text_list_join(&sb, where, " AND ")) {
+            ct_set_error("@sql delete where must be [string]");
+            return NULL;
+        }
+    }
+    ct_sb_push_s(&sb, ";");
+    return ct_sb_to_string_value(&sb);
+}
+
+static fxsh_ct_value_t *fxsh_ct_op_sql(fxsh_ct_value_t *dsl) {
+    if (!dsl) {
+        ct_set_error("@sql expects dsl record/string");
+        return NULL;
+    }
+    if (dsl->kind == CT_STRING)
+        return dsl; /* raw passthrough */
+    if (dsl->kind != CT_STRUCT) {
+        ct_set_error("@sql expects dsl record/string");
+        return NULL;
+    }
+
+    fxsh_ct_value_t *op = fxsh_ct_record_get_field(dsl, (sp_str_t){.data = "op", .len = 2});
+    if (!op || op->kind != CT_STRING) {
+        ct_set_error("@sql dsl requires op:string");
+        return NULL;
+    }
+
+    if (sp_str_equal(op->data.string_val, (sp_str_t){.data = "raw", .len = 3})) {
+        fxsh_ct_value_t *text = fxsh_ct_record_get_field(dsl, (sp_str_t){.data = "text", .len = 4});
+        if (!text || text->kind != CT_STRING) {
+            ct_set_error("@sql raw requires text:string");
+            return NULL;
+        }
+        return text;
+    }
+    if (sp_str_equal(op->data.string_val, (sp_str_t){.data = "select", .len = 6}))
+        return ct_sql_emit_select(dsl);
+    if (sp_str_equal(op->data.string_val, (sp_str_t){.data = "insert", .len = 6}))
+        return ct_sql_emit_insert(dsl);
+    if (sp_str_equal(op->data.string_val, (sp_str_t){.data = "update", .len = 6}))
+        return ct_sql_emit_update(dsl);
+    if (sp_str_equal(op->data.string_val, (sp_str_t){.data = "delete", .len = 6}))
+        return ct_sql_emit_delete(dsl);
+
+    ct_set_error("@sql unknown op: %s", fxsh_ct_value_to_string(op));
+    return NULL;
 }
 
 /*=============================================================================

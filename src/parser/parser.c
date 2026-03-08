@@ -763,6 +763,7 @@ void fxsh_ast_free(fxsh_ast_node_t *node) {
         case AST_CT_UNQUOTE:
         case AST_CT_SPLICE:
         case AST_CT_EVAL:
+        case AST_CT_SQL:
         case AST_CT_COMPILE_ERROR:
         case AST_CT_COMPILE_LOG:
         case AST_CT_PANIC:
@@ -778,6 +779,9 @@ void fxsh_ast_free(fxsh_ast_node_t *node) {
             break;
         case AST_CT_HAS_FIELD:
             fxsh_ast_free(node->data.ct_has_field.type_expr);
+            break;
+        case AST_CT_SQLITE_SQL:
+            fxsh_ast_free(node->data.ct_sqlite_sql.type_expr);
             break;
         case AST_CT_CTOR_APPLY:
             sp_dyn_array_for(node->data.ct_ctor_apply.type_args, i) {
@@ -2027,6 +2031,19 @@ static fxsh_ast_node_t *parse_primary(fxsh_parser_t *parser) {
                 fxsh_ast_node_t *node = alloc_node(AST_CT_JSON_SCHEMA, tok->loc);
                 node->data.ct_type_op.type_expr = type_expr;
                 return node;
+            } else if (sp_str_equal(op_name, (sp_str_t){.data = "sqliteSQL", .len = 9})) {
+                consume(parser, TOK_LPAREN, "'('");
+                fxsh_ast_node_t *type_expr = parse_expr(parser);
+                consume(parser, TOK_COMMA, "','");
+                fxsh_token_t *table_tok = consume(parser, TOK_STRING, "table name string");
+                consume(parser, TOK_RPAREN, "')'");
+                if (!table_tok)
+                    return NULL;
+
+                fxsh_ast_node_t *node = alloc_node(AST_CT_SQLITE_SQL, tok->loc);
+                node->data.ct_sqlite_sql.type_expr = type_expr;
+                node->data.ct_sqlite_sql.table_name = table_tok->data.str_val;
+                return node;
             } else if (sp_str_equal(op_name, (sp_str_t){.data = "hasField", .len = 8})) {
                 consume(parser, TOK_LPAREN, "'('");
                 fxsh_ast_node_t *type_expr = parse_expr(parser);
@@ -2086,6 +2103,14 @@ static fxsh_ast_node_t *parse_primary(fxsh_parser_t *parser) {
                 consume(parser, TOK_RPAREN, "')'");
 
                 fxsh_ast_node_t *node = alloc_node(AST_CT_PANIC, tok->loc);
+                node->data.ct_type_of.operand = expr;
+                return node;
+            } else if (sp_str_equal(op_name, (sp_str_t){.data = "sql", .len = 3})) {
+                consume(parser, TOK_LPAREN, "'('");
+                fxsh_ast_node_t *expr = parse_expr(parser);
+                consume(parser, TOK_RPAREN, "')'");
+
+                fxsh_ast_node_t *node = alloc_node(AST_CT_SQL, tok->loc);
                 node->data.ct_type_of.operand = expr;
                 return node;
             } else {

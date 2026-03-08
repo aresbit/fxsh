@@ -90,4 +90,19 @@ EOF
 grep -q '"type":"object"' "$TMP_DIR/json_schema.err"
 grep -q '"required":\["id","ok"\]' "$TMP_DIR/json_schema.err"
 
+echo "[comptime] sqlite sql"
+out_sql=$("$BIN" examples/comptime_sqlite_sql.fxsh 2>/dev/null)
+echo "$out_sql" | grep -q 'CREATE TABLE IF NOT EXISTS "users"'
+echo "$out_sql" | grep -q '"id" INTEGER NOT NULL PRIMARY KEY'
+echo "$out_sql" | grep -q 'INSERT INTO "users" ("id", "email", "balance", "active") VALUES (?, ?, ?, ?);'
+echo "$out_sql" | grep -q 'SELECT "id", "email", "balance", "active" FROM "users";'
+
+echo "[comptime] sql dsl"
+out_sql_dsl=$("$BIN" examples/comptime_sql_dsl.fxsh 2>/dev/null)
+echo "$out_sql_dsl" | grep -q 'SELECT "id", "email", "active" FROM "users" WHERE active = ? AND id > ? ORDER BY id DESC LIMIT 20;'
+echo "$out_sql_dsl" | grep -q 'INSERT INTO "users" ("id", "email", "active") VALUES (?, ?, ?);'
+echo "$out_sql_dsl" | grep -q 'UPDATE "users" SET email = ?, active = ? WHERE id = ?;'
+echo "$out_sql_dsl" | grep -q 'DELETE FROM "users" WHERE id = ?;'
+echo "$out_sql_dsl" | grep -q 'PRAGMA journal_mode=WAL;'
+
 echo "comptime integration passed"

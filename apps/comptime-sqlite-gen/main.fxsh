@@ -1,0 +1,70 @@
+let sample_user = {
+  id = 1,
+  email = "alice@example.com",
+  balance = 42.5,
+  active = true
+}
+
+let sample_invoice = {
+  id = 1001,
+  user_id = 1,
+  amount = 299.9,
+  paid = false,
+  note = "seed"
+}
+
+let user_sql = comptime { @sqliteSQL(@typeOf(sample_user), "users") }
+let invoice_sql = comptime { @sqliteSQL(@typeOf(sample_invoice), "invoices") }
+let users_select_active = comptime {
+  @sql({
+    op = "select",
+    columns = ["id", "email", "balance", "active"],
+    from = "users",
+    where = ["active = ?", "balance > ?"],
+    order_by = "id DESC",
+    limit = 100
+  })
+}
+let users_update_email = comptime {
+  @sql({
+    op = "update",
+    table = "users",
+    set = ["email = ?"],
+    where = ["id = ?"]
+  })
+}
+let invoices_insert = comptime {
+  @sql({
+    op = "insert",
+    table = "invoices",
+    columns = ["id", "user_id", "amount", "paid", "note"]
+  })
+}
+let soft_delete_user = comptime {
+  @sql({
+    op = "delete",
+    table = "users",
+    where = ["id = ?"]
+  })
+}
+let pragma_sql = comptime { @sql({ op = "raw", text = "PRAGMA journal_mode=WAL;" }) }
+
+let banner = "=== fxsh comptime SQLite SQL generator ==="
+let _ = print banner
+let _ = print ""
+let _ = print "[users]"
+let _ = print user_sql.create
+let _ = print user_sql.insert
+let _ = print user_sql.select
+let _ = print ""
+let _ = print "[invoices]"
+let _ = print invoice_sql.create
+let _ = print invoice_sql.insert
+let _ = print invoice_sql.select
+let _ = print ""
+let _ = print "[@sql dsl]"
+let _ = print users_select_active
+let _ = print users_update_email
+let _ = print invoices_insert
+let _ = print soft_delete_user
+let _ = print pragma_sql

@@ -236,6 +236,8 @@ typedef enum {
     AST_CT_IS_RECORD,     /* @isRecord(type) */
     AST_CT_IS_TUPLE,      /* @isTuple(type) */
     AST_CT_JSON_SCHEMA,   /* @jsonSchema(type) */
+    AST_CT_SQLITE_SQL,    /* @sqliteSQL(type, "table") */
+    AST_CT_SQL,           /* @sql(dsl) */
     AST_CT_CTOR_APPLY,    /* @Vector(type), @vectorOf(type) */
     AST_CT_QUOTE,         /* @quote(expr) */
     AST_CT_UNQUOTE,       /* @unquote(ast_expr) */
@@ -499,6 +501,11 @@ struct fxsh_ast_node {
             fxsh_ast_node_t *type_expr;
             sp_str_t field_name;
         } ct_has_field;
+
+        struct {
+            fxsh_ast_node_t *type_expr;
+            sp_str_t table_name;
+        } ct_sqlite_sql;
 
         struct {
             sp_str_t ctor_name;

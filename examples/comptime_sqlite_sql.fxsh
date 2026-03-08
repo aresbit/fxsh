@@ -1,0 +1,14 @@
+let sample_user = {
+  id = 1,
+  email = "alice@example.com",
+  balance = 42.5,
+  active = true
+}
+
+let create_sql = comptime { (@sqliteSQL(@typeOf(sample_user), "users")).create }
+let insert_sql = comptime { (@sqliteSQL(@typeOf(sample_user), "users")).insert }
+let select_sql = comptime { (@sqliteSQL(@typeOf(sample_user), "users")).select }
+
+let _ = print create_sql
+let _ = print insert_sql
+let _ = print select_sql

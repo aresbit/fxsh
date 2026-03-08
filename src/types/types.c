@@ -1763,6 +1763,9 @@ static fxsh_error_t infer_expr(fxsh_ast_node_t *ast, fxsh_type_env_t *env,
         case AST_CT_JSON_SCHEMA:
             *out_type = fxsh_type_con(TYPE_STRING);
             return ERR_OK;
+        case AST_CT_SQLITE_SQL:
+            *out_type = fxsh_type_var(fxsh_fresh_var());
+            return ERR_OK;
         case AST_CT_CTOR_APPLY:
             *out_type = fxsh_type_con(TYPE_TYPE);
             return ERR_OK;
@@ -1775,6 +1778,9 @@ static fxsh_error_t infer_expr(fxsh_ast_node_t *ast, fxsh_type_env_t *env,
             return ERR_OK;
         case AST_CT_EVAL:
             return infer_expr(ast->data.ct_type_of.operand, env, constr_env, subst, out_type);
+        case AST_CT_SQL:
+            *out_type = fxsh_type_con(TYPE_STRING);
+            return ERR_OK;
         case AST_CT_COMPILE_LOG:
             *out_type = fxsh_type_con(TYPE_UNIT);
             return ERR_OK;

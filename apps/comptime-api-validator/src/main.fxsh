@@ -1,0 +1,69 @@
+# Compile-time API Contract Validator
+# 类似 Zig 的逆天编译时特性
+
+# ============================================================
+# 第一部分：定义 API 契约常量
+# ============================================================
+
+# 类型 tag
+let comptime TYPE_INT = 1
+let comptime TYPE_STRING = 2
+let comptime TYPE_BOOL = 3
+let comptime TYPE_FLOAT = 4
+
+# User API 字段定义
+let comptime USER_ID_TYPE = TYPE_INT
+let comptime USER_NAME_TYPE = TYPE_STRING
+let comptime USER_ACTIVE_TYPE = TYPE_BOOL
+
+# Order API 字段定义
+let comptime ORDER_ID_TYPE = TYPE_INT
+let comptime ORDER_ITEMS_TYPE = TYPE_STRING
+
+# ============================================================
+# 第二部分：编译时辅助函数
+# ============================================================
+
+# 简单的类型检查
+let comptime check_int = fn x -> 
+  if x == TYPE_INT then "PASS" else "FAIL"
+
+let comptime check_string = fn x ->
+  if x == TYPE_STRING then "PASS" else "FAIL"
+
+let comptime check_bool = fn x ->
+  if x == TYPE_BOOL then "PASS" else "FAIL"
+
+# ============================================================
+# 第三部分：编译时验证
+# ============================================================
+
+let comptime user_id_result = check_int USER_ID_TYPE
+let comptime user_name_result = check_string USER_NAME_TYPE
+let comptime user_active_result = check_bool USER_ACTIVE_TYPE
+
+let comptime order_id_result = check_int ORDER_ID_TYPE
+let comptime order_items_result = check_string ORDER_ITEMS_TYPE
+
+# ============================================================
+# 第四部分：编译时输出
+
+let _ = @compileLog("==========================================")
+let _ = @compileLog("COMPILE-TIME API CONTRACT VALIDATOR")
+let _ = @compileLog("Zig-style metaprogramming in fxsh")
+let _ = @compileLog("==========================================")
+let _ = @compileLog("")
+let _ = @compileLog("User API:")
+let _ = @compileLog("  id type check: " ++ user_id_result)
+let _ = @compileLog("  name type check: " ++ user_name_result)
+let _ = @compileLog("  active type check: " ++ user_active_result)
+let _ = @compileLog("")
+let _ = @compileLog("Order API:")
+let _ = @compileLog("  id type check: " ++ order_id_result)
+let _ = @compileLog("  items type check: " ++ order_items_result)
+let _ = @compileLog("")
+let _ = @compileLog("All checks done at COMPILE TIME!")
+let _ = @compileLog("Zero runtime overhead!")
+let _ = @compileLog("==========================================")
+
+let out = "CT VALIDATION: COMPLETE"

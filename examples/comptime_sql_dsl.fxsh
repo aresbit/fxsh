@@ -1,0 +1,43 @@
+let select_sql = comptime {
+  @sql({
+    op = "select",
+    columns = ["id", "email", "active"],
+    from = "users",
+    where = ["active = ?", "id > ?"],
+    order_by = "id DESC",
+    limit = 20
+  })
+}
+
+let insert_sql = comptime {
+  @sql({
+    op = "insert",
+    table = "users",
+    columns = ["id", "email", "active"]
+  })
+}
+
+let update_sql = comptime {
+  @sql({
+    op = "update",
+    table = "users",
+    set = ["email = ?", "active = ?"],
+    where = ["id = ?"]
+  })
+}
+
+let delete_sql = comptime {
+  @sql({
+    op = "delete",
+    table = "users",
+    where = ["id = ?"]
+  })
+}
+
+let raw_sql = comptime { @sql({ op = "raw", text = "PRAGMA journal_mode=WAL;" }) }
+
+let _ = print select_sql
+let _ = print insert_sql
+let _ = print update_sql
+let _ = print delete_sql
+let _ = print raw_sql
