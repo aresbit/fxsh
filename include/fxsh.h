@@ -238,6 +238,7 @@ typedef enum {
     AST_CT_JSON_SCHEMA,   /* @jsonSchema(type) */
     AST_CT_SQLITE_SQL,    /* @sqliteSQL(type, "table") */
     AST_CT_SQL,           /* @sql(dsl) */
+    AST_CT_SQL_CHECK,     /* @sqlCheck(dsl) */
     AST_CT_CTOR_APPLY,    /* @Vector(type), @vectorOf(type) */
     AST_CT_QUOTE,         /* @quote(expr) */
     AST_CT_UNQUOTE,       /* @unquote(ast_expr) */

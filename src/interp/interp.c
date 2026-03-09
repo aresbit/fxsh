@@ -1460,6 +1460,7 @@ static rv_value_t *eval_expr(fxsh_ast_node_t *ast, rv_env_t *env, fxsh_error_t *
         case AST_CT_SPLICE:
         case AST_CT_EVAL:
         case AST_CT_SQL:
+        case AST_CT_SQL_CHECK:
         case AST_CT_COMPILE_ERROR:
         case AST_CT_COMPILE_LOG:
         case AST_CT_PANIC: {

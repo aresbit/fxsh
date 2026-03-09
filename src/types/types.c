@@ -1781,6 +1781,9 @@ static fxsh_error_t infer_expr(fxsh_ast_node_t *ast, fxsh_type_env_t *env,
         case AST_CT_SQL:
             *out_type = fxsh_type_con(TYPE_STRING);
             return ERR_OK;
+        case AST_CT_SQL_CHECK:
+            *out_type = fxsh_type_con(TYPE_BOOL);
+            return ERR_OK;
         case AST_CT_COMPILE_LOG:
             *out_type = fxsh_type_con(TYPE_UNIT);
             return ERR_OK;

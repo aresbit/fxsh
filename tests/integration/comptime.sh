@@ -9,6 +9,16 @@ TMP_DIR="/tmp/fxsh_ct_${$}"
 mkdir -p "$TMP_DIR"
 trap 'rm -rf "$TMP_DIR"' EXIT INT TERM
 
+expect_fail_contains() {
+  case_name="$1"
+  expected="$2"
+  if "$BIN" "$TMP_DIR/$case_name.fxsh" >/dev/null 2>"$TMP_DIR/$case_name.err"; then
+    echo "expected $case_name to fail" >&2
+    exit 1
+  fi
+  grep -Fq "$expected" "$TMP_DIR/$case_name.err"
+}
+
 echo "[comptime] basic"
 cat > "$TMP_DIR/basic.fxsh" <<'EOF'
 let comptime x = 1 + 2
@@ -114,5 +124,130 @@ echo "$out_sql_dsl" | grep -q 'CREATE INDEX IF NOT EXISTS "idx_audit_user_time"'
 echo "$out_sql_dsl" | grep -q 'PRAGMA journal_mode = WAL;'
 echo "$out_sql_dsl" | grep -q 'EXPLAIN QUERY PLAN SELECT'
 echo "$out_sql_dsl" | grep -q 'VACUUM;'
+
+echo "[comptime] sql check"
+cat > "$TMP_DIR/sql_check_ok.fxsh" <<'EOF'
+let comptime ok = @sqlCheck({
+  op = "select",
+  columns = ["id", "email"],
+  from = "users",
+  where = ["id = ?", "email = ?"],
+  param_count = 2
+})
+let comptime _L = @compileLog(ok)
+EOF
+"$BIN" "$TMP_DIR/sql_check_ok.fxsh" >/dev/null 2>"$TMP_DIR/sql_check_ok.err"
+grep -q '\[comptime\] true' "$TMP_DIR/sql_check_ok.err"
+
+echo "[comptime] sql schema check"
+cat > "$TMP_DIR/sql_schema_ok.fxsh" <<'EOF'
+let user = { id = 1, email = "a@b", active = true }
+let comptime ok = @sqlCheck({
+  op = "update",
+  table = "users",
+  set = ["email = ?", "active = ?"],
+  where = ["id = ?"],
+  schema = @typeOf(user),
+  param_count = 3
+})
+let comptime _L = @compileLog(ok)
+EOF
+"$BIN" "$TMP_DIR/sql_schema_ok.fxsh" >/dev/null 2>"$TMP_DIR/sql_schema_ok.err"
+grep -q '\[comptime\] true' "$TMP_DIR/sql_schema_ok.err"
+
+echo "[comptime] sql dsl errors"
+cat > "$TMP_DIR/sql_missing_op.fxsh" <<'EOF'
+let comptime bad = @sql({ table = "users" })
+EOF
+expect_fail_contains "sql_missing_op" "SQL_E_DSL_OP_REQUIRED:"
+
+cat > "$TMP_DIR/sql_unknown_op.fxsh" <<'EOF'
+let comptime bad = @sql({ op = "wat" })
+EOF
+expect_fail_contains "sql_unknown_op" "SQL_E_UNKNOWN_OP:"
+
+cat > "$TMP_DIR/sql_select_missing_required.fxsh" <<'EOF'
+let comptime bad = @sql({ op = "select", from = "users" })
+EOF
+expect_fail_contains "sql_select_missing_required" "SQL_E_SELECT_REQUIRED:"
+
+cat > "$TMP_DIR/sql_insert_mutually_exclusive.fxsh" <<'EOF'
+let comptime bad = @sql({
+  op = "insert",
+  table = "users",
+  columns = ["id"],
+  rows = [["1"]],
+  values = ["1"]
+})
+EOF
+expect_fail_contains "sql_insert_mutually_exclusive" "SQL_E_INSERT_MUTUALLY_EXCLUSIVE:"
+
+cat > "$TMP_DIR/sql_insert_row_size_mismatch.fxsh" <<'EOF'
+let comptime bad = @sql({
+  op = "insert",
+  table = "users",
+  columns = ["id", "email"],
+  rows = [["1"]]
+})
+EOF
+expect_fail_contains "sql_insert_row_size_mismatch" "SQL_E_INSERT_ROW_SIZE_MISMATCH:"
+
+cat > "$TMP_DIR/sql_bad_returning_type.fxsh" <<'EOF'
+let comptime bad = @sql({
+  op = "update",
+  table = "users",
+  set = ["email = ?"],
+  returning = 1
+})
+EOF
+expect_fail_contains "sql_bad_returning_type" "SQL_E_RETURNING_TYPE:"
+
+cat > "$TMP_DIR/sql_param_count_mismatch.fxsh" <<'EOF'
+let comptime bad = @sql({
+  op = "select",
+  columns = ["id"],
+  from = "users",
+  where = ["id = ?"],
+  param_count = 2
+})
+EOF
+expect_fail_contains "sql_param_count_mismatch" "SQL_E_PARAM_COUNT_MISMATCH:"
+
+cat > "$TMP_DIR/sql_param_count_type.fxsh" <<'EOF'
+let comptime bad = @sql({
+  op = "select",
+  columns = ["id"],
+  from = "users",
+  where = ["id = ?"],
+  param_count = "1"
+})
+EOF
+expect_fail_contains "sql_param_count_type" "SQL_E_PARAM_COUNT_TYPE:"
+
+cat > "$TMP_DIR/sql_schema_unknown_column.fxsh" <<'EOF'
+let user = { id = 1, email = "a@b", active = true }
+let comptime bad = @sql({
+  op = "select",
+  columns = ["id", "missing"],
+  from = "users",
+  schema = @typeOf(user)
+})
+EOF
+expect_fail_contains "sql_schema_unknown_column" "SQL_E_SCHEMA_UNKNOWN_COLUMN:"
+
+cat > "$TMP_DIR/sql_schema_bad_type.fxsh" <<'EOF'
+let comptime bad = @sql({
+  op = "select",
+  columns = ["id"],
+  from = "users",
+  schema = "not-a-type"
+})
+EOF
+expect_fail_contains "sql_schema_bad_type" "SQL_E_SCHEMA_TYPE:"
+
+cat > "$TMP_DIR/sqlite_sql_non_record.fxsh" <<'EOF'
+let comptime bad = @sqliteSQL(@typeOf(1), "users")
+EOF
+expect_fail_contains "sqlite_sql_non_record" "SQLITE_E_EXPECT_RECORD:"
 
 echo "comptime integration passed"

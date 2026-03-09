@@ -764,6 +764,7 @@ void fxsh_ast_free(fxsh_ast_node_t *node) {
         case AST_CT_SPLICE:
         case AST_CT_EVAL:
         case AST_CT_SQL:
+        case AST_CT_SQL_CHECK:
         case AST_CT_COMPILE_ERROR:
         case AST_CT_COMPILE_LOG:
         case AST_CT_PANIC:
@@ -2111,6 +2112,14 @@ static fxsh_ast_node_t *parse_primary(fxsh_parser_t *parser) {
                 consume(parser, TOK_RPAREN, "')'");
 
                 fxsh_ast_node_t *node = alloc_node(AST_CT_SQL, tok->loc);
+                node->data.ct_type_of.operand = expr;
+                return node;
+            } else if (sp_str_equal(op_name, (sp_str_t){.data = "sqlCheck", .len = 8})) {
+                consume(parser, TOK_LPAREN, "'('");
+                fxsh_ast_node_t *expr = parse_expr(parser);
+                consume(parser, TOK_RPAREN, "')'");
+
+                fxsh_ast_node_t *node = alloc_node(AST_CT_SQL_CHECK, tok->loc);
                 node->data.ct_type_of.operand = expr;
                 return node;
             } else {
