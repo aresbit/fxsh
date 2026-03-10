@@ -1,0 +1,15 @@
+type 'a option = None | Some of 'a
+
+let keep = fn v ->
+  match v with
+  | Some x -> Some x
+  | None -> None
+  end
+
+let label =
+  match keep (Some 1) with
+  | Some 1 -> "ok"
+  | _ -> "bad"
+  end
+
+print label

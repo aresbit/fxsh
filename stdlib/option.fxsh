@@ -1,0 +1,21 @@
+# option.fxsh - explicit Option helpers for stdlib-style code
+
+type 'a option = None | Some of 'a
+
+let is_none = fn opt ->
+  match opt with
+  | None -> true
+  | Some _ -> false
+  end
+
+let is_some = fn opt ->
+  match opt with
+  | None -> false
+  | Some _ -> true
+  end
+
+let unwrap_or = fn opt fallback ->
+  match opt with
+  | Some x -> x
+  | None -> fallback
+  end

@@ -1,0 +1,21 @@
+# result.fxsh - explicit Result helpers for stdlib-style code
+
+type 'a result = Ok of 'a | Err of string
+
+let is_ok = fn res ->
+  match res with
+  | Ok _ -> true
+  | Err _ -> false
+  end
+
+let is_err = fn res ->
+  match res with
+  | Ok _ -> false
+  | Err _ -> true
+  end
+
+let unwrap_or = fn res fallback ->
+  match res with
+  | Ok x -> x
+  | Err _ -> fallback
+  end

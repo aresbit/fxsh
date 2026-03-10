@@ -1,0 +1,13 @@
+import Option
+import Result
+
+let opt = Option.unwrap_or (Option.Some 41) 0
+let res = Result.unwrap_or (Result.Ok 42) 0
+
+let label =
+  if (opt == 41) and (res == 42) and (Option.is_some (Option.Some 1)) and (Result.is_ok (Result.Ok 1)) then
+    "ok"
+  else
+    "bad"
+
+print label

@@ -1,0 +1,17 @@
+type 'a option = None | Some of 'a
+
+let map_opt = fn f opt ->
+  match opt with
+  | Some x -> Some (f x)
+  | None -> None
+  end
+
+let inc = fn x -> x + 1
+
+let out =
+  match map_opt inc (Some 41) with
+  | Some 42 -> "ok"
+  | _ -> "bad"
+  end
+
+print out

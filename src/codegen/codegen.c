@@ -165,15 +165,19 @@ static void emit_c_type_for_fxsh_type(codegen_ctx_t *ctx, sp_str_t name);
 static bool is_type_con_named(fxsh_type_t *t, sp_str_t name);
 static fxsh_type_t *nth_param_type(fxsh_type_t *fn_t, u32 idx);
 static fxsh_type_t *return_type_of_fn(fxsh_type_t *fn_t);
+static fxsh_type_t *return_type_after_n_args(fxsh_type_t *fn_t, u32 nargs);
 static void emit_closure_type_name(codegen_ctx_t *ctx, sp_str_t root_fn, u32 stage);
 static bool closure_expr_stage_of(fxsh_ast_node_t *expr, sp_str_t *out_root, u32 *out_stage);
 static void emit_c_type_guess_for_expr(codegen_ctx_t *ctx, fxsh_ast_node_t *expr);
 static void collect_mono_specs(fxsh_ast_node_t *ast);
 static fxsh_type_t *infer_expr_type_strict_for_codegen(fxsh_ast_node_t *expr);
+static fxsh_type_t *infer_expr_type_for_codegen_any(fxsh_ast_node_t *expr);
 static fxsh_type_t *if_result_type_hint(fxsh_ast_node_t *if_ast);
 static void emit_zero_init_for_type(codegen_ctx_t *ctx, fxsh_type_t *t);
 static fxsh_type_t *record_field_type_hint(fxsh_type_t *t, sp_str_t field);
 static void emit_unbox_from_boxed(codegen_ctx_t *ctx, fxsh_type_t *hint_t, const char *boxed_expr);
+static void emit_closure_wrapper(codegen_ctx_t *ctx, sp_str_t public_name,
+                                 const char *target_prefix, fxsh_type_t *fn_t);
 static bool tco_has_only_var_params(fxsh_ast_list_t params);
 static bool tco_has_tail_self_call(fxsh_ast_node_t *expr, sp_str_t self_name, u32 arity);
 static void gen_tail_dispatch(codegen_ctx_t *ctx, fxsh_ast_node_t *expr, sp_str_t self_name,
@@ -727,7 +731,7 @@ static void emit_c_type_for_type(codegen_ctx_t *ctx, fxsh_type_t *t) {
         }
     }
     if (t->kind == TYPE_ARROW) {
-        emit_raw(ctx, "void*");
+        emit_raw(ctx, "fxsh_closure_t");
         return;
     }
     emit_raw(ctx, "s64");
@@ -758,6 +762,16 @@ static fxsh_type_t *return_type_of_fn(fxsh_type_t *fn_t) {
     fxsh_type_t *cur = fn_t;
     while (cur && cur->kind == TYPE_ARROW)
         cur = cur->data.arrow.ret;
+    return cur;
+}
+
+static fxsh_type_t *return_type_after_n_args(fxsh_type_t *fn_t, u32 nargs) {
+    fxsh_type_t *cur = fn_t;
+    for (u32 i = 0; i < nargs; i++) {
+        if (!cur || cur->kind != TYPE_ARROW)
+            return NULL;
+        cur = cur->data.arrow.ret;
+    }
     return cur;
 }
 
@@ -1622,6 +1636,64 @@ static void gen_call(codegen_ctx_t *ctx, fxsh_ast_node_t *ast) {
         emit_raw(ctx, "0 /* bad call */");
         sp_dyn_array_free(flat_args);
         return;
+    }
+    if (func->kind == AST_LAMBDA) {
+        u32 nargs = (u32)sp_dyn_array_size(flat_args);
+        fxsh_ast_list_t params = func->data.lambda.params;
+        u32 nparams = (u32)sp_dyn_array_size(params);
+        bool simple_params = true;
+        sp_dyn_array_for(params, i) {
+            if (!is_pat_var_node(params[i])) {
+                simple_params = false;
+                break;
+            }
+        }
+        if (simple_params && nargs == nparams) {
+            fxsh_type_t *lam_t = infer_expr_type_for_codegen_any(func);
+            u32 sym_m = sym_mark();
+            u32 lty_m = local_type_mark();
+            emit_raw(ctx, "({\n");
+            ctx->indent_level++;
+            for (u32 i = 0; i < nparams; i++) {
+                fxsh_ast_node_t *p = params[i];
+                fxsh_type_t *pt = nth_param_type(lam_t, i);
+                char name_buf[256];
+                char idx_buf[32];
+                snprintf(idx_buf, sizeof(idx_buf), "__lam%u", ctx->temp_var_counter++);
+                size_t pos = 0;
+                for (u32 j = 0; j < p->data.ident.len && pos + 2 < sizeof(name_buf); j++) {
+                    c8 c = p->data.ident.data[j];
+                    if ((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') ||
+                        (c >= '0' && c <= '9') || c == '_') {
+                        name_buf[pos++] = c;
+                    } else {
+                        name_buf[pos++] = '_';
+                    }
+                }
+                name_buf[pos] = '\0';
+                strncat(name_buf, idx_buf, sizeof(name_buf) - strlen(name_buf) - 1);
+                sp_str_t cname = make_owned_str(name_buf);
+                emit_indent(ctx);
+                emit_raw(ctx, "__auto_type ");
+                emit_string(ctx, cname);
+                emit_raw(ctx, " = ");
+                gen_expr(ctx, flat_args[(s32)nargs - 1 - (s32)i]);
+                emit_raw(ctx, ";\n");
+                sym_push_expr(p->data.ident, cname);
+                if (pt)
+                    local_type_push(p->data.ident, pt);
+            }
+            emit_indent(ctx);
+            gen_expr(ctx, func->data.lambda.body);
+            emit_raw(ctx, ";\n");
+            local_type_pop_to(lty_m);
+            sym_pop_to(sym_m);
+            ctx->indent_level--;
+            emit_indent(ctx);
+            emit_raw(ctx, "})");
+            sp_dyn_array_free(flat_args);
+            return;
+        }
     }
     if (func->kind == AST_IDENT) {
         sp_str_t fname = func->data.ident;
@@ -2560,7 +2632,14 @@ static void gen_call(codegen_ctx_t *ctx, fxsh_ast_node_t *ast) {
             if (nargs >= 1) {
                 emit_raw(ctx, "({ __auto_type _c = ");
                 gen_expr(ctx, func);
-                emit_raw(ctx, "; _c.call(_c.env");
+                emit_raw(ctx, "; ((");
+                emit_c_type_for_type(ctx, return_type_after_n_args(ft, nargs));
+                emit_raw(ctx, " (*)(void *env");
+                for (u32 i = 0; i < nargs; i++) {
+                    emit_raw(ctx, ", ");
+                    emit_c_type_for_type(ctx, nth_param_type(ft, i));
+                }
+                emit_raw(ctx, "))_c.call)(_c.env");
                 for (u32 i = 0; i < nargs; i++) {
                     emit_raw(ctx, ", ");
                     gen_expr(ctx, flat_args[(s32)nargs - 1 - (s32)i]);
@@ -3500,7 +3579,7 @@ static fxsh_type_t *match_result_type_hint(fxsh_ast_node_t *match_ast) {
         fxsh_ast_node_t *arm = match_ast->data.match_expr.arms[i];
         if (!arm || arm->kind != AST_MATCH_ARM || !arm->data.match_arm.body)
             continue;
-        fxsh_type_t *t = infer_expr_type_strict_for_codegen(arm->data.match_arm.body);
+        fxsh_type_t *t = infer_expr_type_for_codegen_any(arm->data.match_arm.body);
         if (!t)
             continue;
         if (!acc) {
@@ -3522,10 +3601,7 @@ static fxsh_type_t *match_result_type_hint(fxsh_ast_node_t *match_ast) {
         return acc;
     if (acc)
         return acc;
-    fxsh_type_t *t = infer_expr_type_strict_for_codegen(match_ast);
-    if (t && !type_has_var(t))
-        return t;
-    return NULL;
+    return infer_expr_type_for_codegen_any(match_ast);
 }
 
 static void emit_zero_init_for_type(codegen_ctx_t *ctx, fxsh_type_t *t) {
@@ -4203,6 +4279,22 @@ static fxsh_type_t *infer_expr_type_strict_for_codegen(fxsh_ast_node_t *expr) {
     return guess_expr_type_for_codegen(expr);
 }
 
+static fxsh_type_t *infer_expr_type_for_codegen_any(fxsh_ast_node_t *expr) {
+    if (!expr)
+        return NULL;
+    if (expr->kind == AST_IDENT) {
+        fxsh_type_t *t = lookup_symbol_type(expr->data.ident);
+        if (t)
+            return t;
+    }
+    fxsh_type_env_t env = g_codegen_type_env;
+    fxsh_constr_env_t cenv = g_codegen_constr_env;
+    fxsh_type_t *out_t = NULL;
+    if (fxsh_type_infer(expr, &env, &cenv, &out_t) == ERR_OK && out_t)
+        return out_t;
+    return guess_expr_type_for_codegen(expr);
+}
+
 static void gen_expr(codegen_ctx_t *ctx, fxsh_ast_node_t *ast) {
     if (!ast) {
         emit_raw(ctx, "0 /* null */");
@@ -4219,9 +4311,32 @@ static void gen_expr(codegen_ctx_t *ctx, fxsh_ast_node_t *ast) {
             break;
         case AST_IDENT: {
             sp_str_t mapped = sym_lookup_expr(ast->data.ident);
-            if (mapped.len > 0) {
+            fxsh_type_t *ident_t = lookup_symbol_type(ast->data.ident);
+            if (mapped.len > 0 && !(ident_t && ident_t->kind == TYPE_ARROW)) {
                 emit_string(ctx, mapped);
                 break;
+            }
+            if (ident_t && ident_t->kind == TYPE_ARROW) {
+                if (mapped.len > 0) {
+                    emit_raw(ctx, "((fxsh_closure_t){ .call = (void*)(");
+                    emit_string(ctx, mapped);
+                    emit_raw(ctx, ").call, .env = (");
+                    emit_string(ctx, mapped);
+                    emit_raw(ctx, ").env })");
+                    break;
+                }
+                if (is_lambda_fn_name(ast->data.ident)) {
+                    emit_raw(ctx, "((fxsh_closure_t){ .call = (void*)fxsh_wrap_");
+                    emit_mangled(ctx, ast->data.ident);
+                    emit_raw(ctx, ", .env = NULL })");
+                    break;
+                }
+                if (is_decl_fn_name(ast->data.ident) || is_extern_fn_name(ast->data.ident)) {
+                    emit_raw(ctx, "((fxsh_closure_t){ .call = (void*)fxsh_wrap_");
+                    emit_mangled(ctx, ast->data.ident);
+                    emit_raw(ctx, ", .env = NULL })");
+                    break;
+                }
             }
         }
             if (is_lambda_fn_name(ast->data.ident)) {
@@ -4331,6 +4446,7 @@ static void gen_decl_fn(codegen_ctx_t *ctx, fxsh_ast_node_t *ast) {
     }
     ctx->indent_level--;
     emit_line(ctx, "}");
+    emit_closure_wrapper(ctx, ast->data.decl_fn.name, "", fn_t);
     local_type_pop_to(lty_m);
     sp_dyn_array_push(*ctx->output, '\n');
 }
@@ -4369,6 +4485,54 @@ static void gen_decl_let_lambda_body(codegen_ctx_t *ctx, fxsh_ast_node_t *ast, f
             emit_raw(ctx, ";\n");
         }
     }
+}
+
+static void emit_closure_wrapper(codegen_ctx_t *ctx, sp_str_t public_name,
+                                 const char *target_prefix, fxsh_type_t *fn_t) {
+    u32 arity = fn_arity_of(fn_t);
+    emit_indent(ctx);
+    emit_raw(ctx, "static ");
+    emit_c_type_for_type(ctx, return_type_of_fn(fn_t));
+    emit_raw(ctx, " fxsh_wrap_");
+    emit_mangled(ctx, public_name);
+    emit_raw(ctx, "(void *env");
+    for (u32 i = 0; i < arity; i++) {
+        emit_raw(ctx, ", ");
+        emit_c_type_for_type(ctx, nth_param_type(fn_t, i));
+        emit_fmt(ctx, " _a%u", (unsigned)i);
+    }
+    emit_raw(ctx, ") {\n");
+    ctx->indent_level++;
+    emit_indent(ctx);
+    emit_raw(ctx, "(void)env;\n");
+    emit_indent(ctx);
+    if (is_type_con_named(return_type_of_fn(fn_t), TYPE_UNIT)) {
+        emit_raw(ctx, target_prefix);
+        emit_mangled(ctx, public_name);
+        emit_raw(ctx, "(");
+        for (u32 i = 0; i < arity; i++) {
+            if (i > 0)
+                emit_raw(ctx, ", ");
+            emit_fmt(ctx, "_a%u", (unsigned)i);
+        }
+        emit_raw(ctx, ");\n");
+        emit_indent(ctx);
+        emit_raw(ctx, "return;\n");
+    } else {
+        emit_raw(ctx, "return ");
+        emit_raw(ctx, target_prefix);
+        emit_mangled(ctx, public_name);
+        emit_raw(ctx, "(");
+        for (u32 i = 0; i < arity; i++) {
+            if (i > 0)
+                emit_raw(ctx, ", ");
+            emit_fmt(ctx, "_a%u", (unsigned)i);
+        }
+        emit_raw(ctx, ");\n");
+    }
+    ctx->indent_level--;
+    emit_line(ctx, "}");
+    emit_raw(ctx, "\n");
 }
 
 /* Heuristic: determine if a value expression is an ADT constructor application */
@@ -5294,6 +5458,7 @@ static void gen_decl_let(codegen_ctx_t *ctx, fxsh_ast_node_t *ast) {
         gen_decl_let_lambda_body(ctx, ast, lam, fn_t);
         ctx->indent_level--;
         emit_line(ctx, "}");
+        emit_closure_wrapper(ctx, ast->data.let.name, "fxsh_fn_", fn_t);
         local_type_pop_to(lty_m);
         emit_raw(ctx, "\n");
         return;
@@ -5388,6 +5553,7 @@ static void gen_prelude(codegen_ctx_t *ctx) {
                    "FXSH_VAL_PTR } fxsh_val_kind_t;");
     emit_line(ctx, "typedef struct { fxsh_val_kind_t kind; union { s64 i; f64 f; bool b; sp_str_t "
                    "s; void *p; } as; } fxsh_value_t;");
+    emit_line(ctx, "typedef struct { void *call; void *env; } fxsh_closure_t;");
     emit_line(ctx, "typedef struct { u32 len; fxsh_value_t *items; } fxsh_tuple_t;");
     emit_line(ctx,
               "typedef struct { u32 len; const char **names; fxsh_value_t *vals; } fxsh_record_t;");
