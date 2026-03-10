@@ -1167,6 +1167,10 @@ static void emit_c_type_for_fxsh_type(codegen_ctx_t *ctx, sp_str_t name) {
         emit_raw(ctx, "fxsh_list_t*");
         return;
     }
+    if (sp_str_equal(name, TYPE_PTR)) {
+        emit_raw(ctx, "void*");
+        return;
+    }
     if (sp_str_equal(name, TYPE_TENSOR)) {
         emit_raw(ctx, "fxsh_tensor_t*");
         return;
@@ -2358,9 +2362,16 @@ static void gen_call(codegen_ctx_t *ctx, fxsh_ast_node_t *ast) {
         }
         if (can_builtin && cg_name_eq(fname, "c_callback0")) {
             if (sp_dyn_array_size(flat_args) == 1) {
-                emit_raw(ctx, "((void*)(");
-                gen_expr(ctx, flat_args[0]);
-                emit_raw(ctx, "))");
+                fxsh_type_t *cb_t = infer_expr_type_for_codegen_any(flat_args[0]);
+                if (cb_t && cb_t->kind == TYPE_ARROW) {
+                    emit_raw(ctx, "({ __auto_type _cb = ");
+                    gen_expr(ctx, flat_args[0]);
+                    emit_raw(ctx, "; (void*)(_cb.call); })");
+                } else {
+                    emit_raw(ctx, "((void*)(");
+                    gen_expr(ctx, flat_args[0]);
+                    emit_raw(ctx, "))");
+                }
                 sp_dyn_array_free(flat_args);
                 return;
             }
@@ -2652,6 +2663,46 @@ static void gen_call(codegen_ctx_t *ctx, fxsh_ast_node_t *ast) {
             return;
         }
     }
+    if (func->kind == AST_IDENT) {
+        sp_str_t fname = func->data.ident;
+        sp_str_t mapped = sym_lookup_expr(fname);
+        fxsh_type_t *ft = lookup_symbol_type(fname);
+        if (mapped.len > 0 && ft && ft->kind == TYPE_ARROW && !closure_value_lookup(fname)) {
+            emit_string(ctx, mapped);
+            sp_dyn_array_push(*ctx->output, '(');
+            for (s32 i = (s32)sp_dyn_array_size(flat_args) - 1; i >= 0; i--) {
+                if (i != (s32)sp_dyn_array_size(flat_args) - 1)
+                    emit_raw(ctx, ", ");
+                gen_expr(ctx, flat_args[i]);
+            }
+            sp_dyn_array_push(*ctx->output, ')');
+            sp_dyn_array_free(flat_args);
+            return;
+        }
+        if (is_lambda_fn_name(fname) || is_decl_fn_name(fname) || is_extern_fn_name(fname)) {
+            if (is_lambda_fn_name(fname)) {
+                emit_raw(ctx, "fxsh_fn_");
+                emit_mangled(ctx, fname);
+            } else if (is_extern_fn_name(fname)) {
+                if (mapped.len > 0)
+                    emit_string(ctx, mapped);
+                else
+                    emit_mangled(ctx, fname);
+            } else {
+                emit_mangled(ctx, fname);
+            }
+            sp_dyn_array_push(*ctx->output, '(');
+            for (s32 i = (s32)sp_dyn_array_size(flat_args) - 1; i >= 0; i--) {
+                if (i != (s32)sp_dyn_array_size(flat_args) - 1)
+                    emit_raw(ctx, ", ");
+                gen_expr(ctx, flat_args[i]);
+            }
+            sp_dyn_array_push(*ctx->output, ')');
+            sp_dyn_array_free(flat_args);
+            return;
+        }
+    }
+
     gen_expr(ctx, func);
     sp_dyn_array_push(*ctx->output, '(');
     for (s32 i = (s32)sp_dyn_array_size(flat_args) - 1; i >= 0; i--) {
@@ -4318,11 +4369,41 @@ static void gen_expr(codegen_ctx_t *ctx, fxsh_ast_node_t *ast) {
             }
             if (ident_t && ident_t->kind == TYPE_ARROW) {
                 if (mapped.len > 0) {
+                    if (closure_value_lookup(ast->data.ident)) {
+                        emit_string(ctx, mapped);
+                        break;
+                    }
+                    if (is_lambda_fn_name(ast->data.ident) || is_decl_fn_name(ast->data.ident) ||
+                        is_extern_fn_name(ast->data.ident)) {
+                        emit_raw(ctx, "((fxsh_closure_t){ .call = (void*)");
+                        emit_string(ctx, mapped);
+                        emit_raw(ctx, ", .env = NULL })");
+                        break;
+                    }
                     emit_raw(ctx, "((fxsh_closure_t){ .call = (void*)(");
                     emit_string(ctx, mapped);
                     emit_raw(ctx, ").call, .env = (");
                     emit_string(ctx, mapped);
                     emit_raw(ctx, ").env })");
+                    break;
+                }
+                {
+                    bool has_module_sep = false;
+                    for (u32 mi = 1; mi < ast->data.ident.len; mi++) {
+                        if (ast->data.ident.data[mi - 1] == '_' && ast->data.ident.data[mi] == '_') {
+                            has_module_sep = true;
+                            break;
+                        }
+                    }
+                    if (has_module_sep) {
+                        emit_raw(ctx, "fxsh_fn_");
+                        emit_mangled(ctx, ast->data.ident);
+                        break;
+                    }
+                }
+                if (is_closure_fn_name(ast->data.ident)) {
+                    emit_raw(ctx, "fxsh_fn_");
+                    emit_mangled(ctx, ast->data.ident);
                     break;
                 }
                 if (is_lambda_fn_name(ast->data.ident)) {
@@ -5283,17 +5364,32 @@ static void gen_decl_let(codegen_ctx_t *ctx, fxsh_ast_node_t *ast) {
         }
         wrap_buf[pos] = '\0';
         sp_str_t wrap_name = make_owned_str(wrap_buf);
+        char csym_buf[256];
+        snprintf(csym_buf, sizeof(csym_buf), "fxsh_csym_");
+        pos = strlen(csym_buf);
+        for (u32 j = 0; j < ast->data.let.name.len && pos + 8 < sizeof(csym_buf); j++) {
+            c8 c = ast->data.let.name.data[j];
+            if ((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') ||
+                c == '_') {
+                csym_buf[pos++] = c;
+            } else {
+                csym_buf[pos++] = '_';
+            }
+        }
+        csym_buf[pos] = '\0';
+        sp_str_t c_sym_alias = make_owned_str(csym_buf);
 
         u32 arity = fn_arity_of(fn_t);
         bool unit_arity = ffi_decl_unit_arity_from_ast(ast) || fn_is_unit_arity(fn_t);
         u32 c_arity = unit_arity ? 0 : arity;
         bool ret_unit = ffi_decl_returns_unit_from_ast(ast) || fn_returns_unit(fn_t);
         bool ret_string = type_is_string_con(return_type_of_fn(fn_t));
+        emit_line(ctx, "#if defined(__APPLE__)");
         emit_indent(ctx);
         emit_raw(ctx, "extern ");
         emit_c_abi_type_for_type(ctx, return_type_of_fn(fn_t));
         emit_raw(ctx, " ");
-        emit_string(ctx, ffi_sym);
+        emit_string(ctx, c_sym_alias);
         emit_raw(ctx, "(");
         if (c_arity == 0) {
             emit_raw(ctx, "void");
@@ -5304,7 +5400,29 @@ static void gen_decl_let(codegen_ctx_t *ctx, fxsh_ast_node_t *ast) {
             emit_c_abi_type_for_type(ctx, nth_param_type(fn_t, i));
             emit_fmt(ctx, " _a%u", (unsigned)i);
         }
-        emit_raw(ctx, ");\n");
+        emit_raw(ctx, ") __asm__(\"_");
+        emit_string(ctx, ffi_sym);
+        emit_raw(ctx, "\");\n");
+        emit_line(ctx, "#else");
+        emit_indent(ctx);
+        emit_raw(ctx, "extern ");
+        emit_c_abi_type_for_type(ctx, return_type_of_fn(fn_t));
+        emit_raw(ctx, " ");
+        emit_string(ctx, c_sym_alias);
+        emit_raw(ctx, "(");
+        if (c_arity == 0) {
+            emit_raw(ctx, "void");
+        }
+        for (u32 i = 0; i < c_arity; i++) {
+            if (i > 0)
+                emit_raw(ctx, ", ");
+            emit_c_abi_type_for_type(ctx, nth_param_type(fn_t, i));
+            emit_fmt(ctx, " _a%u", (unsigned)i);
+        }
+        emit_raw(ctx, ") __asm__(\"");
+        emit_string(ctx, ffi_sym);
+        emit_raw(ctx, "\");\n");
+        emit_line(ctx, "#endif");
 
         emit_indent(ctx);
         emit_raw(ctx, "static ");
@@ -5331,7 +5449,7 @@ static void gen_decl_let(codegen_ctx_t *ctx, fxsh_ast_node_t *ast) {
         }
         if (ret_unit) {
             emit_indent(ctx);
-            emit_string(ctx, ffi_sym);
+            emit_string(ctx, c_sym_alias);
             emit_raw(ctx, "(");
             for (u32 i = 0; i < c_arity; i++) {
                 if (i > 0)
@@ -5360,7 +5478,7 @@ static void gen_decl_let(codegen_ctx_t *ctx, fxsh_ast_node_t *ast) {
         if (ret_string) {
             emit_indent(ctx);
             emit_raw(ctx, "const char *_ret = ");
-            emit_string(ctx, ffi_sym);
+            emit_string(ctx, c_sym_alias);
             emit_raw(ctx, "(");
             for (u32 i = 0; i < c_arity; i++) {
                 if (i > 0)
@@ -5389,7 +5507,7 @@ static void gen_decl_let(codegen_ctx_t *ctx, fxsh_ast_node_t *ast) {
         emit_indent(ctx);
         emit_c_type_for_type(ctx, return_type_of_fn(fn_t));
         emit_raw(ctx, " _ret = ");
-        emit_string(ctx, ffi_sym);
+        emit_string(ctx, c_sym_alias);
         emit_raw(ctx, "(");
         for (u32 i = 0; i < c_arity; i++) {
             if (i > 0)
