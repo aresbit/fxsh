@@ -1,0 +1,179 @@
+import Text
+import Result
+
+let rec parse_nat_from = fn tok i acc ->
+  if i >= Text.length tok then acc
+  else
+    let d = (Text.byte tok i) - 48 in
+    parse_nat_from tok (i + 1) ((acc * 10) + d)
+
+let parse_int_token = fn tok ->
+  if (Text.length tok > 0) and ((Text.byte tok 0) == 45) then
+    0 - parse_nat_from tok 1 0
+  else parse_nat_from tok 0 0
+
+let is_space_byte = fn b -> (b == 32) or (b == 9) or (b == 10) or (b == 13)
+let is_digit_byte = fn b -> (b >= 48) and (b <= 57)
+let is_alpha_byte = fn b -> ((b >= 97) and (b <= 122)) or ((b >= 65) and (b <= 90)) or (b == 95)
+
+let rec scan_number_end = fn s i n ->
+  if i >= n then i
+  else
+    let b = Text.byte s i in
+    if (is_digit_byte b) or (b == 46) then scan_number_end s (i + 1) n else i
+
+let rec scan_ident_end = fn s i n ->
+  if i >= n then i
+  else
+    let b = Text.byte s i in
+    if (is_alpha_byte b) or (is_digit_byte b) then scan_ident_end s (i + 1) n else i
+
+let rec tokenize_from = fn s i n ->
+  if i >= n then []
+  else
+    let b = Text.byte s i in
+    if is_space_byte b then tokenize_from s (i + 1) n
+    else if b == 43 then "+" :: tokenize_from s (i + 1) n
+    else if b == 45 then "-" :: tokenize_from s (i + 1) n
+    else if b == 42 then "*" :: tokenize_from s (i + 1) n
+    else if b == 40 then "(" :: tokenize_from s (i + 1) n
+    else if b == 41 then ")" :: tokenize_from s (i + 1) n
+    else if is_digit_byte b then
+      let j = scan_number_end s i n in
+      (Text.slice s i (j - i)) :: tokenize_from s j n
+    else if is_alpha_byte b then
+      let j = scan_ident_end s i n in
+      (Text.slice s i (j - i)) :: tokenize_from s j n
+    else tokenize_from s (i + 1) n
+
+let tokenize = fn s -> tokenize_from s 0 (Text.length s)
+
+let rec reverse = fn xs acc ->
+  match xs with
+  | [] -> acc
+  | x :: xs1 -> reverse xs1 (x :: acc)
+  end
+
+let is_operator = fn t -> (t == "+") or (t == "-") or (t == "*")
+let precedence = fn t -> if t == "*" then 20 else if (t == "+") or (t == "-") then 10 else -1
+
+let rec pop_ops_with_min_prec = fn p ops out_rev ->
+  match ops with
+  | [] -> { ops = ops, out = out_rev }
+  | op_top :: ops1 ->
+      if (is_operator op_top) and ((precedence op_top) >= p) then
+        pop_ops_with_min_prec p ops1 (op_top :: out_rev)
+      else { ops = ops, out = out_rev }
+  end
+
+let rec pop_until_lparen = fn ops out_rev ->
+  match ops with
+  | [] -> Result.Err "missing '('"
+  | "(" :: ops1 -> Result.Ok { ops = ops1, out = out_rev }
+  | op :: ops1 -> pop_until_lparen ops1 (op :: out_rev)
+  end
+
+let rec drain_ops_end = fn ops out1 ->
+  match ops with
+  | [] -> Result.Ok (reverse out1 [])
+  | "(" :: _ -> Result.Err "missing ')'"
+  | op :: ops2 -> drain_ops_end ops2 (op :: out1)
+  end
+
+let rec to_postfix_step = fn toks ops out_rev ->
+  match toks with
+  | [] -> drain_ops_end ops out_rev
+  | tok :: toks1 ->
+      if (tok == "(") then to_postfix_step toks1 ("(" :: ops) out_rev
+      else if (tok == ")") then
+        match pop_until_lparen ops out_rev with
+        | Result.Err e -> Result.Err e
+        | Result.Ok state -> to_postfix_step toks1 state.ops state.out
+        end
+      else if is_operator tok then
+        let moved = pop_ops_with_min_prec (precedence tok) ops out_rev in
+        to_postfix_step toks1 (tok :: moved.ops) moved.out
+      else to_postfix_step toks1 ops (tok :: out_rev)
+  end
+
+let is_number_token = fn tok ->
+  if Text.length tok == 0 then false
+  else is_digit_byte (Text.byte tok 0)
+
+let rec lookup = fn name env ->
+  match env with
+  | [] -> Result.Err ("unknown variable: " ++ name)
+  | row :: env1 -> if row.name == name then Result.Ok row.value else lookup name env1
+  end
+
+let pop2 = fn st ->
+  match st with
+  | b :: a :: rest -> Result.Ok { a = a, b = b, rest = rest }
+  | _ -> Result.Err "operator missing operands"
+  end
+
+let rec eval_postfix = fn post env st ->
+  match post with
+  | [] ->
+      match st with
+      | [one] -> Result.Ok one
+      | _ -> Result.Err "malformed expression"
+      end
+  | tok :: post1 ->
+      if tok == "+" then
+        match pop2 st with
+        | Result.Err e -> Result.Err e
+        | Result.Ok r -> eval_postfix post1 env ((r.a + r.b) :: r.rest)
+        end
+      else if tok == "-" then
+        match pop2 st with
+        | Result.Err e -> Result.Err e
+        | Result.Ok r -> eval_postfix post1 env ((r.a - r.b) :: r.rest)
+        end
+      else if tok == "*" then
+        match pop2 st with
+        | Result.Err e -> Result.Err e
+        | Result.Ok r -> eval_postfix post1 env ((r.a * r.b) :: r.rest)
+        end
+      else if is_number_token tok then
+        eval_postfix post1 env ((parse_int_token tok) :: st)
+      else
+        match lookup tok env with
+        | Result.Err e -> Result.Err e
+        | Result.Ok v -> eval_postfix post1 env (v :: st)
+        end
+  end
+
+let run_eval = fn src env ->
+  let toks = tokenize src in
+  let empty_stack : int list = [] in
+  match to_postfix_step toks [] [] with
+  | Result.Err e -> Result.Err ("parse failed: " ++ e)
+  | Result.Ok post -> eval_postfix post env empty_stack
+  end
+
+let run_test = fn name src env expected ->
+  match run_eval src env with
+  | Result.Err e ->
+      let _ = print ("[FAIL] " ++ name ++ " -> " ++ e) in
+      false
+  | Result.Ok got ->
+      if got == expected then
+        let _ = print ("[PASS] " ++ name) in
+        true
+      else
+        let _ = print ("[FAIL] " ++ name ++ " -> value mismatch") in
+        false
+  end
+
+let env = [
+  { name = "x", value = 2 };
+  { name = "y", value = -3 }
+]
+
+let t1 = run_test "parse1" "x*(x+1)*y-3*y" env ((2 * (2 + 1) * (-3)) - (3 * (-3)))
+let t2 = run_test "parse2" "2*3" env (2 * 3)
+let t3 = run_test "parse3" "(2+3)*4-5" env (((2 + 3) * 4) - 5)
+
+let all_ok = t1 and t2 and t3
+let _ = print (if all_ok then "all tests passed" else "some tests failed")

@@ -1217,7 +1217,14 @@ static fxsh_ast_node_t *parse_pattern_atom(fxsh_parser_t *parser) {
                !check(parser, TOK_RBRACKET) && !check(parser, TOK_RBRACE) &&
                !check(parser, TOK_COMMA) && !check(parser, TOK_SEMICOLON) &&
                !check(parser, TOK_DOT) && !check(parser, TOK_ARROW) &&
-               !check(parser, TOK_FAT_ARROW)) {
+               !check(parser, TOK_FAT_ARROW) && !check(parser, TOK_APPEND) &&
+               !check(parser, TOK_PLUS) && !check(parser, TOK_MINUS) &&
+               !check(parser, TOK_STAR) && !check(parser, TOK_SLASH) &&
+               !check(parser, TOK_PERCENT) && !check(parser, TOK_EQ) &&
+               !check(parser, TOK_NEQ) && !check(parser, TOK_LT) &&
+               !check(parser, TOK_GT) && !check(parser, TOK_LEQ) &&
+               !check(parser, TOK_GEQ) && !check(parser, TOK_AND) &&
+               !check(parser, TOK_OR) && !check(parser, TOK_PIPE)) {
             fxsh_ast_node_t *arg = parse_pattern(parser);
             if (!arg)
                 break;
@@ -1946,7 +1953,15 @@ static fxsh_ast_node_t *parse_primary(fxsh_parser_t *parser) {
                    !check(parser, TOK_RPAREN) && !check(parser, TOK_RBRACKET) &&
                    !check(parser, TOK_RBRACE) && !check(parser, TOK_COMMA) &&
                    !check(parser, TOK_SEMICOLON) && !check(parser, TOK_DOT) &&
-                   !check(parser, TOK_ARROW) && !check(parser, TOK_FAT_ARROW)) {
+                   !check(parser, TOK_ARROW) && !check(parser, TOK_FAT_ARROW) &&
+                   !check(parser, TOK_APPEND) && !check(parser, TOK_PLUS) &&
+                   !check(parser, TOK_MINUS) && !check(parser, TOK_STAR) &&
+                   !check(parser, TOK_SLASH) && !check(parser, TOK_PERCENT) &&
+                   !check(parser, TOK_EQ) && !check(parser, TOK_NEQ) &&
+                   !check(parser, TOK_LT) && !check(parser, TOK_GT) &&
+                   !check(parser, TOK_LEQ) && !check(parser, TOK_GEQ) &&
+                   !check(parser, TOK_AND) && !check(parser, TOK_OR) &&
+                   !check(parser, TOK_PIPE)) {
                 fxsh_ast_node_t *arg = parse_primary(parser);
                 if (!arg)
                     break;
@@ -2439,7 +2454,7 @@ static fxsh_ast_node_t *parse_postfix(fxsh_parser_t *parser) {
 
     while (true) {
         if (check(parser, TOK_LPAREN)) {
-            /* Function call */
+            /* Function call (or constructor arg list for qualified constructors). */
             fxsh_loc_t loc = current(parser)->loc;
             advance(parser); /* consume ( */
 
@@ -2461,7 +2476,12 @@ static fxsh_ast_node_t *parse_postfix(fxsh_parser_t *parser) {
 
             consume(parser, TOK_RPAREN, "')'");
 
-            expr = fxsh_ast_call(expr, args, loc);
+            if (expr->kind == AST_CONSTR_APPL) {
+                sp_dyn_array_for(args, i)
+                    sp_dyn_array_push(expr->data.constr_appl.args, args[i]);
+            } else {
+                expr = fxsh_ast_call(expr, args, loc);
+            }
         } else if (match(parser, TOK_DOT)) {
             /* Field access */
             fxsh_loc_t loc = current(parser)->loc;

@@ -1,0 +1,15 @@
+# Parser regression: constructor application must stop before infix operators like ::
+
+type token = A | B
+
+let rec push_a = fn xs -> A :: xs
+
+let v = push_a [B]
+
+let ok =
+  match v with
+  | A :: _ -> true
+  | _ -> false
+  end
+
+print (if ok then "ok" else "bad")
