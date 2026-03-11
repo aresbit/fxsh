@@ -463,6 +463,11 @@ static fxsh_error_t run_native_interp_harness(sp_str_t source, int script_argc, 
     fprintf(f, "}\n");
     fclose(f);
 
+#if defined(__linux__)
+    const char *dl_link = " -ldl";
+#else
+    const char *dl_link = "";
+#endif
     snprintf(cc_cmd, sizeof(cc_cmd),
              "clang -std=gnu17 -D _GNU_SOURCE -Wall -Wextra -Wno-strict-prototypes "
              "-pedantic -Iinclude -Ilib -DSP_PS_DISABLE -Oz -DNDEBUG "
@@ -470,8 +475,8 @@ static fxsh_error_t run_native_interp_harness(sp_str_t source, int script_argc, 
              "src/types/types.c src/comptime/comptime.c src/interp/interp.c "
              "src/runtime/runtime.c src/runtime/json.c src/runtime/regex.c "
              "src/runtime/shell.c src/runtime/text.c "
-             "-lm -o %s",
-             c_path, bin_path);
+             "-lm%s -o %s",
+             c_path, dl_link, bin_path);
     int cc = system(cc_cmd);
     if (cc != 0) {
         fprintf(stderr, "Native fallback compile failed\n");
@@ -537,6 +542,11 @@ static fxsh_error_t run_native_codegen(fxsh_ast_node_t *ast, int script_argc, ch
 #else
     const char *platform_flags = "";
 #endif
+#if defined(__linux__)
+    const char *dl_link = " -ldl";
+#else
+    const char *dl_link = "";
+#endif
     snprintf(cc_cmd, sizeof(cc_cmd),
              "clang -std=gnu17 -D _GNU_SOURCE -DSP_IMPLEMENTATION -O2 -Wall -Wextra -Iinclude "
              "-Ilib %s %s -c %s -o %s && "
@@ -551,14 +561,14 @@ static fxsh_error_t run_native_codegen(fxsh_ast_node_t *ast, int script_argc, ch
              "src/runtime/shell.c -o %s && "
              "clang -std=gnu17 -D _GNU_SOURCE -O2 -Wall -Wextra -Iinclude -Ilib %s %s -c "
              "src/runtime/text.c -o %s && "
-             "clang %s %s %s %s %s %s -lm -o %s %s",
+             "clang %s %s %s %s %s %s -lm%s -o %s %s",
              platform_flags, extra_cflags ? extra_cflags : "", c_path_buf, main_obj_buf,
              platform_flags, extra_cflags ? extra_cflags : "", utils_obj_buf, platform_flags,
              extra_cflags ? extra_cflags : "", json_obj_buf, platform_flags,
              extra_cflags ? extra_cflags : "", regex_obj_buf, platform_flags,
              extra_cflags ? extra_cflags : "", shell_obj_buf, platform_flags,
              extra_cflags ? extra_cflags : "", text_obj_buf, main_obj_buf, utils_obj_buf,
-             json_obj_buf, regex_obj_buf, shell_obj_buf, text_obj_buf, bin_path_buf,
+             json_obj_buf, regex_obj_buf, shell_obj_buf, text_obj_buf, dl_link, bin_path_buf,
              extra_ldflags ? extra_ldflags : "");
     int cc = system(cc_cmd);
     if (cc != 0) {

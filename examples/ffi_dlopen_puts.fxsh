@@ -1,0 +1,5 @@
+# Dynamic FFI symbol lookup (native-codegen): c:<library>:<symbol>
+# macOS example library path:
+let puts_dyn : string -> c_int = "c:/usr/lib/libSystem.B.dylib:puts"
+let rc : int = c_int_to_int (puts_dyn "ffi via dlopen+dlsym")
+rc

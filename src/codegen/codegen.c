@@ -238,6 +238,12 @@ typedef struct {
 static sp_dyn_array(mono_spec_t) g_mono_specs = SP_NULLPTR;
 
 typedef struct {
+    bool dynamic;
+    sp_str_t lib;
+    sp_str_t sym;
+} ffi_decl_ref_t;
+
+typedef struct {
     sp_str_t name;
     fxsh_type_t *type;
 } pat_var_type_entry_t;
@@ -461,20 +467,38 @@ static bool lit_string_prefix(sp_str_t s, const char *prefix) {
     return memcmp(s.data, prefix, n) == 0;
 }
 
-static bool let_is_ffi_decl(fxsh_ast_node_t *ast, sp_str_t *out_sym) {
+static bool parse_ffi_decl_ref(sp_str_t s, ffi_decl_ref_t *out_ref) {
+    if (!lit_string_prefix(s, "c:"))
+        return false;
+    sp_str_t payload = {.data = s.data + 2, .len = s.len - 2};
+    if (!payload.data || payload.len == 0)
+        return false;
+
+    ffi_decl_ref_t ref = {.dynamic = false, .lib = (sp_str_t){0}, .sym = payload};
+    for (u32 i = 0; i < payload.len; i++) {
+        if (payload.data[i] != ':')
+            continue;
+        if (i == 0 || i + 1 >= payload.len)
+            return false;
+        ref.dynamic = true;
+        ref.lib = (sp_str_t){.data = payload.data, .len = i};
+        ref.sym = (sp_str_t){.data = payload.data + i + 1, .len = payload.len - i - 1};
+        break;
+    }
+    if (!ref.sym.data || ref.sym.len == 0)
+        return false;
+    if (out_ref)
+        *out_ref = ref;
+    return true;
+}
+
+static bool let_is_ffi_decl(fxsh_ast_node_t *ast, ffi_decl_ref_t *out_ref) {
     if (!ast || (ast->kind != AST_DECL_LET && ast->kind != AST_LET))
         return false;
     if (!ast->data.let.type || !ast->data.let.value || ast->data.let.value->kind != AST_LIT_STRING)
         return false;
     sp_str_t s = ast->data.let.value->data.lit_string;
-    if (!lit_string_prefix(s, "c:"))
-        return false;
-    sp_str_t sym = {.data = s.data + 2, .len = s.len - 2};
-    if (!sym.data || sym.len == 0)
-        return false;
-    if (out_sym)
-        *out_sym = sym;
-    return true;
+    return parse_ffi_decl_ref(s, out_ref);
 }
 
 static u32 fn_arity_of(fxsh_type_t *t) {
@@ -5386,8 +5410,8 @@ static void gen_decl_let_mono_specs(codegen_ctx_t *ctx, fxsh_ast_node_t *ast) {
 }
 
 static void gen_decl_let(codegen_ctx_t *ctx, fxsh_ast_node_t *ast) {
-    sp_str_t ffi_sym = (sp_str_t){0};
-    if (let_is_ffi_decl(ast, &ffi_sym)) {
+    ffi_decl_ref_t ffi_ref = {0};
+    if (let_is_ffi_decl(ast, &ffi_ref)) {
         fxsh_type_t *fn_t = lookup_symbol_type(ast->data.let.name);
         if (!fn_t || fn_t->kind != TYPE_ARROW)
             return;
@@ -5426,45 +5450,47 @@ static void gen_decl_let(codegen_ctx_t *ctx, fxsh_ast_node_t *ast) {
         u32 c_arity = unit_arity ? 0 : arity;
         bool ret_unit = ffi_decl_returns_unit_from_ast(ast) || fn_returns_unit(fn_t);
         bool ret_string = type_is_string_con(return_type_of_fn(fn_t));
-        emit_line(ctx, "#if defined(__APPLE__)");
-        emit_indent(ctx);
-        emit_raw(ctx, "extern ");
-        emit_c_abi_type_for_type(ctx, return_type_of_fn(fn_t));
-        emit_raw(ctx, " ");
-        emit_string(ctx, c_sym_alias);
-        emit_raw(ctx, "(");
-        if (c_arity == 0) {
-            emit_raw(ctx, "void");
+        if (!ffi_ref.dynamic) {
+            emit_line(ctx, "#if defined(__APPLE__)");
+            emit_indent(ctx);
+            emit_raw(ctx, "extern ");
+            emit_c_abi_type_for_type(ctx, return_type_of_fn(fn_t));
+            emit_raw(ctx, " ");
+            emit_string(ctx, c_sym_alias);
+            emit_raw(ctx, "(");
+            if (c_arity == 0) {
+                emit_raw(ctx, "void");
+            }
+            for (u32 i = 0; i < c_arity; i++) {
+                if (i > 0)
+                    emit_raw(ctx, ", ");
+                emit_c_abi_type_for_type(ctx, nth_param_type(fn_t, i));
+                emit_fmt(ctx, " _a%u", (unsigned)i);
+            }
+            emit_raw(ctx, ") __asm__(\"_");
+            emit_string(ctx, ffi_ref.sym);
+            emit_raw(ctx, "\");\n");
+            emit_line(ctx, "#else");
+            emit_indent(ctx);
+            emit_raw(ctx, "extern ");
+            emit_c_abi_type_for_type(ctx, return_type_of_fn(fn_t));
+            emit_raw(ctx, " ");
+            emit_string(ctx, c_sym_alias);
+            emit_raw(ctx, "(");
+            if (c_arity == 0) {
+                emit_raw(ctx, "void");
+            }
+            for (u32 i = 0; i < c_arity; i++) {
+                if (i > 0)
+                    emit_raw(ctx, ", ");
+                emit_c_abi_type_for_type(ctx, nth_param_type(fn_t, i));
+                emit_fmt(ctx, " _a%u", (unsigned)i);
+            }
+            emit_raw(ctx, ") __asm__(\"");
+            emit_string(ctx, ffi_ref.sym);
+            emit_raw(ctx, "\");\n");
+            emit_line(ctx, "#endif");
         }
-        for (u32 i = 0; i < c_arity; i++) {
-            if (i > 0)
-                emit_raw(ctx, ", ");
-            emit_c_abi_type_for_type(ctx, nth_param_type(fn_t, i));
-            emit_fmt(ctx, " _a%u", (unsigned)i);
-        }
-        emit_raw(ctx, ") __asm__(\"_");
-        emit_string(ctx, ffi_sym);
-        emit_raw(ctx, "\");\n");
-        emit_line(ctx, "#else");
-        emit_indent(ctx);
-        emit_raw(ctx, "extern ");
-        emit_c_abi_type_for_type(ctx, return_type_of_fn(fn_t));
-        emit_raw(ctx, " ");
-        emit_string(ctx, c_sym_alias);
-        emit_raw(ctx, "(");
-        if (c_arity == 0) {
-            emit_raw(ctx, "void");
-        }
-        for (u32 i = 0; i < c_arity; i++) {
-            if (i > 0)
-                emit_raw(ctx, ", ");
-            emit_c_abi_type_for_type(ctx, nth_param_type(fn_t, i));
-            emit_fmt(ctx, " _a%u", (unsigned)i);
-        }
-        emit_raw(ctx, ") __asm__(\"");
-        emit_string(ctx, ffi_sym);
-        emit_raw(ctx, "\");\n");
-        emit_line(ctx, "#endif");
 
         emit_indent(ctx);
         emit_raw(ctx, "static ");
@@ -5489,10 +5515,55 @@ static void gen_decl_let(codegen_ctx_t *ctx, fxsh_ast_node_t *ast) {
                 emit_fmt(ctx, "char *_cstr_%u = fxsh_cstr_dup(_a%u);\n", (unsigned)i, (unsigned)i);
             }
         }
+        if (ffi_ref.dynamic) {
+            emit_indent(ctx);
+            emit_raw(ctx, "typedef ");
+            emit_c_abi_type_for_type(ctx, return_type_of_fn(fn_t));
+            emit_raw(ctx, " (*_fxsh_dyn_fn_t)(");
+            if (c_arity == 0) {
+                emit_raw(ctx, "void");
+            }
+            for (u32 i = 0; i < c_arity; i++) {
+                if (i > 0)
+                    emit_raw(ctx, ", ");
+                emit_c_abi_type_for_type(ctx, nth_param_type(fn_t, i));
+            }
+            emit_raw(ctx, ");\n");
+            emit_indent(ctx);
+            emit_raw(ctx, "static void *_fxsh_dyn_handle = NULL;\n");
+            emit_indent(ctx);
+            emit_raw(ctx, "static _fxsh_dyn_fn_t _fxsh_dyn_fn = NULL;\n");
+            emit_indent(ctx);
+            emit_raw(ctx, "if (!_fxsh_dyn_fn) {\n");
+            ctx->indent_level++;
+            emit_indent(ctx);
+            emit_raw(ctx, "_fxsh_dyn_handle = dlopen(\"");
+            emit_string(ctx, ffi_ref.lib);
+            emit_raw(ctx, "\", RTLD_LAZY | RTLD_LOCAL);\n");
+            emit_indent(ctx);
+            emit_raw(
+                ctx,
+                "if (!_fxsh_dyn_handle) { fprintf(stderr, \"FFI dlopen failed: %s\\n\", dlerror()); abort(); }\n");
+            emit_indent(ctx);
+            emit_raw(ctx, "_fxsh_dyn_fn = (_fxsh_dyn_fn_t)dlsym(_fxsh_dyn_handle, \"");
+            emit_string(ctx, ffi_ref.sym);
+            emit_raw(ctx, "\");\n");
+            emit_indent(ctx);
+            emit_raw(
+                ctx,
+                "if (!_fxsh_dyn_fn) { fprintf(stderr, \"FFI dlsym failed: %s\\n\", dlerror()); abort(); }\n");
+            ctx->indent_level--;
+            emit_indent(ctx);
+            emit_raw(ctx, "}\n");
+        }
         if (ret_unit) {
             emit_indent(ctx);
-            emit_string(ctx, c_sym_alias);
-            emit_raw(ctx, "(");
+            if (ffi_ref.dynamic) {
+                emit_raw(ctx, "_fxsh_dyn_fn(");
+            } else {
+                emit_string(ctx, c_sym_alias);
+                emit_raw(ctx, "(");
+            }
             for (u32 i = 0; i < c_arity; i++) {
                 if (i > 0)
                     emit_raw(ctx, ", ");
@@ -5520,8 +5591,12 @@ static void gen_decl_let(codegen_ctx_t *ctx, fxsh_ast_node_t *ast) {
         if (ret_string) {
             emit_indent(ctx);
             emit_raw(ctx, "const char *_ret = ");
-            emit_string(ctx, c_sym_alias);
-            emit_raw(ctx, "(");
+            if (ffi_ref.dynamic) {
+                emit_raw(ctx, "_fxsh_dyn_fn(");
+            } else {
+                emit_string(ctx, c_sym_alias);
+                emit_raw(ctx, "(");
+            }
             for (u32 i = 0; i < c_arity; i++) {
                 if (i > 0)
                     emit_raw(ctx, ", ");
@@ -5549,8 +5624,12 @@ static void gen_decl_let(codegen_ctx_t *ctx, fxsh_ast_node_t *ast) {
         emit_indent(ctx);
         emit_c_type_for_type(ctx, return_type_of_fn(fn_t));
         emit_raw(ctx, " _ret = ");
-        emit_string(ctx, c_sym_alias);
-        emit_raw(ctx, "(");
+        if (ffi_ref.dynamic) {
+            emit_raw(ctx, "_fxsh_dyn_fn(");
+        } else {
+            emit_string(ctx, c_sym_alias);
+            emit_raw(ctx, "(");
+        }
         for (u32 i = 0; i < c_arity; i++) {
             if (i > 0)
                 emit_raw(ctx, ", ");
@@ -5691,6 +5770,7 @@ static void gen_prelude(codegen_ctx_t *ctx) {
     emit_line(ctx, "#include <sys/wait.h>");
     emit_line(ctx, "#include <unistd.h>");
     emit_line(ctx, "#include <glob.h>");
+    emit_line(ctx, "#include <dlfcn.h>");
     emit_line(ctx, "");
     emit_line(ctx, "typedef int64_t  s64;");
     emit_line(ctx, "typedef int32_t  s32;");
