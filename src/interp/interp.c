@@ -1291,6 +1291,46 @@ static rv_value_t *eval_expr(fxsh_ast_node_t *ast, rv_env_t *env, fxsh_error_t *
             }
             return rv_record(names, values);
         }
+        case AST_RECORD_UPDATE: {
+            rv_value_t *base = eval_expr(ast->data.record_update.base, env, err);
+            if (!base || *err != ERR_OK)
+                return NULL;
+            if (base->kind != RV_RECORD) {
+                *err = ERR_INVALID_INPUT;
+                fprintf(stderr, "Runtime error: record update base is not a record\n");
+                return NULL;
+            }
+
+            sp_dyn_array(sp_str_t) names = SP_NULLPTR;
+            sp_dyn_array(rv_value_t *) values = SP_NULLPTR;
+            sp_dyn_array_for(base->as.record.names, i) {
+                sp_dyn_array_push(names, base->as.record.names[i]);
+                sp_dyn_array_push(values, base->as.record.values[i]);
+            }
+
+            sp_dyn_array_for(ast->data.record_update.updates, i) {
+                fxsh_ast_node_t *u = ast->data.record_update.updates[i];
+                if (!u || u->kind != AST_FIELD_ACCESS)
+                    continue;
+                rv_value_t *v = eval_expr(u->data.field.object, env, err);
+                if (!v || *err != ERR_OK)
+                    return NULL;
+
+                bool replaced = false;
+                sp_dyn_array_for(names, j) {
+                    if (sp_str_equal(names[j], u->data.field.field)) {
+                        values[j] = v;
+                        replaced = true;
+                        break;
+                    }
+                }
+                if (!replaced) {
+                    sp_dyn_array_push(names, u->data.field.field);
+                    sp_dyn_array_push(values, v);
+                }
+            }
+            return rv_record(names, values);
+        }
         case AST_FIELD_ACCESS: {
             rv_value_t *obj = eval_expr(ast->data.field.object, env, err);
             if (!obj || *err != ERR_OK)
@@ -1436,6 +1476,8 @@ static rv_value_t *eval_expr(fxsh_ast_node_t *ast, rv_env_t *env, fxsh_error_t *
                     }
                 } else if (d->kind == AST_TYPE_DEF) {
                     last = rv_unit();
+                } else if (d->kind == AST_DECL_IMPORT) {
+                    last = rv_unit();
                 } else {
                     last = eval_expr(d, prog_env, err);
                     if (!last || *err != ERR_OK)
@@ -1444,6 +1486,8 @@ static rv_value_t *eval_expr(fxsh_ast_node_t *ast, rv_env_t *env, fxsh_error_t *
             }
             return last;
         }
+        case AST_DECL_IMPORT:
+            return rv_unit();
         case AST_CT_TYPE_OF:
         case AST_CT_TYPE_NAME:
         case AST_CT_SIZE_OF:

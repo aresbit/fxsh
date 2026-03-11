@@ -47,6 +47,7 @@ static sp_str_t mk_qualified_name(sp_str_t mod, sp_str_t name) {
 static inline bool match(fxsh_parser_t *parser, fxsh_token_kind_t kind);
 static inline fxsh_token_t *consume(fxsh_parser_t *parser, fxsh_token_kind_t kind, const char *msg);
 static inline fxsh_token_t *consume_name_token(fxsh_parser_t *parser, const char *msg);
+static bool token_is_ident_text(fxsh_token_t *tok, const char *text);
 static fxsh_ast_node_t *alloc_node(fxsh_ast_kind_t kind, fxsh_loc_t loc);
 
 typedef struct {
@@ -263,6 +264,11 @@ static void normalize_constructor_tuple_sugar_expr(fxsh_ast_node_t *ast,
         case AST_PAT_CONS:
             sp_dyn_array_for(ast->data.elements, i)
                 normalize_constructor_tuple_sugar_expr(ast->data.elements[i], entries);
+            return;
+        case AST_RECORD_UPDATE:
+            normalize_constructor_tuple_sugar_expr(ast->data.record_update.base, entries);
+            sp_dyn_array_for(ast->data.record_update.updates, i)
+                normalize_constructor_tuple_sugar_expr(ast->data.record_update.updates[i], entries);
             return;
         case AST_FIELD_ACCESS:
             normalize_constructor_tuple_sugar_expr(ast->data.field.object, entries);
@@ -532,6 +538,13 @@ static inline fxsh_token_t *consume_name_token(fxsh_parser_t *parser, const char
     return NULL;
 }
 
+static bool token_is_ident_text(fxsh_token_t *tok, const char *text) {
+    if (!tok || tok->kind != TOK_IDENT || !text)
+        return false;
+    size_t n = strlen(text);
+    return tok->data.ident.len == n && memcmp(tok->data.ident.data, text, n) == 0;
+}
+
 static void parser_error_at(fxsh_parser_t *parser, fxsh_loc_t loc, const char *fmt, ...) {
     va_list ap;
     va_start(ap, fmt);
@@ -745,6 +758,13 @@ void fxsh_ast_free(fxsh_ast_node_t *node) {
             fxsh_ast_free(node->data.field.object);
             fxsh_ast_free(node->data.field.type);
             break;
+        case AST_RECORD_UPDATE:
+            fxsh_ast_free(node->data.record_update.base);
+            sp_dyn_array_for(node->data.record_update.updates, i) {
+                fxsh_ast_free(node->data.record_update.updates[i]);
+            }
+            sp_dyn_array_free(node->data.record_update.updates);
+            break;
         case AST_TYPE_ARROW:
             fxsh_ast_free(node->data.type_arrow.param);
             fxsh_ast_free(node->data.type_arrow.ret);
@@ -873,6 +893,10 @@ static void rewrite_module_type_refs(fxsh_ast_node_t *type_ast, sp_dyn_array(nam
                     rewrite_module_type_refs(f->data.field.object, map);
             }
             return;
+        case AST_TUPLE:
+            sp_dyn_array_for(type_ast->data.elements, i)
+                rewrite_module_type_refs(type_ast->data.elements[i], map);
+            return;
         default:
             return;
     }
@@ -997,6 +1021,11 @@ static void rewrite_module_refs(fxsh_ast_node_t *ast, sp_dyn_array(name_map_t) m
             sp_dyn_array_for(ast->data.elements, i)
                 rewrite_module_refs(ast->data.elements[i], map, bound);
             return;
+        case AST_RECORD_UPDATE:
+            rewrite_module_refs(ast->data.record_update.base, map, bound);
+            sp_dyn_array_for(ast->data.record_update.updates, i)
+                rewrite_module_refs(ast->data.record_update.updates[i], map, bound);
+            return;
         case AST_FIELD_ACCESS:
             rewrite_module_refs(ast->data.field.object, map, bound);
             rewrite_module_type_refs(ast->data.field.type, map);
@@ -1042,9 +1071,26 @@ static fxsh_ast_node_t *parse_type_atom(fxsh_parser_t *parser) {
     fxsh_token_t *tok = current(parser);
     if (tok->kind == TOK_LPAREN) {
         advance(parser); /* consume '(' */
-        fxsh_ast_node_t *inner = parse_type_expr(parser);
+        fxsh_ast_node_t *first = parse_type_expr(parser);
+        skip_newlines(parser);
+        if (match(parser, TOK_COMMA)) {
+            fxsh_ast_list_t elems = SP_NULLPTR;
+            sp_dyn_array_push(elems, first);
+            skip_newlines(parser);
+            do {
+                fxsh_ast_node_t *next = parse_type_expr(parser);
+                if (!next)
+                    return NULL;
+                sp_dyn_array_push(elems, next);
+                skip_newlines(parser);
+            } while (match(parser, TOK_COMMA));
+            consume(parser, TOK_RPAREN, "')'");
+            fxsh_ast_node_t *tuple = alloc_node(AST_TUPLE, tok->loc);
+            tuple->data.elements = elems;
+            return tuple;
+        }
         consume(parser, TOK_RPAREN, "')'");
-        return inner;
+        return first;
     }
 
     if (tok->kind == TOK_IDENT || tok->kind == TOK_TYPE_IDENT) {
@@ -1688,6 +1734,17 @@ static fxsh_ast_node_t *parse_do_block(fxsh_parser_t *parser, fxsh_loc_t loc) {
             continue;
         }
 
+        if (match(parser, TOK_RETURN)) {
+            body = parse_expr(parser);
+            skip_newlines(parser);
+            (void)match(parser, TOK_SEMICOLON);
+            skip_newlines(parser);
+            if (!check(parser, TOK_RBRACE) && !check(parser, TOK_EOF)) {
+                return do_block_fail_sync(parser, "expected end of do-block after return");
+            }
+            break;
+        }
+
         fxsh_ast_node_t *expr = parse_expr(parser);
         bool had_semi = match(parser, TOK_SEMICOLON);
         skip_newlines(parser);
@@ -2221,26 +2278,62 @@ static fxsh_ast_node_t *parse_primary(fxsh_parser_t *parser) {
         case TOK_LBRACE: {
             advance(parser); /* consume { */
             skip_newlines(parser);
+            if (check(parser, TOK_RBRACE)) {
+                consume(parser, TOK_RBRACE, "'}'");
+                fxsh_ast_node_t *node = alloc_node(AST_RECORD, tok->loc);
+                node->data.elements = SP_NULLPTR;
+                return node;
+            }
+            fxsh_ast_node_t *first_expr = parse_expr(parser);
+            skip_newlines(parser);
+
+            if (match(parser, TOK_WITH)) {
+                fxsh_ast_list_t updates = SP_NULLPTR;
+                skip_newlines(parser);
+                while (!check(parser, TOK_RBRACE) && !check(parser, TOK_EOF)) {
+                    fxsh_token_t *field_tok = consume(parser, TOK_IDENT, "field name");
+                    if (!field_tok)
+                        return NULL;
+                    consume(parser, TOK_ASSIGN, "'='");
+                    fxsh_ast_node_t *field_value = parse_expr(parser);
+
+                    fxsh_ast_node_t *field_node = alloc_node(AST_FIELD_ACCESS, field_tok->loc);
+                    field_node->data.field.object = field_value;
+                    field_node->data.field.field = field_tok->data.ident;
+                    field_node->data.field.type = NULL;
+                    sp_dyn_array_push(updates, field_node);
+
+                    skip_newlines(parser);
+                    if (!match(parser, TOK_COMMA) && !match(parser, TOK_SEMICOLON))
+                        break;
+                    skip_newlines(parser);
+                }
+                consume(parser, TOK_RBRACE, "'}'");
+
+                fxsh_ast_node_t *node = alloc_node(AST_RECORD_UPDATE, tok->loc);
+                node->data.record_update.base = first_expr;
+                node->data.record_update.updates = updates;
+                return node;
+            }
 
             fxsh_ast_list_t fields = SP_NULLPTR;
-
             while (!check(parser, TOK_RBRACE) && !check(parser, TOK_EOF)) {
-                /* Parse field: name = expr or name: type = expr */
-                fxsh_token_t *field_tok = consume(parser, TOK_IDENT, "field name");
-                if (!field_tok)
+                if (!first_expr || first_expr->kind != AST_IDENT) {
+                    parser_error_at(parser, first_expr ? first_expr->loc : tok->loc,
+                                    "expected field name in record literal");
                     return NULL;
+                }
 
-                sp_str_t field_name = field_tok->data.ident;
+                sp_str_t field_name = first_expr->data.ident;
                 fxsh_ast_node_t *field_type = NULL;
                 if (match(parser, TOK_COLON)) {
                     field_type = parse_type_expr(parser);
                 }
 
                 consume(parser, TOK_ASSIGN, "'='");
-
                 fxsh_ast_node_t *field_value = parse_expr(parser);
 
-                fxsh_ast_node_t *field_node = alloc_node(AST_FIELD_ACCESS, field_tok->loc);
+                fxsh_ast_node_t *field_node = alloc_node(AST_FIELD_ACCESS, first_expr->loc);
                 field_node->data.field.object = field_value;
                 field_node->data.field.field = field_name;
                 field_node->data.field.type = field_type;
@@ -2249,6 +2342,10 @@ static fxsh_ast_node_t *parse_primary(fxsh_parser_t *parser) {
                 skip_newlines(parser);
                 if (!match(parser, TOK_COMMA) && !match(parser, TOK_SEMICOLON))
                     break;
+                skip_newlines(parser);
+                if (check(parser, TOK_RBRACE))
+                    break;
+                first_expr = parse_expr(parser);
                 skip_newlines(parser);
             }
 
@@ -2289,11 +2386,9 @@ static fxsh_ast_node_t *parse_primary(fxsh_parser_t *parser) {
 
             fxsh_ast_node_t *then_branch = parse_expr(parser);
 
-            fxsh_ast_node_t *else_branch = NULL;
             skip_newlines(parser);
-            if (match(parser, TOK_ELSE)) {
-                else_branch = parse_expr(parser);
-            }
+            consume(parser, TOK_ELSE, "'else'");
+            fxsh_ast_node_t *else_branch = parse_expr(parser);
             /* Avoid stealing enclosing `end` (e.g. module/match) for single-line if-expressions. */
             if (tok->loc.line != cond->loc.line ||
                 (then_branch && tok->loc.line != then_branch->loc.line) ||
@@ -2401,6 +2496,9 @@ static fxsh_ast_node_t *parse_primary(fxsh_parser_t *parser) {
 
                 fxsh_ast_node_t *guard = NULL;
                 if (match(parser, TOK_IF)) {
+                    guard = parse_expr(parser);
+                } else if (token_is_ident_text(current(parser), "when")) {
+                    advance(parser); /* consume `when` */
                     guard = parse_expr(parser);
                 }
 
@@ -3195,8 +3293,6 @@ fxsh_ast_node_t *fxsh_parse_program(fxsh_parser_t *parser) {
                 sp_dyn_array_for(decl->data.decls, i) {
                     sp_dyn_array_push(decls, decl->data.decls[i]);
                 }
-            } else if (decl->kind == AST_DECL_IMPORT) {
-                /* Import is currently a parser-level name-resolution directive. */
             } else {
                 sp_dyn_array_push(decls, decl);
             }

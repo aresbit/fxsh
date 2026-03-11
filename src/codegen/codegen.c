@@ -1045,6 +1045,11 @@ static void collect_mono_specs_expr(fxsh_ast_node_t *ast) {
         case AST_PAT_RECORD:
             sp_dyn_array_for(ast->data.elements, i) collect_mono_specs_expr(ast->data.elements[i]);
             return;
+        case AST_RECORD_UPDATE:
+            collect_mono_specs_expr(ast->data.record_update.base);
+            sp_dyn_array_for(ast->data.record_update.updates, i)
+                collect_mono_specs_expr(ast->data.record_update.updates[i]);
+            return;
         case AST_FIELD_ACCESS:
             collect_mono_specs_expr(ast->data.field.object);
             return;
@@ -2793,6 +2798,7 @@ static void emit_c_type_guess_for_expr(codegen_ctx_t *ctx, fxsh_ast_node_t *expr
             emit_raw(ctx, "s64");
             return;
         case AST_RECORD:
+        case AST_RECORD_UPDATE:
             emit_raw(ctx, "fxsh_record_t");
             return;
         case AST_TUPLE:
@@ -2839,6 +2845,7 @@ static void gen_boxed_expr(codegen_ctx_t *ctx, fxsh_ast_node_t *expr) {
             emit_raw(ctx, ")");
             return;
         case AST_RECORD:
+        case AST_RECORD_UPDATE:
             emit_raw(ctx, "fxsh_box_ptr((void*)");
             gen_expr(ctx, expr);
             emit_raw(ctx, ")");
@@ -3005,6 +3012,35 @@ static void gen_record(codegen_ctx_t *ctx, fxsh_ast_node_t *ast) {
         emit_raw(ctx, "); ");
     }
     (void)rec_id;
+    emit_raw(ctx, "_r; })");
+}
+
+static void gen_record_update(codegen_ctx_t *ctx, fxsh_ast_node_t *ast) {
+    emit_raw(ctx, "({ ");
+    emit_raw(ctx, "fxsh_record_t _b = ");
+    gen_expr(ctx, ast->data.record_update.base);
+    emit_raw(ctx, "; ");
+    emit_raw(ctx, "fxsh_record_t _r = fxsh_record_make(_b.len + ");
+    emit_fmt(ctx, "%u", (unsigned)sp_dyn_array_size(ast->data.record_update.updates));
+    emit_raw(ctx, "); ");
+    emit_raw(ctx, "for (u32 _i = 0; _i < _b.len; _i++) fxsh_record_set(&_r, _i, _b.names[_i], _b.vals[_i]); ");
+
+    sp_dyn_array_for(ast->data.record_update.updates, i) {
+        fxsh_ast_node_t *u = ast->data.record_update.updates[i];
+        if (!u || u->kind != AST_FIELD_ACCESS)
+            continue;
+        emit_raw(ctx, "({ bool _repl = false; for (u32 _j = 0; _j < _r.len; _j++) { if (_r.names[_j] && strcmp(_r.names[_j], \"");
+        emit_string(ctx, u->data.field.field);
+        emit_raw(ctx, "\") == 0) { _r.vals[_j] = ");
+        gen_boxed_expr(ctx, u->data.field.object);
+        emit_raw(ctx, "; _repl = true; break; } } if (!_repl) fxsh_record_set(&_r, _b.len + ");
+        emit_fmt(ctx, "%u", (unsigned)i);
+        emit_raw(ctx, ", \"");
+        emit_string(ctx, u->data.field.field);
+        emit_raw(ctx, "\", ");
+        gen_boxed_expr(ctx, u->data.field.object);
+        emit_raw(ctx, "); }); ");
+    }
     emit_raw(ctx, "_r; })");
 }
 
@@ -4294,6 +4330,9 @@ static fxsh_type_t *guess_expr_type_for_codegen(fxsh_ast_node_t *expr) {
         rt->data.record.row_var = -1;
         return rt;
     }
+    if (expr->kind == AST_RECORD_UPDATE) {
+        return guess_expr_type_for_codegen(expr->data.record_update.base);
+    }
     if (expr->kind == AST_FIELD_ACCESS) {
         fxsh_type_t *obj_t = guess_expr_type_for_codegen(expr->data.field.object);
         fxsh_type_t *field_t = record_field_type_hint(obj_t, expr->data.field.field);
@@ -4448,6 +4487,9 @@ static void gen_expr(codegen_ctx_t *ctx, fxsh_ast_node_t *ast) {
             break;
         case AST_RECORD:
             gen_record(ctx, ast);
+            break;
+        case AST_RECORD_UPDATE:
+            gen_record_update(ctx, ast);
             break;
         case AST_TUPLE:
             gen_tuple(ctx, ast);
@@ -6151,7 +6193,7 @@ char *fxsh_codegen(fxsh_ast_node_t *ast) {
                 gen_decl_fn(&ctx, d);
             else if (d->kind == AST_DECL_LET || d->kind == AST_LET)
                 gen_decl_let(&ctx, d);
-            else if (d->kind != AST_TYPE_DEF)
+            else if (d->kind != AST_TYPE_DEF && d->kind != AST_DECL_IMPORT)
                 gen_top_level_expr_init(d);
             /* TYPE_DEF already handled */
         }

@@ -903,6 +903,18 @@ static fxsh_type_t *ast_to_type_with_params(fxsh_ast_node_t *ast,
             }
             return make_record_type(fields, row_var);
         }
+        case AST_TUPLE: {
+            sp_dyn_array(fxsh_type_t *) elems = SP_NULLPTR;
+            sp_dyn_array_for(ast->data.elements, i) {
+                sp_dyn_array_push(elems,
+                                  ast_to_type_with_params(ast->data.elements[i], param_names,
+                                                          param_vars));
+            }
+            fxsh_type_t *tt = (fxsh_type_t *)fxsh_alloc0(sizeof(fxsh_type_t));
+            tt->kind = TYPE_TUPLE;
+            tt->data.tuple = elems;
+            return tt;
+        }
         default:
             return fxsh_type_var(fxsh_fresh_var());
     }
@@ -2071,6 +2083,41 @@ static fxsh_error_t infer_expr(fxsh_ast_node_t *ast, fxsh_type_env_t *env,
             *out_type = make_record_type(fields, -1);
             return ERR_OK;
         }
+        case AST_RECORD_UPDATE: {
+            fxsh_type_t *base_t = NULL;
+            fxsh_error_t err =
+                infer_expr(ast->data.record_update.base, env, constr_env, subst, &base_t);
+            if (err)
+                return err;
+
+            sp_dyn_array(fxsh_field_t) req_fields = SP_NULLPTR;
+            sp_dyn_array_for(ast->data.record_update.updates, i) {
+                fxsh_ast_node_t *u = ast->data.record_update.updates[i];
+                if (!u || u->kind != AST_FIELD_ACCESS)
+                    continue;
+                if (record_field_index(req_fields, u->data.field.field) >= 0) {
+                    fprintf(stderr, "Type error: duplicate record update field `%.*s`\n",
+                            u->data.field.field.len, u->data.field.field.data);
+                    return ERR_TYPE_ERROR;
+                }
+                fxsh_type_t *ut = NULL;
+                err = infer_expr(u->data.field.object, env, constr_env, subst, &ut);
+                if (err)
+                    return err;
+                fxsh_field_t rf = {.name = u->data.field.field, .type = ut};
+                sp_dyn_array_push(req_fields, rf);
+            }
+
+            fxsh_type_t *need = make_record_type(req_fields, fxsh_fresh_var());
+            fxsh_subst_t s = SP_NULLPTR;
+            err = fxsh_type_unify(base_t, need, &s);
+            if (err)
+                return err;
+            *subst = compose(s, *subst);
+            fxsh_type_apply_subst(s, &base_t);
+            *out_type = base_t;
+            return ERR_OK;
+        }
 
         case AST_FIELD_ACCESS: {
             fxsh_type_t *obj_t = NULL;
@@ -2296,6 +2343,9 @@ static fxsh_error_t infer_expr(fxsh_ast_node_t *ast, fxsh_type_env_t *env,
                 if (err != ERR_OK)
                     return err;
             }
+            return ERR_OK;
+        case AST_DECL_IMPORT:
+            *out_type = fxsh_type_con(TYPE_UNIT);
             return ERR_OK;
 
         default:

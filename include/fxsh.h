@@ -198,6 +198,7 @@ typedef enum {
     AST_TUPLE,
     AST_LIST,
     AST_RECORD,
+    AST_RECORD_UPDATE,
     AST_FIELD_ACCESS,
     AST_CALL,
     AST_LAMBDA,
@@ -470,6 +471,12 @@ struct fxsh_ast_node {
 
         /* Tuple/List/Record */
         fxsh_ast_list_t elements;
+
+        /* Record update: { base with f1 = v1; ... } */
+        struct {
+            fxsh_ast_node_t *base;
+            fxsh_ast_list_t updates; /* AST_FIELD_ACCESS list */
+        } record_update;
 
         /* Field access */
         struct {
