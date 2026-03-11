@@ -108,6 +108,14 @@ let comptime mode = if DEBUG then "debug" else "release"
 let c_labs : int -> int = "c:labs"
 let x = c_labs (-7)
 
+# dynamic lookup from process/global symbol table (dlsym RTLD_DEFAULT)
+let c_puts_dyn : string -> c_int = "c::puts"
+let _ = c_puts_dyn "hello from dlsym"
+
+# dynamic lookup from a specific library (dlopen + dlsym)
+# macOS example:
+let c_puts_lib : string -> c_int = "c:/usr/lib/libSystem.B.dylib:puts"
+
 # string ABI bridge: fxsh string <-> C const char*
 let c_atol : string -> int = "c:atol"
 let n = c_atol "12345"
@@ -123,6 +131,27 @@ let v = uv_version ()
 # pointer helpers (for opaque handles)
 let p : unit ptr = c_malloc 64
 let p2 : unit ptr = c_cast_ptr p
+let psz : int = c_ptr_size ()
+
+# pointer slot read/write (useful for C out-params like T**)
+let slot : unit ptr = c_malloc (c_ptr_size ())
+let _ : unit = c_store_ptr slot (c_null ())
+let p3 : unit ptr = c_load_ptr slot
+let _ : unit = c_free slot
+
+# cdef / header include / C enum-or-macro int constants (native-codegen)
+let _ : unit = c_include "sqlite3.h"
+let _ : unit = cdef "typedef struct sqlite3 sqlite3;"
+let sqlite_ok : int = c_const_int "SQLITE_OK"
+
+# auto import C header via clang AST (libclang route, generator tool)
+# generates fxsh bindings file with cdef + function lets
+# python3 tools/fxsh_cimport.py \
+#   --header sqlite3.h \
+#   --lib /usr/lib/libsqlite3.dylib \
+#   --symbol-prefix sqlite3_ \
+#   --enum-prefix SQLITE_ \
+#   --out examples/sqlite3_bindings.fxsh
 
 # callback pointer helper (top-level function -> opaque C callback pointer)
 let on_tick = fn _ -> ()

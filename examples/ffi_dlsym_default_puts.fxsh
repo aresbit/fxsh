@@ -1,0 +1,4 @@
+# Dynamic FFI symbol lookup via RTLD_DEFAULT (native-codegen): c::<symbol>
+let puts_dyn : string -> c_int = "c::puts"
+let rc : int = c_int_to_int (puts_dyn "ffi via dlsym(RTLD_DEFAULT)")
+rc

@@ -206,3 +206,13 @@ help:
 	@echo "  make clean        - Clean build artifacts"
 	@echo "  make bear         - Generate compile_commands.json"
 	@echo "  make install      - Install to system"
+	@echo "  make cimport-sqlite - Generate sqlite3 fxsh bindings example"
+
+.PHONY: cimport-sqlite
+cimport-sqlite:
+	@python3 tools/fxsh_cimport.py \
+		--header sqlite3.h \
+		--lib /usr/lib/libsqlite3.dylib \
+		--symbol-prefix sqlite3_ \
+		--enum-prefix SQLITE_ \
+		--out examples/sqlite3_bindings.fxsh

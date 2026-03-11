@@ -904,6 +904,31 @@ static rv_value_t *eval_builtin_call(sp_str_t name, fxsh_ast_list_t args, rv_env
         /* Interpreter fallback has no real raw pointers; use 0 sentinel. */
         return rv_int(0);
     }
+    if (builtin_name_eq(name, "c_include")) {
+        if (sp_dyn_array_size(av) != 1 || av[0]->kind != RV_STRING) {
+            *err = ERR_INVALID_INPUT;
+            fprintf(stderr, "Runtime error: c_include expects string\n");
+            return NULL;
+        }
+        return rv_unit();
+    }
+    if (builtin_name_eq(name, "cdef")) {
+        if (sp_dyn_array_size(av) != 1 || av[0]->kind != RV_STRING) {
+            *err = ERR_INVALID_INPUT;
+            fprintf(stderr, "Runtime error: cdef expects string\n");
+            return NULL;
+        }
+        return rv_unit();
+    }
+    if (builtin_name_eq(name, "c_const_int")) {
+        if (sp_dyn_array_size(av) != 1 || av[0]->kind != RV_STRING) {
+            *err = ERR_INVALID_INPUT;
+            fprintf(stderr, "Runtime error: c_const_int expects string\n");
+            return NULL;
+        }
+        /* Interpreter fallback cannot evaluate C constants. */
+        return rv_int(0);
+    }
     if (builtin_name_eq(name, "c_malloc")) {
         if (sp_dyn_array_size(av) != 1 || av[0]->kind != RV_INT) {
             *err = ERR_INVALID_INPUT;
@@ -928,6 +953,31 @@ static rv_value_t *eval_builtin_call(sp_str_t name, fxsh_ast_list_t args, rv_env
             return NULL;
         }
         return av[0];
+    }
+    if (builtin_name_eq(name, "c_ptr_size")) {
+        if (sp_dyn_array_size(av) != 1 || av[0]->kind != RV_UNIT) {
+            *err = ERR_INVALID_INPUT;
+            fprintf(stderr, "Runtime error: c_ptr_size expects unit\n");
+            return NULL;
+        }
+        return rv_int((s64)sizeof(void *));
+    }
+    if (builtin_name_eq(name, "c_load_ptr")) {
+        if (sp_dyn_array_size(av) != 1 || av[0]->kind != RV_INT) {
+            *err = ERR_INVALID_INPUT;
+            fprintf(stderr, "Runtime error: c_load_ptr expects ptr-sentinel int\n");
+            return NULL;
+        }
+        /* Interpreter fallback has no raw memory model. */
+        return rv_int(0);
+    }
+    if (builtin_name_eq(name, "c_store_ptr")) {
+        if (sp_dyn_array_size(av) != 2 || av[0]->kind != RV_INT || av[1]->kind != RV_INT) {
+            *err = ERR_INVALID_INPUT;
+            fprintf(stderr, "Runtime error: c_store_ptr expects (ptr-sentinel int, ptr-sentinel int)\n");
+            return NULL;
+        }
+        return rv_unit();
     }
     if (builtin_name_eq(name, "c_callback0")) {
         if (sp_dyn_array_size(av) != 1 || av[0]->kind != RV_FUNCTION) {

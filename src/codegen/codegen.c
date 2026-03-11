@@ -293,6 +293,8 @@ typedef struct {
     fxsh_ast_node_t *expr;
 } global_init_t;
 static sp_dyn_array(global_init_t) g_global_inits = SP_NULLPTR;
+static sp_dyn_array(sp_str_t) g_cdef_blocks = SP_NULLPTR;
+static sp_dyn_array(sp_str_t) g_cdef_includes = SP_NULLPTR;
 
 static bool is_known_adt(sp_str_t name) {
     if (!g_adt_type_names)
@@ -467,6 +469,114 @@ static bool lit_string_prefix(sp_str_t s, const char *prefix) {
     return memcmp(s.data, prefix, n) == 0;
 }
 
+static bool str_list_has(sp_dyn_array(sp_str_t) list, sp_str_t s) {
+    sp_dyn_array_for(list, i) {
+        if (sp_str_equal(list[i], s))
+            return true;
+    }
+    return false;
+}
+
+static void cdef_register_block(sp_str_t block) {
+    if (!block.data || block.len == 0)
+        return;
+    if (!str_list_has(g_cdef_blocks, block))
+        sp_dyn_array_push(g_cdef_blocks, block);
+}
+
+static void cdef_register_include(sp_str_t include_spec) {
+    if (!include_spec.data || include_spec.len == 0)
+        return;
+    if (!str_list_has(g_cdef_includes, include_spec))
+        sp_dyn_array_push(g_cdef_includes, include_spec);
+}
+
+static bool c_ident_is_valid(sp_str_t s) {
+    if (!s.data || s.len == 0)
+        return false;
+    c8 c0 = s.data[0];
+    bool h0 = (c0 >= 'a' && c0 <= 'z') || (c0 >= 'A' && c0 <= 'Z') || c0 == '_';
+    if (!h0)
+        return false;
+    for (u32 i = 1; i < s.len; i++) {
+        c8 c = s.data[i];
+        bool ok = (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') ||
+                  c == '_';
+        if (!ok)
+            return false;
+    }
+    return true;
+}
+
+static bool extract_single_string_call_arg(fxsh_ast_node_t *expr, const char *callee_name,
+                                           sp_str_t *out_arg) {
+    if (!expr || expr->kind != AST_CALL)
+        return false;
+    fxsh_ast_list_t flat_args = SP_NULLPTR;
+    fxsh_ast_node_t *func = expr;
+    while (func && func->kind == AST_CALL) {
+        for (s32 i = (s32)sp_dyn_array_size(func->data.call.args) - 1; i >= 0; i--) {
+            sp_dyn_array_push(flat_args, func->data.call.args[i]);
+        }
+        func = func->data.call.func;
+    }
+    bool ok = false;
+    if (func && func->kind == AST_IDENT && cg_name_eq(func->data.ident, callee_name) &&
+        sp_dyn_array_size(flat_args) == 1 && flat_args[0] && flat_args[0]->kind == AST_LIT_STRING) {
+        if (out_arg)
+            *out_arg = flat_args[0]->data.lit_string;
+        ok = true;
+    }
+    if (flat_args)
+        sp_dyn_array_free(flat_args);
+    return ok;
+}
+
+static void collect_cdef_from_expr(fxsh_ast_node_t *expr) {
+    if (!expr)
+        return;
+    sp_str_t lit = {0};
+    if (extract_single_string_call_arg(expr, "cdef", &lit)) {
+        cdef_register_block(lit);
+        return;
+    }
+    if (extract_single_string_call_arg(expr, "c_include", &lit)) {
+        cdef_register_include(lit);
+        return;
+    }
+}
+
+static void collect_cdef_decls(fxsh_ast_node_t *ast) {
+    if (!ast || ast->kind != AST_PROGRAM || !ast->data.decls)
+        return;
+    sp_dyn_array_for(ast->data.decls, i) {
+        fxsh_ast_node_t *d = ast->data.decls[i];
+        if (!d)
+            continue;
+        if ((d->kind == AST_DECL_LET || d->kind == AST_LET) && d->data.let.value) {
+            collect_cdef_from_expr(d->data.let.value);
+        } else if (d->kind != AST_TYPE_DEF && d->kind != AST_DECL_IMPORT) {
+            collect_cdef_from_expr(d);
+        }
+    }
+}
+
+static void emit_cdef_include_line(codegen_ctx_t *ctx, sp_str_t spec) {
+    if (!spec.data || spec.len == 0)
+        return;
+    emit_raw(ctx, "#include ");
+    c8 first = spec.data[0];
+    c8 last = spec.data[spec.len - 1];
+    if ((first == '<' && last == '>') || (first == '"' && last == '"')) {
+        emit_string(ctx, spec);
+    } else {
+        emit_raw(ctx, "<");
+        emit_string(ctx, spec);
+        emit_raw(ctx, ">");
+    }
+    emit_raw(ctx, "\n");
+}
+
 static bool parse_ffi_decl_ref(sp_str_t s, ffi_decl_ref_t *out_ref) {
     if (!lit_string_prefix(s, "c:"))
         return false;
@@ -475,14 +585,15 @@ static bool parse_ffi_decl_ref(sp_str_t s, ffi_decl_ref_t *out_ref) {
         return false;
 
     ffi_decl_ref_t ref = {.dynamic = false, .lib = (sp_str_t){0}, .sym = payload};
-    for (u32 i = 0; i < payload.len; i++) {
-        if (payload.data[i] != ':')
+    for (u32 i = payload.len; i > 0; i--) {
+        u32 at = i - 1;
+        if (payload.data[at] != ':')
             continue;
-        if (i == 0 || i + 1 >= payload.len)
+        if (at + 1 >= payload.len)
             return false;
         ref.dynamic = true;
-        ref.lib = (sp_str_t){.data = payload.data, .len = i};
-        ref.sym = (sp_str_t){.data = payload.data + i + 1, .len = payload.len - i - 1};
+        ref.lib = (sp_str_t){.data = payload.data, .len = at};
+        ref.sym = (sp_str_t){.data = payload.data + at + 1, .len = payload.len - at - 1};
         break;
     }
     if (!ref.sym.data || ref.sym.len == 0)
@@ -1731,10 +1842,24 @@ static void gen_call(codegen_ctx_t *ctx, fxsh_ast_node_t *ast) {
     if (func->kind == AST_IDENT) {
         sp_str_t fname = func->data.ident;
         fxsh_type_t *ft = lookup_symbol_type(fname);
+        if (is_extern_fn_name(fname) && sp_dyn_array_size(flat_args) == 0) {
+            sp_str_t mapped = sym_lookup_expr(fname);
+            if (mapped.len > 0)
+                emit_string(ctx, mapped);
+            else
+                emit_mangled(ctx, fname);
+            emit_raw(ctx, "()");
+            sp_dyn_array_free(flat_args);
+            return;
+        }
         bool extern_unit_arity = is_extern_fn_name(fname) && fn_is_unit_arity(ft);
         if (extern_unit_arity && sp_dyn_array_size(flat_args) == 1 &&
             ast_is_unit_literal(flat_args[0])) {
-            gen_expr(ctx, func);
+            sp_str_t mapped = sym_lookup_expr(fname);
+            if (mapped.len > 0)
+                emit_string(ctx, mapped);
+            else
+                emit_mangled(ctx, fname);
             emit_raw(ctx, "()");
             sp_dyn_array_free(flat_args);
             return;
@@ -1744,7 +1869,11 @@ static void gen_call(codegen_ctx_t *ctx, fxsh_ast_node_t *ast) {
         bool force_builtin = cg_name_eq(fname, "exec_pipefail_capture") ||
                              cg_name_eq(fname, "exec_pipefail3_capture") ||
                              cg_name_eq(fname, "exec_pipefail4_capture") ||
-                             cg_name_eq(fname, "capture_release");
+                             cg_name_eq(fname, "capture_release") ||
+                             cg_name_eq(fname, "c_include") || cg_name_eq(fname, "cdef") ||
+                             cg_name_eq(fname, "c_const_int") ||
+                             cg_name_eq(fname, "c_ptr_size") || cg_name_eq(fname, "c_load_ptr") ||
+                             cg_name_eq(fname, "c_store_ptr");
         bool can_builtin = allow_builtin || force_builtin;
         if (can_builtin && cg_name_eq(fname, "print")) {
             if (sp_dyn_array_size(flat_args) == 1) {
@@ -2355,6 +2484,36 @@ static void gen_call(codegen_ctx_t *ctx, fxsh_ast_node_t *ast) {
                 return;
             }
         }
+        if (can_builtin && cg_name_eq(fname, "c_include")) {
+            if (sp_dyn_array_size(flat_args) == 1 && flat_args[0]->kind == AST_LIT_STRING) {
+                cdef_register_include(flat_args[0]->data.lit_string);
+                emit_raw(ctx, "0 /* c_include */");
+                sp_dyn_array_free(flat_args);
+                return;
+            }
+        }
+        if (can_builtin && cg_name_eq(fname, "cdef")) {
+            if (sp_dyn_array_size(flat_args) == 1 && flat_args[0]->kind == AST_LIT_STRING) {
+                cdef_register_block(flat_args[0]->data.lit_string);
+                emit_raw(ctx, "0 /* cdef */");
+                sp_dyn_array_free(flat_args);
+                return;
+            }
+        }
+        if (can_builtin && cg_name_eq(fname, "c_const_int")) {
+            if (sp_dyn_array_size(flat_args) == 1 && flat_args[0]->kind == AST_LIT_STRING) {
+                sp_str_t cname = flat_args[0]->data.lit_string;
+                if (c_ident_is_valid(cname)) {
+                    emit_raw(ctx, "((s64)(");
+                    emit_string(ctx, cname);
+                    emit_raw(ctx, "))");
+                } else {
+                    emit_raw(ctx, "0 /* invalid c_const_int name */");
+                }
+                sp_dyn_array_free(flat_args);
+                return;
+            }
+        }
         if (can_builtin && cg_name_eq(fname, "c_null")) {
             if (sp_dyn_array_size(flat_args) == 1 && ast_is_unit_literal(flat_args[0])) {
                 emit_raw(ctx, "((void*)0)");
@@ -2375,7 +2534,7 @@ static void gen_call(codegen_ctx_t *ctx, fxsh_ast_node_t *ast) {
             if (sp_dyn_array_size(flat_args) == 1) {
                 emit_raw(ctx, "({ free((void*)(");
                 gen_expr(ctx, flat_args[0]);
-                emit_raw(ctx, ")); })");
+                emit_raw(ctx, ")); 0; })");
                 sp_dyn_array_free(flat_args);
                 return;
             }
@@ -2385,6 +2544,33 @@ static void gen_call(codegen_ctx_t *ctx, fxsh_ast_node_t *ast) {
                 emit_raw(ctx, "((void*)(");
                 gen_expr(ctx, flat_args[0]);
                 emit_raw(ctx, "))");
+                sp_dyn_array_free(flat_args);
+                return;
+            }
+        }
+        if (can_builtin && cg_name_eq(fname, "c_ptr_size")) {
+            if (sp_dyn_array_size(flat_args) == 1) {
+                emit_raw(ctx, "((s64)sizeof(void *))");
+                sp_dyn_array_free(flat_args);
+                return;
+            }
+        }
+        if (can_builtin && cg_name_eq(fname, "c_load_ptr")) {
+            if (sp_dyn_array_size(flat_args) == 1) {
+                emit_raw(ctx, "(*(void**)((void*)(");
+                gen_expr(ctx, flat_args[0]);
+                emit_raw(ctx, ")))");
+                sp_dyn_array_free(flat_args);
+                return;
+            }
+        }
+        if (can_builtin && cg_name_eq(fname, "c_store_ptr")) {
+            if (sp_dyn_array_size(flat_args) == 2) {
+                emit_raw(ctx, "({ *(void**)((void*)(");
+                gen_expr(ctx, flat_args[1]);
+                emit_raw(ctx, ")) = (void*)(");
+                gen_expr(ctx, flat_args[0]);
+                emit_raw(ctx, "); 0; })");
                 sp_dyn_array_free(flat_args);
                 return;
             }
@@ -5537,13 +5723,19 @@ static void gen_decl_let(codegen_ctx_t *ctx, fxsh_ast_node_t *ast) {
             emit_raw(ctx, "if (!_fxsh_dyn_fn) {\n");
             ctx->indent_level++;
             emit_indent(ctx);
-            emit_raw(ctx, "_fxsh_dyn_handle = dlopen(\"");
-            emit_string(ctx, ffi_ref.lib);
-            emit_raw(ctx, "\", RTLD_LAZY | RTLD_LOCAL);\n");
+            if (ffi_ref.lib.len == 0) {
+                emit_raw(ctx, "_fxsh_dyn_handle = RTLD_DEFAULT;\n");
+            } else {
+                emit_raw(ctx, "_fxsh_dyn_handle = dlopen(\"");
+                emit_string(ctx, ffi_ref.lib);
+                emit_raw(ctx, "\", RTLD_LAZY | RTLD_LOCAL);\n");
+                emit_indent(ctx);
+                emit_raw(ctx,
+                         "if (!_fxsh_dyn_handle) { fprintf(stderr, \"FFI dlopen failed: %s\\n\", "
+                         "dlerror()); abort(); }\n");
+            }
             emit_indent(ctx);
-            emit_raw(
-                ctx,
-                "if (!_fxsh_dyn_handle) { fprintf(stderr, \"FFI dlopen failed: %s\\n\", dlerror()); abort(); }\n");
+            emit_raw(ctx, "dlerror();\n");
             emit_indent(ctx);
             emit_raw(ctx, "_fxsh_dyn_fn = (_fxsh_dyn_fn_t)dlsym(_fxsh_dyn_handle, \"");
             emit_string(ctx, ffi_ref.sym);
@@ -5771,6 +5963,16 @@ static void gen_prelude(codegen_ctx_t *ctx) {
     emit_line(ctx, "#include <unistd.h>");
     emit_line(ctx, "#include <glob.h>");
     emit_line(ctx, "#include <dlfcn.h>");
+    if (g_cdef_includes && sp_dyn_array_size(g_cdef_includes) > 0) {
+        sp_dyn_array_for(g_cdef_includes, i) { emit_cdef_include_line(ctx, g_cdef_includes[i]); }
+    }
+    if (g_cdef_blocks && sp_dyn_array_size(g_cdef_blocks) > 0) {
+        emit_line(ctx, "/* user cdef blocks */");
+        sp_dyn_array_for(g_cdef_blocks, i) {
+            emit_string(ctx, g_cdef_blocks[i]);
+            emit_raw(ctx, "\n");
+        }
+    }
     emit_line(ctx, "");
     emit_line(ctx, "typedef int64_t  s64;");
     emit_line(ctx, "typedef int32_t  s32;");
@@ -6204,6 +6406,8 @@ char *fxsh_codegen(fxsh_ast_node_t *ast) {
     g_closure_values = SP_NULLPTR;
     g_decl_fn_names = SP_NULLPTR;
     g_extern_fn_names = SP_NULLPTR;
+    g_cdef_blocks = SP_NULLPTR;
+    g_cdef_includes = SP_NULLPTR;
     g_sym_stack = SP_NULLPTR;
     g_local_type_stack = SP_NULLPTR;
     g_top_let_counter = 0;
@@ -6225,6 +6429,7 @@ char *fxsh_codegen(fxsh_ast_node_t *ast) {
             collect_mono_specs(ast);
         }
         (void)program_t;
+        collect_cdef_decls(ast);
     }
 
     gen_prelude(&ctx);

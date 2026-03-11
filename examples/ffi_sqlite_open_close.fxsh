@@ -1,0 +1,13 @@
+# SQLite FFI minimal open/close demo via pointer-slot helpers.
+# macOS system sqlite path:
+let sqlite3_open : string -> unit ptr -> c_int = "c:/usr/lib/libsqlite3.dylib:sqlite3_open"
+let sqlite3_close : unit ptr -> c_int = "c:/usr/lib/libsqlite3.dylib:sqlite3_close"
+
+let slot : unit ptr = c_malloc (c_ptr_size ())
+let _ : unit = c_store_ptr slot (c_null ())
+let rc_open : int = c_int_to_int (sqlite3_open ":memory:" slot)
+let db : unit ptr = c_load_ptr slot
+let rc_close : int = if rc_open == 0 then c_int_to_int (sqlite3_close db) else -1
+let _ : unit = c_free slot
+
+if rc_open == 0 and rc_close == 0 then print "sqlite open/close ok" else print "sqlite open/close failed"

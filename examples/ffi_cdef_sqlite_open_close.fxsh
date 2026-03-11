@@ -1,0 +1,17 @@
+# cdef/c_include/c_const_int MVP for sqlite
+let _ : unit = c_include "sqlite3.h"
+let _ : unit = cdef "typedef struct sqlite3 sqlite3;"
+
+let sqlite3_open : string -> unit ptr -> c_int = "c:/usr/lib/libsqlite3.dylib:sqlite3_open"
+let sqlite3_close : unit ptr -> c_int = "c:/usr/lib/libsqlite3.dylib:sqlite3_close"
+
+let sqlite_ok : int = c_const_int "SQLITE_OK"
+
+let slot : unit ptr = c_malloc (c_ptr_size ())
+let _ : unit = c_store_ptr slot (c_null ())
+let rc_open : int = c_int_to_int (sqlite3_open ":memory:" slot)
+let db : unit ptr = c_load_ptr slot
+let rc_close : int = if rc_open == sqlite_ok then c_int_to_int (sqlite3_close db) else -1
+let _ : unit = c_free slot
+
+if rc_open == sqlite_ok and rc_close == sqlite_ok then print "sqlite cdef/include ok" else print "sqlite cdef/include failed"

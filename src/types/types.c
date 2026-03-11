@@ -1364,6 +1364,21 @@ static void ensure_builtin_env(fxsh_type_env_t *env) {
                                    fxsh_type_apply(fxsh_type_con(TYPE_PTR), fxsh_type_var(a)));
         type_env_bind(env, sp_str_lit("c_null"), sc);
     }
+    if (!type_env_lookup(*env, sp_str_lit("c_include"))) {
+        type_env_bind(env, sp_str_lit("c_include"),
+                      mk_mono_scheme(fxsh_type_arrow(fxsh_type_con(TYPE_STRING),
+                                                     fxsh_type_con(TYPE_UNIT))));
+    }
+    if (!type_env_lookup(*env, sp_str_lit("cdef"))) {
+        type_env_bind(env, sp_str_lit("cdef"),
+                      mk_mono_scheme(fxsh_type_arrow(fxsh_type_con(TYPE_STRING),
+                                                     fxsh_type_con(TYPE_UNIT))));
+    }
+    if (!type_env_lookup(*env, sp_str_lit("c_const_int"))) {
+        type_env_bind(env, sp_str_lit("c_const_int"),
+                      mk_mono_scheme(fxsh_type_arrow(fxsh_type_con(TYPE_STRING),
+                                                     fxsh_type_con(TYPE_INT))));
+    }
     if (!type_env_lookup(*env, sp_str_lit("c_malloc"))) {
         fxsh_type_t *ret_ptr = fxsh_type_apply(fxsh_type_con(TYPE_PTR), fxsh_type_con(TYPE_UNIT));
         type_env_bind(env, sp_str_lit("c_malloc"),
@@ -1385,6 +1400,31 @@ static void ensure_builtin_env(fxsh_type_env_t *env) {
         fxsh_type_t *out_ptr = fxsh_type_apply(fxsh_type_con(TYPE_PTR), fxsh_type_var(b));
         sc->type = fxsh_type_arrow(in_ptr, out_ptr);
         type_env_bind(env, sp_str_lit("c_cast_ptr"), sc);
+    }
+    if (!type_env_lookup(*env, sp_str_lit("c_ptr_size"))) {
+        type_env_bind(env, sp_str_lit("c_ptr_size"),
+                      mk_mono_scheme(fxsh_type_arrow(fxsh_type_con(TYPE_UNIT),
+                                                     fxsh_type_con(TYPE_INT))));
+    }
+    if (!type_env_lookup(*env, sp_str_lit("c_load_ptr"))) {
+        s32 a = fxsh_fresh_var();
+        fxsh_scheme_t *sc = (fxsh_scheme_t *)fxsh_alloc0(sizeof(fxsh_scheme_t));
+        sc->vars = SP_NULLPTR;
+        sp_dyn_array_push(sc->vars, a);
+        fxsh_type_t *ptr_unit = fxsh_type_apply(fxsh_type_con(TYPE_PTR), fxsh_type_con(TYPE_UNIT));
+        fxsh_type_t *ptr_a = fxsh_type_apply(fxsh_type_con(TYPE_PTR), fxsh_type_var(a));
+        sc->type = fxsh_type_arrow(ptr_unit, ptr_a);
+        type_env_bind(env, sp_str_lit("c_load_ptr"), sc);
+    }
+    if (!type_env_lookup(*env, sp_str_lit("c_store_ptr"))) {
+        s32 a = fxsh_fresh_var();
+        fxsh_scheme_t *sc = (fxsh_scheme_t *)fxsh_alloc0(sizeof(fxsh_scheme_t));
+        sc->vars = SP_NULLPTR;
+        sp_dyn_array_push(sc->vars, a);
+        fxsh_type_t *ptr_unit = fxsh_type_apply(fxsh_type_con(TYPE_PTR), fxsh_type_con(TYPE_UNIT));
+        fxsh_type_t *ptr_a = fxsh_type_apply(fxsh_type_con(TYPE_PTR), fxsh_type_var(a));
+        sc->type = fxsh_type_arrow(ptr_unit, fxsh_type_arrow(ptr_a, fxsh_type_con(TYPE_UNIT)));
+        type_env_bind(env, sp_str_lit("c_store_ptr"), sc);
     }
     if (!type_env_lookup(*env, sp_str_lit("c_callback0"))) {
         fxsh_type_t *cb_t = fxsh_type_arrow(fxsh_type_con(TYPE_UNIT), fxsh_type_con(TYPE_UNIT));
