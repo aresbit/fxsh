@@ -1,0 +1,69 @@
+import FxSuperpowers.Cli
+import FxSuperpowers.Doctor
+import FxSuperpowers.Install
+import FxSuperpowers.Manifest
+import FxSuperpowers.Template
+
+let mode = getenv "FX_SP_MODE"
+let root = getenv "FX_SP_ROOT"
+let scope = getenv "FX_SP_SCOPE"
+let json = getenv "FX_SP_JSON"
+let dry_run = getenv "FX_SP_DRY_RUN"
+let target = getenv "FX_SP_TARGET"
+let install_kind = getenv "FX_SP_INSTALL_KIND"
+let on_conflict = getenv "FX_SP_ON_CONFLICT"
+let render_args = getenv "FX_SP_RENDER_ARGS"
+
+let usage = """
+fx-superpowers 0.1.0
+
+Usage:
+  fx-superpowers <command> [flags]
+
+Commands:
+  init
+  list
+  status
+  doctor
+  install
+  update
+  render
+
+Flags:
+  --root PATH
+  --scope workspace|user
+  --json
+  --dry-run
+  --target VALUE
+  --arguments TEXT
+"""
+
+let output =
+  if mode == "help" then usage
+  else if mode == "doctor" then
+    if json == "true" then FxSuperpowers.Doctor.render_json root scope
+    else FxSuperpowers.Doctor.render_text root scope
+  else if mode == "status" then
+    if json == "true" then FxSuperpowers.Manifest.status_json root scope
+    else FxSuperpowers.Manifest.status_text root scope
+  else if mode == "list" then
+    if json == "true" then FxSuperpowers.Manifest.list_json root scope
+    else FxSuperpowers.Manifest.list_text root scope
+  else if mode == "init" then
+    if json == "true" then FxSuperpowers.Install.init_json root scope dry_run
+    else FxSuperpowers.Install.init_text root scope dry_run
+  else if mode == "install" then
+    if json == "true" then
+      FxSuperpowers.Install.install_json root scope dry_run install_kind target on_conflict
+    else
+      FxSuperpowers.Install.install_text root scope dry_run install_kind target on_conflict
+  else if mode == "render" then
+    if json == "true" then FxSuperpowers.Template.render_json target root render_args
+    else FxSuperpowers.Template.render_text target root render_args
+  else if mode == "update" then
+    if json == "true" then FxSuperpowers.Install.update_json root scope dry_run
+    else FxSuperpowers.Install.update_text root scope dry_run
+  else FxSuperpowers.Cli.summary mode root scope dry_run json target
+
+let _ = print output
+let result = output

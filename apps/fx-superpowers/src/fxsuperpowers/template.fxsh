@@ -1,0 +1,49 @@
+let rec replace_all = fn src from to ->
+  let next = replace_once src from to in
+  if next == src then src else replace_all next from to
+
+let today = fn _ ->
+  let d = string_trim (exec_stdout "date +%Y-%m-%d") in
+  if d == "" then "1970-01-01" else d
+
+let load_template = fn target ->
+  if target == "" then ""
+  else if is_file target then read_file target
+  else target
+
+let apply_tokens = fn tpl root args ->
+  let d = today () in
+  let s1 = replace_all tpl "{{ARGUMENTS}}" args in
+  let s2 = replace_all s1 "{{ROOT}}" root in
+  replace_all s2 "{{DATE}}" d
+
+let has_unknown_tokens = fn s ->
+  (string_find s "{{" != -1) or (string_find s "}}" != -1)
+
+let render_text = fn target root args ->
+  if target == "" then
+    "render error: missing template path or inline template text"
+  else
+    let tpl = load_template target in
+    let out = apply_tokens tpl root args in
+    if has_unknown_tokens out then
+      "render error: unknown template token found (allowed: {{ARGUMENTS}}, {{ROOT}}, {{DATE}})"
+    else out
+  end
+
+let render_json = fn target root args ->
+  if target == "" then
+    "{\"tool\":\"fx-superpowers\",\"mode\":\"render\",\"ok\":false,\"error\":\"missing template\"}"
+  else
+    let tpl = load_template target in
+    let out = apply_tokens tpl root args in
+    if has_unknown_tokens out then
+      "{\"tool\":\"fx-superpowers\",\"mode\":\"render\",\"ok\":false,\"error\":\"unknown token\"}"
+    else
+      "{"
+      ++ "\"tool\":\"fx-superpowers\","
+      ++ "\"mode\":\"render\","
+      ++ "\"ok\":true,"
+      ++ "\"output\":" ++ (json_quote_string out)
+      ++ "}"
+  end

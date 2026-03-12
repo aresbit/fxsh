@@ -1,0 +1,12 @@
+let bool_text = fn s -> if s == "true" then "true" else "false"
+
+let summary = fn mode root scope dry_run json target ->
+  "fx-superpowers 0.1.0\n"
+  ++ "mode: " ++ mode ++ "\n"
+  ++ "root: " ++ root ++ "\n"
+  ++ "scope: " ++ scope ++ "\n"
+  ++ "dry-run: " ++ (bool_text dry_run) ++ "\n"
+  ++ "json: " ++ (bool_text json) ++ "\n"
+  ++ "target: " ++ target ++ "\n"
+  ++ "status: scaffold-ready"
+

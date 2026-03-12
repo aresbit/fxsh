@@ -1,0 +1,59 @@
+let yn = fn b -> if b then "ok" else "missing"
+
+let has_cmd = fn cmd ->
+  let rc = exec_code ("sh -lc \"command -v " ++ cmd ++ " >/dev/null 2>&1\"") in
+  rc == 0
+
+let root_base = fn root scope ->
+  if scope == "user" then
+    let home = getenv "HOME" in
+    if home == "" then ".codex" else home ++ "/.codex"
+  else
+    if root == "" then ".codex" else root ++ "/.codex"
+  end
+
+let writable = fn path ->
+  let rc = exec_code ("sh -lc \"test -w " ++ (json_quote_string path) ++ "\"") in
+  rc == 0
+
+let render_text = fn root scope ->
+  let base = root_base root scope in
+  let git_ok = has_cmd "git" in
+  let sh_ok = has_cmd "sh" in
+  let fxsh_ok = has_cmd "fxsh" in
+  let dep_ok = git_ok and sh_ok and fxsh_ok in
+  let base_ok = is_dir base in
+  let wr_ok = if base_ok then writable base else false in
+  let level = if dep_ok and base_ok and wr_ok then "ok" else if dep_ok then "warn" else "fail" in
+  "doctor mode: doctor\n"
+  ++ "level: " ++ level ++ "\n"
+  ++ "base: " ++ base ++ "\n"
+  ++ "git: " ++ (yn git_ok) ++ "\n"
+  ++ "sh: " ++ (yn sh_ok) ++ "\n"
+  ++ "fxsh: " ++ (yn fxsh_ok) ++ "\n"
+  ++ "base_dir: " ++ (if base_ok then "ok" else "missing") ++ "\n"
+  ++ "base_writable: " ++ (if wr_ok then "ok" else "missing")
+
+let render_json = fn root scope ->
+  let base = root_base root scope in
+  let git_ok = has_cmd "git" in
+  let sh_ok = has_cmd "sh" in
+  let fxsh_ok = has_cmd "fxsh" in
+  let dep_ok = git_ok and sh_ok and fxsh_ok in
+  let base_ok = is_dir base in
+  let wr_ok = if base_ok then writable base else false in
+  let level = if dep_ok and base_ok and wr_ok then "ok" else if dep_ok then "warn" else "fail" in
+  "{"
+  ++ "\"tool\":\"fx-superpowers\","
+  ++ "\"mode\":\"doctor\","
+  ++ "\"scope\":" ++ (json_quote_string scope) ++ ","
+  ++ "\"base\":" ++ (json_quote_string base) ++ ","
+  ++ "\"level\":" ++ (json_quote_string level) ++ ","
+  ++ "\"deps\":{"
+  ++ "\"git\":" ++ (if git_ok then "true" else "false") ++ ","
+  ++ "\"sh\":" ++ (if sh_ok then "true" else "false") ++ ","
+  ++ "\"fxsh\":" ++ (if fxsh_ok then "true" else "false")
+  ++ "},"
+  ++ "\"base_dir\":" ++ (if base_ok then "true" else "false") ++ ","
+  ++ "\"base_writable\":" ++ (if wr_ok then "true" else "false")
+  ++ "}"

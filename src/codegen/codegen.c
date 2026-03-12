@@ -500,8 +500,8 @@ static bool c_ident_is_valid(sp_str_t s) {
         return false;
     for (u32 i = 1; i < s.len; i++) {
         c8 c = s.data[i];
-        bool ok = (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') ||
-                  c == '_';
+        bool ok =
+            (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '_';
         if (!ok)
             return false;
     }
@@ -1866,15 +1866,14 @@ static void gen_call(codegen_ctx_t *ctx, fxsh_ast_node_t *ast) {
         }
         bool allow_builtin =
             !is_lambda_fn_name(fname) && !is_decl_fn_name(fname) && !sym_lookup_expr(fname).data;
-        bool force_builtin = cg_name_eq(fname, "exec_pipefail_capture") ||
-                             cg_name_eq(fname, "exec_pipefail3_capture") ||
-                             cg_name_eq(fname, "exec_pipefail4_capture") ||
-                             cg_name_eq(fname, "capture_release") ||
-                             cg_name_eq(fname, "c_include") || cg_name_eq(fname, "cdef") ||
-                             cg_name_eq(fname, "c_const_int") ||
-                             cg_name_eq(fname, "c_sqlite_transient") ||
-                             cg_name_eq(fname, "c_ptr_size") || cg_name_eq(fname, "c_load_ptr") ||
-                             cg_name_eq(fname, "c_store_ptr");
+        bool force_builtin =
+            cg_name_eq(fname, "exec_pipefail_capture") ||
+            cg_name_eq(fname, "exec_pipefail3_capture") ||
+            cg_name_eq(fname, "exec_pipefail4_capture") || cg_name_eq(fname, "capture_release") ||
+            cg_name_eq(fname, "c_include") || cg_name_eq(fname, "cdef") ||
+            cg_name_eq(fname, "c_const_int") || cg_name_eq(fname, "c_sqlite_transient") ||
+            cg_name_eq(fname, "c_ptr_size") || cg_name_eq(fname, "c_load_ptr") ||
+            cg_name_eq(fname, "c_store_ptr");
         bool can_builtin = allow_builtin || force_builtin;
         if (can_builtin && cg_name_eq(fname, "print")) {
             if (sp_dyn_array_size(flat_args) == 1) {
@@ -3241,13 +3240,15 @@ static void gen_record_update(codegen_ctx_t *ctx, fxsh_ast_node_t *ast) {
     emit_raw(ctx, "fxsh_record_t _r = fxsh_record_make(_b.len + ");
     emit_fmt(ctx, "%u", (unsigned)sp_dyn_array_size(ast->data.record_update.updates));
     emit_raw(ctx, "); ");
-    emit_raw(ctx, "for (u32 _i = 0; _i < _b.len; _i++) fxsh_record_set(&_r, _i, _b.names[_i], _b.vals[_i]); ");
+    emit_raw(ctx, "for (u32 _i = 0; _i < _b.len; _i++) fxsh_record_set(&_r, _i, _b.names[_i], "
+                  "_b.vals[_i]); ");
 
     sp_dyn_array_for(ast->data.record_update.updates, i) {
         fxsh_ast_node_t *u = ast->data.record_update.updates[i];
         if (!u || u->kind != AST_FIELD_ACCESS)
             continue;
-        emit_raw(ctx, "({ bool _repl = false; for (u32 _j = 0; _j < _r.len; _j++) { if (_r.names[_j] && strcmp(_r.names[_j], \"");
+        emit_raw(ctx, "({ bool _repl = false; for (u32 _j = 0; _j < _r.len; _j++) { if "
+                      "(_r.names[_j] && strcmp(_r.names[_j], \"");
         emit_string(ctx, u->data.field.field);
         emit_raw(ctx, "\") == 0) { _r.vals[_j] = ");
         gen_boxed_expr(ctx, u->data.field.object);
@@ -4647,7 +4648,8 @@ static void gen_expr(codegen_ctx_t *ctx, fxsh_ast_node_t *ast) {
                 {
                     bool has_module_sep = false;
                     for (u32 mi = 1; mi < ast->data.ident.len; mi++) {
-                        if (ast->data.ident.data[mi - 1] == '_' && ast->data.ident.data[mi] == '_') {
+                        if (ast->data.ident.data[mi - 1] == '_' &&
+                            ast->data.ident.data[mi] == '_') {
                             has_module_sep = true;
                             break;
                         }
@@ -5749,9 +5751,8 @@ static void gen_decl_let(codegen_ctx_t *ctx, fxsh_ast_node_t *ast) {
             emit_string(ctx, ffi_ref.sym);
             emit_raw(ctx, "\");\n");
             emit_indent(ctx);
-            emit_raw(
-                ctx,
-                "if (!_fxsh_dyn_fn) { fprintf(stderr, \"FFI dlsym failed: %s\\n\", dlerror()); abort(); }\n");
+            emit_raw(ctx, "if (!_fxsh_dyn_fn) { fprintf(stderr, \"FFI dlsym failed: %s\\n\", "
+                          "dlerror()); abort(); }\n");
             ctx->indent_level--;
             emit_indent(ctx);
             emit_raw(ctx, "}\n");
@@ -5972,7 +5973,9 @@ static void gen_prelude(codegen_ctx_t *ctx) {
     emit_line(ctx, "#include <glob.h>");
     emit_line(ctx, "#include <dlfcn.h>");
     if (g_cdef_includes && sp_dyn_array_size(g_cdef_includes) > 0) {
-        sp_dyn_array_for(g_cdef_includes, i) { emit_cdef_include_line(ctx, g_cdef_includes[i]); }
+        sp_dyn_array_for(g_cdef_includes, i) {
+            emit_cdef_include_line(ctx, g_cdef_includes[i]);
+        }
     }
     if (g_cdef_blocks && sp_dyn_array_size(g_cdef_blocks) > 0) {
         emit_line(ctx, "/* user cdef blocks */");

@@ -983,7 +983,8 @@ static rv_value_t *eval_builtin_call(sp_str_t name, fxsh_ast_list_t args, rv_env
     if (builtin_name_eq(name, "c_store_ptr")) {
         if (sp_dyn_array_size(av) != 2 || av[0]->kind != RV_INT || av[1]->kind != RV_INT) {
             *err = ERR_INVALID_INPUT;
-            fprintf(stderr, "Runtime error: c_store_ptr expects (ptr-sentinel int, ptr-sentinel int)\n");
+            fprintf(stderr,
+                    "Runtime error: c_store_ptr expects (ptr-sentinel int, ptr-sentinel int)\n");
             return NULL;
         }
         return rv_unit();

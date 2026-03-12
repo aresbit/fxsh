@@ -1,0 +1,14 @@
+import Fs
+
+let default_workspace_root = ".codex"
+
+let resolve_root = fn input ->
+  if input == "" then default_workspace_root else input
+
+let ensure_root = fn root ->
+  Fs.ensure_dir root
+
+let ensure_subdir = fn root name ->
+  let p = Fs.path_join root name in
+  Fs.ensure_dir p
+

@@ -906,9 +906,8 @@ static fxsh_type_t *ast_to_type_with_params(fxsh_ast_node_t *ast,
         case AST_TUPLE: {
             sp_dyn_array(fxsh_type_t *) elems = SP_NULLPTR;
             sp_dyn_array_for(ast->data.elements, i) {
-                sp_dyn_array_push(elems,
-                                  ast_to_type_with_params(ast->data.elements[i], param_names,
-                                                          param_vars));
+                sp_dyn_array_push(
+                    elems, ast_to_type_with_params(ast->data.elements[i], param_names, param_vars));
             }
             fxsh_type_t *tt = (fxsh_type_t *)fxsh_alloc0(sizeof(fxsh_type_t));
             tt->kind = TYPE_TUPLE;
@@ -1370,19 +1369,19 @@ static void ensure_builtin_env(fxsh_type_env_t *env) {
                       mk_mono_scheme(fxsh_type_arrow(fxsh_type_con(TYPE_UNIT), ret_ptr)));
     }
     if (!type_env_lookup(*env, sp_str_lit("c_include"))) {
-        type_env_bind(env, sp_str_lit("c_include"),
-                      mk_mono_scheme(fxsh_type_arrow(fxsh_type_con(TYPE_STRING),
-                                                     fxsh_type_con(TYPE_UNIT))));
+        type_env_bind(
+            env, sp_str_lit("c_include"),
+            mk_mono_scheme(fxsh_type_arrow(fxsh_type_con(TYPE_STRING), fxsh_type_con(TYPE_UNIT))));
     }
     if (!type_env_lookup(*env, sp_str_lit("cdef"))) {
-        type_env_bind(env, sp_str_lit("cdef"),
-                      mk_mono_scheme(fxsh_type_arrow(fxsh_type_con(TYPE_STRING),
-                                                     fxsh_type_con(TYPE_UNIT))));
+        type_env_bind(
+            env, sp_str_lit("cdef"),
+            mk_mono_scheme(fxsh_type_arrow(fxsh_type_con(TYPE_STRING), fxsh_type_con(TYPE_UNIT))));
     }
     if (!type_env_lookup(*env, sp_str_lit("c_const_int"))) {
-        type_env_bind(env, sp_str_lit("c_const_int"),
-                      mk_mono_scheme(fxsh_type_arrow(fxsh_type_con(TYPE_STRING),
-                                                     fxsh_type_con(TYPE_INT))));
+        type_env_bind(
+            env, sp_str_lit("c_const_int"),
+            mk_mono_scheme(fxsh_type_arrow(fxsh_type_con(TYPE_STRING), fxsh_type_con(TYPE_INT))));
     }
     if (!type_env_lookup(*env, sp_str_lit("c_malloc"))) {
         fxsh_type_t *ret_ptr = fxsh_type_apply(fxsh_type_con(TYPE_PTR), fxsh_type_con(TYPE_UNIT));
@@ -1407,9 +1406,9 @@ static void ensure_builtin_env(fxsh_type_env_t *env) {
         type_env_bind(env, sp_str_lit("c_cast_ptr"), sc);
     }
     if (!type_env_lookup(*env, sp_str_lit("c_ptr_size"))) {
-        type_env_bind(env, sp_str_lit("c_ptr_size"),
-                      mk_mono_scheme(fxsh_type_arrow(fxsh_type_con(TYPE_UNIT),
-                                                     fxsh_type_con(TYPE_INT))));
+        type_env_bind(
+            env, sp_str_lit("c_ptr_size"),
+            mk_mono_scheme(fxsh_type_arrow(fxsh_type_con(TYPE_UNIT), fxsh_type_con(TYPE_INT))));
     }
     if (!type_env_lookup(*env, sp_str_lit("c_load_ptr"))) {
         s32 a = fxsh_fresh_var();

@@ -1,0 +1,116 @@
+let root_base = fn root scope ->
+  if scope == "user" then
+    let home = getenv "HOME" in
+    if home == "" then ".codex" else home ++ "/.codex"
+  else
+    if root == "" then ".codex" else root ++ "/.codex"
+  end
+
+let rec last_sep_idx = fn path idx ->
+  if idx < 0 then -1
+  else if byte_at path idx == 47 then idx
+  else last_sep_idx path (idx - 1)
+
+let basename = fn path ->
+  let n = string_length path in
+  if n == 0 then ""
+  else
+    let idx = last_sep_idx path (n - 1) in
+    if idx < 0 then path
+    else
+      let start = idx + 1 in
+      string_slice path start (n - start)
+
+let rec collect_skill_names = fn xs ->
+  match xs with
+  | [] -> []
+  | x :: rest ->
+      let name = basename x in
+      if is_dir x and is_file (x ++ "/manifest.json") and (string_find name ".bak." == -1) then
+        name :: (collect_skill_names rest)
+      else collect_skill_names rest
+  end
+
+let rec join = fn sep xs ->
+  match xs with
+  | [] -> ""
+  | x :: [] -> x
+  | x :: rest -> x ++ sep ++ (join sep rest)
+  end
+
+let is_empty = fn xs ->
+  match xs with
+  | [] -> true
+  | _ :: _ -> false
+  end
+
+let rec json_string_array = fn xs ->
+  match xs with
+  | [] -> ""
+  | x :: [] -> json_quote_string x
+  | x :: rest -> (json_quote_string x) ++ "," ++ (json_string_array rest)
+  end
+
+let skill_entries = fn base ->
+  let d = base ++ "/skills" in
+  if is_dir d then list_dir d else []
+
+let command_entries = fn base ->
+  let d = base ++ "/commands" in
+  if is_dir d then list_dir d else []
+
+let status_text = fn root scope ->
+  let base = root_base root scope in
+  let skills_dir = base ++ "/skills" in
+  let commands_dir = base ++ "/commands" in
+  let skill_names = collect_skill_names (skill_entries base) in
+  let skills_text = if is_empty skill_names then "(none)" else join ", " skill_names in
+  "fx-superpowers status\n"
+  ++ "base: " ++ base ++ "\n"
+  ++ "scope: " ++ scope ++ "\n"
+  ++ "initialized: " ++ (if is_dir base then "true" else "false") ++ "\n"
+  ++ "skills_dir: " ++ (if is_dir skills_dir then "true" else "false") ++ "\n"
+  ++ "commands_dir: " ++ (if is_dir commands_dir then "true" else "false") ++ "\n"
+  ++ "skills: " ++ skills_text
+
+let status_json = fn root scope ->
+  let base = root_base root scope in
+  let skills_dir = base ++ "/skills" in
+  let commands_dir = base ++ "/commands" in
+  let skill_names = collect_skill_names (skill_entries base) in
+  "{"
+  ++ "\"tool\":\"fx-superpowers\","
+  ++ "\"mode\":\"status\","
+  ++ "\"base\":" ++ (json_quote_string base) ++ ","
+  ++ "\"scope\":" ++ (json_quote_string scope) ++ ","
+  ++ "\"initialized\":" ++ (if is_dir base then "true" else "false") ++ ","
+  ++ "\"skills_dir\":" ++ (if is_dir skills_dir then "true" else "false") ++ ","
+  ++ "\"commands_dir\":" ++ (if is_dir commands_dir then "true" else "false") ++ ","
+  ++ "\"skills\":["
+  ++ (json_string_array skill_names)
+  ++ "]"
+  ++ "}"
+
+let list_text = fn root scope ->
+  let base = root_base root scope in
+  let skill_names = collect_skill_names (skill_entries base) in
+  let body =
+    if is_empty skill_names then "(none)"
+    else join "\n" skill_names in
+  "fx-superpowers list\n"
+  ++ "base: " ++ base ++ "\n"
+  ++ "skills:\n"
+  ++ body
+
+let list_json = fn root scope ->
+  let base = root_base root scope in
+  let skill_names = collect_skill_names (skill_entries base) in
+  "{"
+  ++ "\"tool\":\"fx-superpowers\","
+  ++ "\"mode\":\"list\","
+  ++ "\"base\":" ++ (json_quote_string base) ++ ","
+  ++ "\"scope\":" ++ (json_quote_string scope) ++ ","
+  ++ "\"skills\":["
+  ++ (json_string_array skill_names)
+  ++ "]"
+  ++ "}"

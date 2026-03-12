@@ -1,0 +1,74 @@
+#!/bin/sh
+set -eu
+
+APP_DIR=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
+MODE=status
+ROOT=.
+SCOPE=workspace
+JSON=false
+DRY_RUN=false
+TARGET=
+INSTALL_KIND=
+ON_CONFLICT=skip
+RENDER_ARGS=
+
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    init|list|status|doctor|install|update|render)
+      MODE=$1
+      ;;
+    --root)
+      shift
+      ROOT=${1:-.}
+      ;;
+    --scope)
+      shift
+      SCOPE=${1:-workspace}
+      ;;
+    --json)
+      JSON=true
+      ;;
+    --dry-run)
+      DRY_RUN=true
+      ;;
+    --help|-h)
+      MODE=help
+      ;;
+    --target)
+      shift
+      TARGET=${1:-}
+      ;;
+    --on-conflict)
+      shift
+      ON_CONFLICT=${1:-skip}
+      ;;
+    --arguments)
+      shift
+      RENDER_ARGS=${1:-}
+      ;;
+    *)
+      if [ "$MODE" = "install" ] && [ -z "$INSTALL_KIND" ]; then
+        INSTALL_KIND=$1
+      elif [ "$MODE" = "install" ] && [ -z "$TARGET" ]; then
+        TARGET=$1
+      elif [ "$MODE" = "render" ] && [ -z "$TARGET" ]; then
+        TARGET=$1
+      else
+        echo "fx-superpowers: unknown argument: $1" >&2
+        exit 2
+      fi
+      ;;
+  esac
+  shift
+done
+
+FX_SP_MODE=$MODE \
+FX_SP_ROOT=$ROOT \
+FX_SP_SCOPE=$SCOPE \
+FX_SP_JSON=$JSON \
+FX_SP_DRY_RUN=$DRY_RUN \
+FX_SP_TARGET=$TARGET \
+FX_SP_INSTALL_KIND=$INSTALL_KIND \
+FX_SP_ON_CONFLICT=$ON_CONFLICT \
+FX_SP_RENDER_ARGS=$RENDER_ARGS \
+exec "$APP_DIR/../../bin/fxsh" "$APP_DIR/src/main.fxsh"
