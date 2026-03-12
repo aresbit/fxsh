@@ -1,0 +1,68 @@
+# Minimal end-to-end SQLite usage using stdlib/sqlite.fxsh declarations.
+# Run:
+#   FXSH_LDFLAGS='-lsqlite3' ./bin/fxsh --native-codegen examples/sqlite_query_min.fxsh
+
+import Sqlite
+
+let db_slot : unit ptr = Sqlite.slot_alloc (c_ptr_size ())
+let _ : unit = c_store_ptr db_slot (c_null ())
+let rc_open : int = Sqlite.open_into ":memory:" db_slot
+let db : unit ptr = Sqlite.slot_load db_slot
+let _ : unit = c_free db_slot
+
+if rc_open != Sqlite.sqlite_ok then
+  print "sqlite query failed: open"
+else
+  let c_slot : unit ptr = Sqlite.slot_alloc (c_ptr_size ()) in
+  let _ : unit = c_store_ptr c_slot (c_null ()) in
+  let rc_create_p : int = Sqlite.prepare_into db "create table users(id integer primary key, name text not null)" c_slot in
+  let c_stmt : unit ptr = Sqlite.slot_load c_slot in
+  let _ : unit = c_free c_slot in
+  if rc_create_p != Sqlite.sqlite_ok then
+    let _ : int = c_int_to_int (Sqlite.sqlite3_close db) in
+    print ("sqlite query failed: create prepare: " ++ Sqlite.sqlite3_errmsg db)
+  else
+    let rc_create_s : int = Sqlite.step_rc c_stmt in
+    let _ : int = Sqlite.finalize_rc c_stmt in
+    if rc_create_s != Sqlite.sqlite_done then
+      let _ : int = c_int_to_int (Sqlite.sqlite3_close db) in
+      print ("sqlite query failed: create step: " ++ Sqlite.sqlite3_errmsg db)
+    else
+      let i_slot : unit ptr = Sqlite.slot_alloc (c_ptr_size ()) in
+      let _ : unit = c_store_ptr i_slot (c_null ()) in
+      let rc_ins_p : int = Sqlite.prepare_into db "insert into users(id, name) values(?, ?)" i_slot in
+      let ins : unit ptr = Sqlite.slot_load i_slot in
+      let _ : unit = c_free i_slot in
+      if rc_ins_p != Sqlite.sqlite_ok then
+        let _ : int = c_int_to_int (Sqlite.sqlite3_close db) in
+        print ("sqlite query failed: insert prepare: " ++ Sqlite.sqlite3_errmsg db)
+      else
+        let rc_b1 : int = Sqlite.bind_int_rc ins 1 1 in
+        let rc_b2 : int = Sqlite.bind_text_rc ins 2 "alice" in
+        let rc_ins_s : int = Sqlite.step_rc ins in
+        let _ : int = Sqlite.finalize_rc ins in
+        if rc_b1 != Sqlite.sqlite_ok or rc_b2 != Sqlite.sqlite_ok or rc_ins_s != Sqlite.sqlite_done then
+          let _ : int = c_int_to_int (Sqlite.sqlite3_close db) in
+          print ("sqlite query failed: insert step: " ++ Sqlite.sqlite3_errmsg db)
+        else
+          let s_slot : unit ptr = Sqlite.slot_alloc (c_ptr_size ()) in
+          let _ : unit = c_store_ptr s_slot (c_null ()) in
+          let rc_sel_p : int = Sqlite.prepare_into db "select id, name from users where id = ?" s_slot in
+          let sel : unit ptr = Sqlite.slot_load s_slot in
+          let _ : unit = c_free s_slot in
+          if rc_sel_p != Sqlite.sqlite_ok then
+            let _ : int = c_int_to_int (Sqlite.sqlite3_close db) in
+            print ("sqlite query failed: select prepare: " ++ Sqlite.sqlite3_errmsg db)
+          else
+            let rc_sb : int = Sqlite.bind_int_rc sel 1 1 in
+            let rc_sel_s : int = Sqlite.step_rc sel in
+            if rc_sb != Sqlite.sqlite_ok or rc_sel_s != Sqlite.sqlite_row then
+              let _ : int = Sqlite.finalize_rc sel in
+              let _ : int = c_int_to_int (Sqlite.sqlite3_close db) in
+              print ("sqlite query failed: select step: " ++ Sqlite.sqlite3_errmsg db)
+            else
+              let name : string = Sqlite.sqlite3_column_text sel (int_to_c_int 1) in
+              let _ = print ("name=" ++ name) in
+              let _ : int = Sqlite.finalize_rc sel in
+              let _ : int = c_int_to_int (Sqlite.sqlite3_close db) in
+              print "sqlite query ok"

@@ -139,6 +139,9 @@ let _ : unit = c_store_ptr slot (c_null ())
 let p3 : unit ptr = c_load_ptr slot
 let _ : unit = c_free slot
 
+# sqlite text bind destructor sentinel (maps to SQLITE_TRANSIENT / (void*)-1)
+let transient : unit ptr = c_sqlite_transient ()
+
 # cdef / header include / C enum-or-macro int constants (native-codegen)
 let _ : unit = c_include "sqlite3.h"
 let _ : unit = cdef "typedef struct sqlite3 sqlite3;"
@@ -148,14 +151,18 @@ let sqlite_ok : int = c_const_int "SQLITE_OK"
 # generates fxsh bindings file with cdef + function lets
 # python3 tools/fxsh_cimport.py \
 #   --header sqlite3.h \
-#   --lib /usr/lib/libsqlite3.dylib \
 #   --symbol-prefix sqlite3_ \
 #   --enum-prefix SQLITE_ \
 #   --out examples/sqlite3_bindings.fxsh
+# run native binary with sqlite linked:
+#   FXSH_LDFLAGS='-lsqlite3' ./bin/fxsh --native-codegen your_file.fxsh
 
 # callback pointer helper (top-level function -> opaque C callback pointer)
 let on_tick = fn _ -> ()
 let cbp : unit ptr = c_callback0 on_tick
+
+# SQLite FFI details:
+#   docs/sqlite_ffi.md
 
 # tensor MVP (2D float)
 let a = tensor_from_list2 2 3 [1.0; 2.0; 3.0; 4.0; 5.0; 6.0]

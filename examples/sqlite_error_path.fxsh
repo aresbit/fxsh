@@ -1,0 +1,26 @@
+# SQLite error-path demo: intentionally invalid SQL to exercise sqlite3_errmsg.
+# Run:
+#   FXSH_LDFLAGS='-lsqlite3' ./bin/fxsh --native-codegen examples/sqlite_error_path.fxsh
+
+import Sqlite
+
+let db_slot : unit ptr = Sqlite.slot_alloc (c_ptr_size ())
+let _ : unit = c_store_ptr db_slot (c_null ())
+let rc_open : int = Sqlite.open_into ":memory:" db_slot
+let db : unit ptr = Sqlite.slot_load db_slot
+let _ : unit = c_free db_slot
+
+if rc_open != Sqlite.sqlite_ok then
+  print "sqlite error path failed: open"
+else
+  let s_slot : unit ptr = Sqlite.slot_alloc (c_ptr_size ()) in
+  let _ : unit = c_store_ptr s_slot (c_null ()) in
+  let rc_bad : int = Sqlite.prepare_into db "select from" s_slot in
+  let _ : unit = c_free s_slot in
+  if rc_bad == Sqlite.sqlite_ok then
+    let _ : int = Sqlite.close_rc db in
+    print "sqlite error path failed: expected prepare error"
+  else
+    let msg : string = Sqlite.sqlite3_errmsg db in
+    let _ : int = Sqlite.close_rc db in
+    if msg == "" then print "sqlite error path failed: empty errmsg" else print "sqlite error path ok"

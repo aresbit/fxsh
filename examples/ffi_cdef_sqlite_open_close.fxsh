@@ -1,9 +1,11 @@
 # cdef/c_include/c_const_int MVP for sqlite
+# Run with:
+#   FXSH_LDFLAGS='-lsqlite3' ./bin/fxsh --native-codegen examples/ffi_cdef_sqlite_open_close.fxsh
 let _ : unit = c_include "sqlite3.h"
 let _ : unit = cdef "typedef struct sqlite3 sqlite3;"
 
-let sqlite3_open : string -> unit ptr -> c_int = "c:/usr/lib/libsqlite3.dylib:sqlite3_open"
-let sqlite3_close : unit ptr -> c_int = "c:/usr/lib/libsqlite3.dylib:sqlite3_close"
+let sqlite3_open : string -> unit ptr -> c_int = "c::sqlite3_open"
+let sqlite3_close : unit ptr -> c_int = "c::sqlite3_close"
 
 let sqlite_ok : int = c_const_int "SQLITE_OK"
 

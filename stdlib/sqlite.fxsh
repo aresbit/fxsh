@@ -1,0 +1,46 @@
+# sqlite.fxsh - SQLite3 FFI declarations for fxsh native-codegen.
+# Run callers with: FXSH_LDFLAGS='-lsqlite3' ./bin/fxsh --native-codegen <file.fxsh>
+
+let sqlite3_open : string -> unit ptr -> c_int = "c::sqlite3_open"
+let sqlite3_close : unit ptr -> c_int = "c::sqlite3_close"
+let sqlite3_errmsg : unit ptr -> string = "c::sqlite3_errmsg"
+let sqlite3_prepare_v2 : unit ptr -> string -> c_int -> unit ptr -> unit ptr -> c_int = "c::sqlite3_prepare_v2"
+let sqlite3_step : unit ptr -> c_int = "c::sqlite3_step"
+let sqlite3_finalize : unit ptr -> c_int = "c::sqlite3_finalize"
+let sqlite3_bind_int : unit ptr -> c_int -> c_int -> c_int = "c::sqlite3_bind_int"
+let sqlite3_bind_text : unit ptr -> c_int -> string -> c_int -> unit ptr -> c_int = "c::sqlite3_bind_text"
+let sqlite3_column_int : unit ptr -> c_int -> c_int = "c::sqlite3_column_int"
+let sqlite3_column_text : unit ptr -> c_int -> string = "c::sqlite3_column_text"
+
+let _ : unit = c_include "sqlite3.h"
+let _ : unit = cdef "typedef struct sqlite3 sqlite3;"
+let _ : unit = cdef "typedef struct sqlite3_stmt sqlite3_stmt;"
+
+let sqlite_ok : int = c_const_int "SQLITE_OK"
+let sqlite_row : int = c_const_int "SQLITE_ROW"
+let sqlite_done : int = c_const_int "SQLITE_DONE"
+
+# Lightweight helpers that stay within current native-codegen stable subset.
+let slot_alloc : int -> unit ptr = fn n -> c_malloc n
+let slot_load : unit ptr -> unit ptr = fn slot -> c_load_ptr slot
+
+let open_into : string -> unit ptr -> int = fn path slot ->
+  c_int_to_int (sqlite3_open path slot)
+
+let close_rc : unit ptr -> int = fn db ->
+  c_int_to_int (sqlite3_close db)
+
+let prepare_into : unit ptr -> string -> unit ptr -> int = fn db sql slot ->
+  c_int_to_int (sqlite3_prepare_v2 db sql (int_to_c_int (-1)) slot (c_null ()))
+
+let step_rc : unit ptr -> int = fn stmt ->
+  c_int_to_int (sqlite3_step stmt)
+
+let finalize_rc : unit ptr -> int = fn stmt ->
+  c_int_to_int (sqlite3_finalize stmt)
+
+let bind_int_rc : unit ptr -> int -> int -> int = fn stmt idx v ->
+  c_int_to_int (sqlite3_bind_int stmt (int_to_c_int idx) (int_to_c_int v))
+
+let bind_text_rc : unit ptr -> int -> string -> int = fn stmt idx text ->
+  c_int_to_int (sqlite3_bind_text stmt (int_to_c_int idx) text (int_to_c_int (-1)) (c_sqlite_transient ()))

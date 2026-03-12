@@ -1872,6 +1872,7 @@ static void gen_call(codegen_ctx_t *ctx, fxsh_ast_node_t *ast) {
                              cg_name_eq(fname, "capture_release") ||
                              cg_name_eq(fname, "c_include") || cg_name_eq(fname, "cdef") ||
                              cg_name_eq(fname, "c_const_int") ||
+                             cg_name_eq(fname, "c_sqlite_transient") ||
                              cg_name_eq(fname, "c_ptr_size") || cg_name_eq(fname, "c_load_ptr") ||
                              cg_name_eq(fname, "c_store_ptr");
         bool can_builtin = allow_builtin || force_builtin;
@@ -2517,6 +2518,13 @@ static void gen_call(codegen_ctx_t *ctx, fxsh_ast_node_t *ast) {
         if (can_builtin && cg_name_eq(fname, "c_null")) {
             if (sp_dyn_array_size(flat_args) == 1 && ast_is_unit_literal(flat_args[0])) {
                 emit_raw(ctx, "((void*)0)");
+                sp_dyn_array_free(flat_args);
+                return;
+            }
+        }
+        if (can_builtin && cg_name_eq(fname, "c_sqlite_transient")) {
+            if (sp_dyn_array_size(flat_args) == 1 && ast_is_unit_literal(flat_args[0])) {
+                emit_raw(ctx, "((void*)-1)");
                 sp_dyn_array_free(flat_args);
                 return;
             }

@@ -1364,6 +1364,11 @@ static void ensure_builtin_env(fxsh_type_env_t *env) {
                                    fxsh_type_apply(fxsh_type_con(TYPE_PTR), fxsh_type_var(a)));
         type_env_bind(env, sp_str_lit("c_null"), sc);
     }
+    if (!type_env_lookup(*env, sp_str_lit("c_sqlite_transient"))) {
+        fxsh_type_t *ret_ptr = fxsh_type_apply(fxsh_type_con(TYPE_PTR), fxsh_type_con(TYPE_UNIT));
+        type_env_bind(env, sp_str_lit("c_sqlite_transient"),
+                      mk_mono_scheme(fxsh_type_arrow(fxsh_type_con(TYPE_UNIT), ret_ptr)));
+    }
     if (!type_env_lookup(*env, sp_str_lit("c_include"))) {
         type_env_bind(env, sp_str_lit("c_include"),
                       mk_mono_scheme(fxsh_type_arrow(fxsh_type_con(TYPE_STRING),

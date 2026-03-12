@@ -115,6 +115,11 @@ test-native-codegen: $(NAME)
 	@echo "Running native-codegen smoke tests..."
 	@sh $(TESTS_DIR)/integration/native_codegen.sh ./$(BIN_DIR)/$(NAME)
 
+.PHONY: test-sqlite-native
+test-sqlite-native: $(NAME)
+	@echo "Running sqlite native-codegen integration test..."
+	@sh $(TESTS_DIR)/integration/sqlite_native_codegen.sh ./$(BIN_DIR)/$(NAME)
+
 .PHONY: test-type-annotations
 test-type-annotations: $(NAME)
 	@echo "Running type annotation integration tests..."
@@ -196,6 +201,7 @@ help:
 	@echo "  make test-closure - Run closure integration tests (interpreter)"
 	@echo "  make test-closure-native - Run closure consistency tests in native mode"
 	@echo "  make test-native-codegen - Run native-codegen smoke tests"
+	@echo "  make test-sqlite-native - Run sqlite native-codegen integration test"
 	@echo "  make test-type-annotations - Run type annotation integration tests"
 	@echo "  make test-records - Run row-polymorphic record integration tests"
 	@echo "  make test-comptime - Run comptime integration tests"
@@ -212,7 +218,8 @@ help:
 cimport-sqlite:
 	@python3 tools/fxsh_cimport.py \
 		--header sqlite3.h \
-		--lib /usr/lib/libsqlite3.dylib \
 		--symbol-prefix sqlite3_ \
 		--enum-prefix SQLITE_ \
 		--out examples/sqlite3_bindings.fxsh
+	@echo "Generated examples/sqlite3_bindings.fxsh (c::sqlite3_* dynamic bindings)."
+	@echo "Run with: FXSH_LDFLAGS='-lsqlite3' ./bin/fxsh --native-codegen <file.fxsh>"

@@ -904,6 +904,15 @@ static rv_value_t *eval_builtin_call(sp_str_t name, fxsh_ast_list_t args, rv_env
         /* Interpreter fallback has no real raw pointers; use 0 sentinel. */
         return rv_int(0);
     }
+    if (builtin_name_eq(name, "c_sqlite_transient")) {
+        if (sp_dyn_array_size(av) != 1 || av[0]->kind != RV_UNIT) {
+            *err = ERR_INVALID_INPUT;
+            fprintf(stderr, "Runtime error: c_sqlite_transient expects unit\n");
+            return NULL;
+        }
+        /* Interpreter fallback models raw pointers as integer sentinels. */
+        return rv_int(-1);
+    }
     if (builtin_name_eq(name, "c_include")) {
         if (sp_dyn_array_size(av) != 1 || av[0]->kind != RV_STRING) {
             *err = ERR_INVALID_INPUT;
